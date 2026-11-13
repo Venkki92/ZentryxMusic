@@ -1,0 +1,156 @@
+=== ZENTRYX NEXTCLOUD STREAM DIAGNOSTIC REPORT ===
+Generated: 2026-11-11T10:31:51.281Z
+User: venkki
+Server: https://cloud.zentryx.bg
+Folder: /Music
+Total Tracks Indexed: 171
+Current Track: Blue Plz S5E28 (Blue Plz S5E28.mp3)
+
+--- RECENT CLIENT & STREAM EVENTS (22) ---
+[12:09:33 PM.448] [ERROR] PLAYBACK_TERMINATED   Blue Plz S5E28.mp3
+Details: All candidate streaming endpoints failed. Open the Settings tab to inspect the server response body and wire logs.
+[12:09:33 PM.386] [ERROR] BUFFER_FETCH_3_ERROR [GET] (HTTP 500) /api/nextcloud/remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3
+Details: Nextcloud server returned HTTP 500  on [Canonical DAV Files]
+[12:09:26 PM.512] [INFO] BUFFER_FETCH_3 [GET]  /api/nextcloud/remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3
+Details: Attempting authenticated buffer fetch on [Canonical DAV Files]
+[12:09:26 PM.512] [WARN] BLOB_PLAY_2_ERROR   /api/nextcloud/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3
+Details: Audio playback rejected blob stream: Failed to load because no supported source was found.
+[12:09:19 PM.658] [INFO] BUFFER_FETCH_2 [GET]  /api/nextcloud/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3
+Details: Attempting authenticated buffer fetch on [Legacy WebDAV]
+[12:09:19 PM.658] [ERROR] BUFFER_FETCH_1_ERROR [GET] (HTTP 500) /api/audio-stream?path=WoW%2520Radio%2FBluePlz%2FBlue%2520Plz%2520S5E28.mp3
+Details: Nextcloud server returned HTTP 500  on [Canonical DAV Files]
+[12:09:13 PM.270] [INFO] BUFFER_FETCH_1 [GET]  /api/audio-stream?path=WoW%2520Radio%2FBluePlz%2FBlue%2520Plz%2520S5E28.mp3
+Details: Attempting authenticated buffer fetch on [Canonical DAV Files]
+[12:09:13 PM.270] [WARN] DIRECT_TRY_3_FAILED   /api/nextcloud/remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D
+Details: Direct play notice on [Canonical DAV Files]: Failed to load because no supported source was found.. Switching to next candidate...
+[12:09:06 PM.017] [INFO] DIRECT_TRY_3   /api/nextcloud/remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D
+Details: Trying direct media stream on [Canonical DAV Files]
+[12:09:06 PM.017] [WARN] DIRECT_TRY_2_FAILED   /api/nextcloud/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D
+Details: Direct play notice on [Legacy WebDAV]: Failed to load because no supported source was found.. Switching to next candidate...
+[12:08:58 PM.917] [INFO] DIRECT_TRY_2   /api/nextcloud/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D
+Details: Trying direct media stream on [Legacy WebDAV]
+[12:08:58 PM.917] [WARN] DIRECT_TRY_1_FAILED   /api/audio-stream?path=WoW%2520Radio%2FBluePlz%2FBlue%2520Plz%2520S5E28.mp3&auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D
+Details: Direct play notice on [Resilient Audio Pipeline]: Failed to load because no supported source was found.. Switching to next candidate...
+[12:08:46 PM.734] [INFO] DIRECT_TRY_1   /api/audio-stream?path=WoW%2520Radio%2FBluePlz%2FBlue%2520Plz%2520S5E28.mp3&auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D
+Details: Trying direct media stream on [Resilient Audio Pipeline]
+[12:08:46 PM.734] [INFO] PLAY_REQUEST   Blue Plz S5E28.mp3
+Details: Starting playback sequence for "Blue Plz S5E28" (32.6 MB) across 3 candidate endpoints
+[12:08:45 PM.527] [INFO] DIRECT_TRY_1   /api/audio-stream?path=WoW%2520Radio%2FEpic%2Fwow-epic-04-15-06.mp3&auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D
+Details: Trying direct media stream on [Resilient Audio Pipeline]
+[12:08:45 PM.527] [INFO] PLAY_REQUEST   wow-epic-04-15-06.mp3
+Details: Starting playback sequence for "wow-epic-04-15-06" (45.7 MB) across 3 candidate endpoints
+[12:08:44 PM.719] [INFO] DIRECT_TRY_3   /api/nextcloud/remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D
+Details: Trying direct media stream on [Canonical DAV Files]
+[12:08:44 PM.719] [WARN] DIRECT_TRY_2_FAILED   /api/nextcloud/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D
+Details: Direct play notice on [Legacy WebDAV]: Failed to load because no supported source was found.. Switching to next candidate...
+[12:08:37 PM.300] [INFO] DIRECT_TRY_2   /api/nextcloud/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D
+Details: Trying direct media stream on [Legacy WebDAV]
+[12:08:37 PM.300] [WARN] DIRECT_TRY_1_FAILED   /api/audio-stream?path=WoW%2520Radio%2FBluePlz%2FBlue%2520Plz%2520S5E28.mp3&auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D
+Details: Direct play notice on [Resilient Audio Pipeline]: Failed to load because no supported source was found.. Switching to next candidate...
+[12:08:29 PM.974] [INFO] DIRECT_TRY_1   /api/audio-stream?path=WoW%2520Radio%2FBluePlz%2FBlue%2520Plz%2520S5E28.mp3&auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D
+Details: Trying direct media stream on [Resilient Audio Pipeline]
+[12:08:29 PM.974] [INFO] PLAY_REQUEST   Blue Plz S5E28.mp3
+Details: Starting playback sequence for "Blue Plz S5E28" (32.6 MB) across 3 candidate endpoints
+
+--- RAW SERVER PROXY WIRE LOGS (/tmp/proxy.log) ---
+[2026-11-11T09:37:35.378Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T09:37:36.015Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T09:37:55.025Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T09:37:55.209Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T09:37:56.909Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T09:37:57.076Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T09:50:46.152Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T09:50:46.753Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T09:50:47.857Z] REQ GET /status.php -> cloud.zentryx.bg/status.php (Auth: MISSING, Range: none)
+[2026-11-11T09:50:49.230Z] RES 200 GET /status.php (Type: application/json, Range: none, Len: unknown)
+[2026-11-11T09:50:49.303Z] REQ PROPFIND /remote.php/dav/files/venkki/ -> cloud.zentryx.bg/remote.php/dav/files/venkki/ (Auth: PRESENT, Range: none)
+[2026-11-11T09:50:49.566Z] RES 207 PROPFIND /remote.php/dav/files/venkki/ (Type: application/xml; charset=utf-8, Range: none, Len: unknown)
+[2026-11-11T09:50:49.629Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-1024)
+[2026-11-11T09:50:50.514Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Type: audio/mpeg, Range: bytes 0-1024/34200069, Len: 1025)
+[2026-11-11T09:50:50.628Z] REQ GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 -> cloud.zentryx.bg/remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-1024)
+[2026-11-11T09:50:51.123Z] RES 206 GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Type: audio/mpeg, Range: bytes 0-1024/34200069, Len: 1025)
+[2026-11-11T09:50:53.548Z] REQ GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T09:50:53.739Z] RES 206 GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T09:51:00.446Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-1024)
+[2026-11-11T09:51:00.624Z] RES 304 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Type: unknown, Range: none, Len: unknown)
+[2026-11-11T09:51:00.693Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=1025-34200068)
+[2026-11-11T09:51:00.847Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Type: audio/mpeg, Range: bytes 1025-34200068/34200069, Len: 34199044)
+[2026-11-11T09:54:27.404Z] REQ GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 -> cloud.zentryx.bg/remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: none)
+[2026-11-11T09:54:27.686Z] RES 200 GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Type: audio/mpeg, Range: none, Len: 34200069)
+[2026-11-11T09:55:05.281Z] REQ HEAD /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: none)
+[2026-11-11T09:55:05.565Z] RES 200 HEAD /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: none, Len: 34200069)
+[2026-11-11T09:55:15.157Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: none)
+[2026-11-11T09:55:15.333Z] RES 200 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: none, Len: 34200069)
+[2026-11-11T09:55:33.366Z] REQ HEAD /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-1024)
+[2026-11-11T09:55:33.592Z] RES 500 HEAD /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: application/xml; charset=utf-8, Range: none, Len: unknown)
+[2026-11-11T09:55:33.592Z] ERROR BODY (500):
+
+----------------------------------------
+[2026-11-11T09:55:39.896Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-1024)
+[2026-11-11T09:55:40.076Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-1024/34200069, Len: 1025)
+[2026-11-11T09:55:46.835Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-1024)
+[2026-11-11T09:55:47.349Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-1024/34200069, Len: 1025)
+[2026-11-11T09:55:55.585Z] REQ HEAD /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: none)
+[2026-11-11T09:55:55.757Z] RES 200 HEAD /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: none, Len: 34200069)
+[2026-11-11T09:57:21.162Z] REQ HEAD /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: none)
+[2026-11-11T09:57:21.330Z] RES 200 HEAD /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: none, Len: 34200069)
+[2026-11-11T09:57:27.005Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-1024)
+[2026-11-11T09:57:27.173Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-1024/34200069, Len: 1025)
+[2026-11-11T09:58:53.770Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T09:58:54.043Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T09:58:55.625Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T09:58:55.813Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T09:59:02.219Z] REQ GET /status.php -> cloud.zentryx.bg/status.php (Auth: MISSING, Range: none)
+[2026-11-11T09:59:02.446Z] RES 200 GET /status.php (Type: application/json, Range: none, Len: unknown)
+[2026-11-11T09:59:02.514Z] REQ PROPFIND /remote.php/dav/files/venkki/ -> cloud.zentryx.bg/remote.php/dav/files/venkki/ (Auth: PRESENT, Range: none)
+[2026-11-11T09:59:02.698Z] RES 207 PROPFIND /remote.php/dav/files/venkki/ (Type: application/xml; charset=utf-8, Range: none, Len: unknown)
+[2026-11-11T09:59:02.766Z] REQ GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 -> cloud.zentryx.bg/remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-1024)
+[2026-11-11T09:59:03.503Z] RES 206 GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Type: audio/mpeg, Range: bytes 0-1024/34200069, Len: 1025)
+[2026-11-11T09:59:08.807Z] REQ GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T09:59:08.978Z] RES 206 GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T09:59:15.514Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-1024)
+[2026-11-11T09:59:15.695Z] RES 304 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Type: audio/mpeg, Range: none, Len: unknown)
+[2026-11-11T09:59:15.760Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=1025-34200068)
+[2026-11-11T09:59:15.916Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Type: audio/mpeg, Range: bytes 1025-34200068/34200069, Len: 34199044)
+[2026-11-11T09:59:22.387Z] REQ GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 -> cloud.zentryx.bg/remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: none)
+[2026-11-11T09:59:22.568Z] RES 200 GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Type: audio/mpeg, Range: none, Len: 34200069)
+[2026-11-11T10:00:11.801Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T10:00:11.978Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T10:02:58.719Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T10:02:58.942Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T10:03:04.787Z] AUDIO_STREAM GET -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-1024)
+[2026-11-11T10:03:05.441Z] AUDIO_STREAM RES 206 (Type: audio/mpeg, Range: bytes 0-1024/34200069, Len: 1025)
+[2026-11-11T10:04:13.623Z] AUDIO_STREAM GET -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T10:04:13.833Z] AUDIO_STREAM RES 206 (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T10:04:19.424Z] AUDIO_STREAM GET -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-1024)
+[2026-11-11T10:04:19.884Z] AUDIO_STREAM RES 206 (Type: audio/mpeg, Range: bytes 0-1024/34200069, Len: 1025)
+[2026-11-11T10:04:50.850Z] AUDIO_STREAM GET -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T10:04:51.179Z] AUDIO_STREAM RES 206 (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T10:05:13.953Z] AUDIO_STREAM GET -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-1024)
+[2026-11-11T10:05:14.124Z] AUDIO_STREAM RES 206 (Type: audio/mpeg, Range: bytes 0-1024/34200069, Len: 1025)
+[2026-11-11T10:06:20.736Z] AUDIO_STREAM GET -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T10:06:20.924Z] AUDIO_STREAM RES 206 (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T10:06:24.222Z] AUDIO_STREAM GET -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T10:06:24.428Z] AUDIO_STREAM RES 206 (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T10:08:38.517Z] AUDIO_STREAM GET -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T10:08:39.117Z] AUDIO_STREAM RES 206 (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T10:08:45.100Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T10:08:45.317Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T10:08:52.515Z] REQ GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T10:08:52.799Z] RES 206 GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T10:08:53.341Z] AUDIO_STREAM GET -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/Epic/wow-epic-04-15-06.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T10:08:53.894Z] AUDIO_STREAM RES 206 (Type: audio/mpeg, Range: bytes 0-47967030/47967031, Len: 47967031)
+[2026-11-11T10:08:54.531Z] AUDIO_STREAM GET -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T10:08:54.984Z] AUDIO_STREAM RES 206 (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T10:09:06.718Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T10:09:06.906Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T10:09:13.817Z] REQ GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D -> cloud.zentryx.bg/remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-)
+[2026-11-11T10:09:14.010Z] RES 206 GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3?auth=dmVua2tpOmg4b2Z1aEJndUQxNGxiMURsSEN5T1FQS3ZjVGxOSHB6TnFWd01XaWNzWGRIdGNvZTRUVFVMUm9vZTFsRWVYWWRHM0pRcmpWSw%3D%3D (Type: audio/mpeg, Range: bytes 0-34200068/34200069, Len: 34200069)
+[2026-11-11T10:09:21.065Z] AUDIO_STREAM GET -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: none)
+[2026-11-11T10:09:21.250Z] AUDIO_STREAM RES 200 (Type: audio/mpeg, Range: none, Len: 34200069)
+[2026-11-11T10:09:27.454Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=0-1024)
+[2026-11-11T10:09:27.636Z] RES 304 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Type: audio/mpeg, Range: none, Len: unknown)
+[2026-11-11T10:09:27.699Z] REQ GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 -> cloud.zentryx.bg/remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: bytes=1025-34200068)
+[2026-11-11T10:09:27.872Z] RES 206 GET /remote.php/webdav/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Type: audio/mpeg, Range: bytes 1025-34200068/34200069, Len: 34199044)
+[2026-11-11T10:09:34.314Z] REQ GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 -> cloud.zentryx.bg/remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Auth: PRESENT, Range: none)
+[2026-11-11T10:09:34.498Z] RES 200 GET /remote.php/dav/files/venkki/WoW%20Radio/BluePlz/Blue%20Plz%20S5E28.mp3 (Type: audio/mpeg, Range: none, Len: 34200069)

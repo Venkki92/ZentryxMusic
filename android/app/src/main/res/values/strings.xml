@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">Zentryx Music</string>
+    <string name="login_title">Connect to Nextcloud</string>
+    <string name="server_url">Server URL</string>
+    <string name="username">Username</string>
+    <string name="password">Password / App Password</string>
+    <string name="login_button">Sign In</string>
+    <string name="login_flow_v2_button">Log in via browser</string>
+    <string name="test_connection">Test Connection</string>
+    <string name="library_title">Music Library</string>
+    <string name="tab_songs">Songs</string>
+    <string name="tab_albums">Albums</string>
+    <string name="tab_artists">Artists</string>
+    <string name="search_hint">Search songs, albums, artists…</string>
+</resources>

@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+/* 8-Inch 1024x600 Automotive Headunit Landscape Ergonomics */
+@media (max-height: 640px) and (min-width: 768px) {
+  .headunit-header-bar {
+    min-height: 3.25rem;
+    padding-top: 0.35rem;
+    padding-bottom: 0.35rem;
+  }
+
+  .headunit-main-viewport {
+    padding-top: 0.65rem;
+    padding-bottom: 0.65rem;
+  }
+
+  .headunit-player-card {
+    padding: 1.15rem 1.5rem;
+  }
+
+  .headunit-player-grid {
+    gap: 1.25rem;
+  }
+
+  .headunit-artwork-box {
+    width: 12.75rem;
+    height: 12.75rem;
+  }
+}
