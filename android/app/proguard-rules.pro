@@ -1,8 +1,10 @@
 # R8 / ProGuard Configuration for Zentryx Music
 # Optimized for AutoChips AC8259P / Android 9 (API 28) Headunit
 
-# Keep Domain Models used in Room & Navigation
+# Keep Domain Models, DSP, and Visualizer classes used in Room, AudioFx & Navigation
 -keep class com.zentryx.music.models.** { *; }
+-keep class com.zentryx.music.dsp.** { *; }
+-keep class com.zentryx.music.visualizer.** { *; }
 
 # Media3 & ExoPlayer
 -keep class androidx.media3.** { *; }

@@ -9,6 +9,7 @@ sealed class Screen(val route: String) {
     data object Player : Screen("player")
     data object Search : Screen("search")
     data object Settings : Screen("settings")
+    data object DspConsole : Screen("dsp_console")
     data object ScanStatus : Screen("scan_status")
     data object AlbumDetail : Screen("album/{albumName}/{artistName}") {
         fun createRoute(albumName: String, artistName: String): String =

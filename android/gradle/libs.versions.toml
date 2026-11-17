@@ -21,7 +21,7 @@ room = "2.6.1"
 paging = "3.3.4"
 
 # Dependency Injection (Hilt)
-hilt = "2.52"
+hilt = "2.55"
 hiltNavigationCompose = "1.2.0"
 
 # Networking & WebDAV

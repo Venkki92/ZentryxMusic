@@ -7,6 +7,7 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.zentryx.music.ui.screens.DspConsoleScreen
 import com.zentryx.music.ui.screens.LibraryScreen
 import com.zentryx.music.ui.screens.LoginScreen
 import com.zentryx.music.ui.screens.PlayerScreen
@@ -68,6 +69,9 @@ fun ZentryxNavHost(
                 viewModel = playerViewModel,
                 onNavigateBack = {
                     navController.popBackStack()
+                },
+                onNavigateToDsp = {
+                    navController.navigate(Screen.DspConsole.route)
                 }
             )
         }
@@ -92,10 +96,23 @@ fun ZentryxNavHost(
                 onNavigateBack = {
                     navController.popBackStack()
                 },
+                onNavigateToDsp = {
+                    navController.navigate(Screen.DspConsole.route)
+                },
                 onLoggedOut = {
                     navController.navigate(Screen.Login.route) {
                         popUpTo(0)
                     }
+                }
+            )
+        }
+
+        composable(Screen.DspConsole.route) {
+            val settingsViewModel: SettingsViewModel = hiltViewModel()
+            DspConsoleScreen(
+                viewModel = settingsViewModel,
+                onNavigateBack = {
+                    navController.popBackStack()
                 }
             )
         }

@@ -4,7 +4,6 @@ import android.content.Context
 import com.zentryx.music.player.CacheDataSourceFactory
 import com.zentryx.music.player.PlayerPreferences
 import com.zentryx.music.player.SettingsPreferences
-import com.zentryx.music.player.ZentryxPlayerManager
 import com.zentryx.music.security.EncryptedDataStore
 import dagger.Module
 import dagger.Provides
@@ -37,12 +36,4 @@ object PlayerModule {
     fun provideSettingsPreferences(
         @ApplicationContext context: Context
     ): SettingsPreferences = SettingsPreferences(context)
-
-    @Provides
-    @Singleton
-    fun provideZentryxPlayerManager(
-        @ApplicationContext context: Context,
-        cacheDataSourceFactory: CacheDataSourceFactory,
-        playerPreferences: PlayerPreferences
-    ): ZentryxPlayerManager = ZentryxPlayerManager(context, cacheDataSourceFactory, playerPreferences)
 }

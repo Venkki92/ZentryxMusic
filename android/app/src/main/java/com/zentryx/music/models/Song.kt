@@ -34,4 +34,9 @@ data class Song(
             val remainingSeconds = totalSeconds % 60
             return "%d:%02d".format(minutes, remainingSeconds)
         }
+
+    val format: AudioFormat
+        get() = AudioFormat.fromExtension(relativePath.substringAfterLast('.', ""))
+            ?: AudioFormat.entries.firstOrNull { mimeType.contains(it.extension, ignoreCase = true) }
+            ?: AudioFormat.MP3
 }

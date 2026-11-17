@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.view.animation.AccelerateDecelerateInterpolator
+import androidx.core.content.ContextCompat
 import androidx.media3.exoplayer.ExoPlayer
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -72,7 +73,12 @@ class EngineStandbyController @Inject constructor(
             addAction("com.topway.acc_on")
         }
         try {
-            context.registerReceiver(ignitionReceiver, filter)
+            ContextCompat.registerReceiver(
+                context,
+                ignitionReceiver,
+                filter,
+                ContextCompat.RECEIVER_EXPORTED
+            )
         } catch (e: Exception) {
             // Context register fallback
         }
