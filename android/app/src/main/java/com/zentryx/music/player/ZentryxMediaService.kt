@@ -133,12 +133,19 @@ class ZentryxMediaService : MediaLibraryService() {
             .setSessionCommand(SessionCommand(ACTION_TOGGLE_SHUFFLE, Bundle.EMPTY))
             .build()
 
-        val eqButton = CommandButton.Builder(CommandButton.ICON_EQUALIZER)
+        val eqButton = CommandButton.Builder(CommandButton.ICON_UNDEFINED)
             .setDisplayName("Cycle EQ")
             .setSessionCommand(SessionCommand(ACTION_CYCLE_EQ_PRESET, Bundle.EMPTY))
+            .setCustomIconResId(R.drawable.ic_car_equalizer)
             .build()
 
-        session.setCustomLayout(ImmutableList.of(favButton, shuffleButton, eqButton))
+        val surroundButton = CommandButton.Builder(CommandButton.ICON_UNDEFINED)
+            .setDisplayName("Surround 3D")
+            .setSessionCommand(SessionCommand(ACTION_CYCLE_SURROUND, Bundle.EMPTY))
+            .setCustomIconResId(R.drawable.ic_car_surround)
+            .build()
+
+        session.setCustomLayout(ImmutableList.of(favButton, shuffleButton, eqButton, surroundButton))
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? {

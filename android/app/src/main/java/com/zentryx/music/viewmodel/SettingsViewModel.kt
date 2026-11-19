@@ -184,9 +184,17 @@ class SettingsViewModel @Inject constructor(
     val customDspPresets: StateFlow<List<DspPreset16>> = dspAudioEngine.customPresets
     val isDspAttached: StateFlow<Boolean> = dspAudioEngine.isAttached
     val isGlobalEqAttached: StateFlow<Boolean> = dspAudioEngine.isGlobalEqAttached
+    val isHardwareVirtualizerActive: StateFlow<Boolean> = dspAudioEngine.isHardwareVirtualizerActive
     val activeOutputRoute: StateFlow<AudioOutputRoute> = dspAudioEngine.activeOutputRoute
     val activeCompareSlot: StateFlow<String> = dspAudioEngine.activeCompareSlot
     val slotBPresetName: StateFlow<String> = dspAudioEngine.slotBPresetName
+
+    // Automated Cabin Noise & Speed Adaptive DSP Profile Switching
+    val adaptiveCabinConfig: StateFlow<AdaptiveCabinConfig> = dspAudioEngine.adaptiveCabinConfig
+    val adaptiveEvaluationState: StateFlow<AdaptiveEvaluationState> = dspAudioEngine.adaptiveEvaluationState
+    val adaptiveDspDelta: StateFlow<AdaptiveDspDelta> = dspAudioEngine.adaptiveDspDelta
+    val cabinNoiseDb: StateFlow<Float?> = dspAudioEngine.cabinNoiseDb
+    val cabinMicStatus: StateFlow<CabinMicMonitorStatus> = dspAudioEngine.cabinMicStatus
 
     // Cabin RTA 5-Second Pink-Noise Auto-Calibration State
     private val _rtaRunning = MutableStateFlow(false)
@@ -464,6 +472,8 @@ class SettingsViewModel @Inject constructor(
     fun snapshotCurrentToSlotB() = dspAudioEngine.snapshotCurrentToSlotB()
     fun setHoldBypass(bypassed: Boolean) = dspAudioEngine.setHoldBypass(bypassed)
     fun selectOutputRouteManually(route: AudioOutputRoute) = dspAudioEngine.selectOutputRouteManually(route)
+    fun updateAdaptiveCabinConfig(config: AdaptiveCabinConfig) = dspAudioEngine.updateAdaptiveCabinConfig(config)
+    fun onRecordAudioPermissionGranted() = dspAudioEngine.restartCabinMicMonitorIfEnabled()
 
     fun purgeStreamCache() {
         viewModelScope.launch(ioDispatcher) {

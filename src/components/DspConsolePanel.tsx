@@ -48,6 +48,11 @@ import {
   buildDspResponseCurvePoints,
 } from '../utils/dspConsole';
 import { CabinRtaController, CabinRtaSweepResult, startCabinRtaSweep } from '../utils/cabinRta';
+import {
+  ADAPTIVE_CABIN_PROFILES,
+  AdaptiveCabinProfileId,
+  AdaptiveDspDelta,
+} from '../utils/adaptiveCabinProfile';
 
 interface DspConsolePanelProps {
   accentHex: string;
@@ -66,13 +71,27 @@ interface DspConsolePanelProps {
   activeOutputRoute?: AudioOutputRouteId;
   onSelectOutputRoute?: (route: AudioOutputRouteId) => void;
   getAudioContext?: () => AudioContext | null;
+  adaptiveCabinEnabled?: boolean;
+  adaptiveProfileId?: AdaptiveCabinProfileId;
+  adaptiveDspDelta?: AdaptiveDspDelta;
+  onToggleAdaptiveCabin?: () => void;
 }
 
 type DspSubTab = 'eq' | 'surround' | 'stage' | 'rta';
 
 const BAND_5_LABELS = ['60Hz', '250Hz', '1kHz', '4kHz', '12kHz'] as const;
 const HPF_OPTIONS: HpfCutoffHz[] = [0, 60, 80, 100, 120];
-const SURROUND_ORDER: SurroundModeId[] = ['off', 'logic7_surround', 'concert_hall', 'studio_focused'];
+const HARMAN_SURROUND_ORDER: SurroundModeId[] = [
+  'off',
+  'logic7_surround',
+  'concert_hall',
+  'studio_focused',
+];
+const DOLBY_VIRTUAL_SURROUND_ORDER: SurroundModeId[] = [
+  'dolby_pro_logic_ii',
+  'dolby_atmos_virtual',
+  'virtual_surround_360',
+];
 
 function formatFreqShort(freq: number): string {
   if (freq >= 1000) {
@@ -99,6 +118,10 @@ export const DspConsolePanel: React.FC<DspConsolePanelProps> = ({
   activeOutputRoute = 'headunit_speakers',
   onSelectOutputRoute,
   getAudioContext,
+  adaptiveCabinEnabled = false,
+  adaptiveProfileId = 'quiet',
+  adaptiveDspDelta,
+  onToggleAdaptiveCabin,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<DspSubTab>('eq');
   const [newPresetName, setNewPresetName] = useState('');
@@ -301,7 +324,7 @@ export const DspConsolePanel: React.FC<DspConsolePanelProps> = ({
     { id: 'eq', label: 'EQ & Presets', icon: <Sliders className="w-4 h-4" /> },
     {
       id: 'surround',
-      label: 'Logic 7 Surround',
+      label: 'Surround 3D',
       badge: dspSettings.surroundMode !== 'off' ? activeSurroundInfo.shortLabel : undefined,
       icon: <Radio className="w-4 h-4" />,
     },
@@ -349,12 +372,34 @@ export const DspConsolePanel: React.FC<DspConsolePanelProps> = ({
               </h3>
               <p className="text-xs text-slate-400 truncate">
                 {activeSurroundInfo.label} · {dspSettings.crossoverSlopeDb} dB/oct Linkwitz-Riley ·{' '}
-                {dspSettings.roadNoiseEqEnabled ? `Road EQ +${roadNoiseContour.subBassDb} dB` : 'Road EQ Off'}
+                {adaptiveCabinEnabled
+                  ? `Auto Cabin: ${ADAPTIVE_CABIN_PROFILES[adaptiveProfileId].shortLabel}${adaptiveDspDelta && adaptiveDspDelta.gainDb > 0 ? ` (+${adaptiveDspDelta.gainDb} dB)` : ''}`
+                  : dspSettings.roadNoiseEqEnabled
+                    ? `Road EQ +${roadNoiseContour.subBassDb} dB`
+                    : 'Road EQ Off'}
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
+            {onToggleAdaptiveCabin && (
+              <button
+                type="button"
+                onClick={onToggleAdaptiveCabin}
+                className="min-h-[40px] px-3 py-1.5 rounded-xl text-[11px] font-bold border flex items-center gap-1.5 active:scale-95 transition-transform whitespace-nowrap"
+                style={
+                  adaptiveCabinEnabled
+                    ? { backgroundColor: `${accentHex}24`, borderColor: accentHex, color: accentHex }
+                    : { backgroundColor: 'rgba(0,0,0,0.6)', borderColor: '#334155', color: '#cbd5e1' }
+                }
+                title="Toggle Automated Cabin Noise & Speed DSP Profile Switching"
+              >
+                <Gauge className="w-3.5 h-3.5" />
+                <span>
+                  Auto Cabin: {adaptiveCabinEnabled ? ADAPTIVE_CABIN_PROFILES[adaptiveProfileId].shortLabel : 'Off'}
+                </span>
+              </button>
+            )}
             {onSnapshotSlotB && (
               <button
                 type="button"
@@ -909,13 +954,13 @@ export const DspConsolePanel: React.FC<DspConsolePanelProps> = ({
       )}
 
       {/* ============================================================ */}
-      {/* TAB 2: HARMAN LOGIC 7 SURROUND & ROAD-NOISE ACOUSTICS        */}
+      {/* TAB 2: HARMAN LOGIC 7, DOLBY SURROUND & VIRTUAL 3D ACOUSTICS */}
       {/* ============================================================ */}
       {activeSubTab === 'surround' && (
         <div className={`space-y-4 ${activeDisabledClass}`}>
-          {/* Harman Kardon Logic 7 / Surround Matrix Selector */}
+          {/* Surround Matrix Selector (Harman Logic 7 + Dolby Surround + 360° Virtualizer) */}
           <div className="bg-[#0b1120] border border-slate-800/80 rounded-2xl p-5 sm:p-6 shadow-xl space-y-5">
-            <div className="flex items-center justify-between gap-3 pb-3 border-b border-slate-800/60">
+            <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800/60">
               <div className="flex items-center gap-3">
                 <div
                   className="w-10 h-10 rounded-xl flex items-center justify-center border shrink-0"
@@ -924,64 +969,251 @@ export const DspConsolePanel: React.FC<DspConsolePanelProps> = ({
                   <Radio className="w-5 h-5" style={{ color: accentHex }} />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-white">Harman Logic 7 Surround Matrix</h3>
+                  <h3 className="text-base font-bold text-white">
+                    Surround Matrix — Harman Logic 7 · Dolby · Virtual 3D
+                  </h3>
                   <p className="text-xs text-slate-400">
-                    Mid/Side center vocal lock + Haas decorrelated ambient side reflections (virtual 5.1 cabin field)
+                    Mid/Side center lock, 90° Dolby Pro Logic II rear matrix, Atmos pinna height dome &amp; 360° cross-talk cancellation
                   </p>
                 </div>
               </div>
-              {dspSettings.monoFoldDown && (
-                <span className="text-[10px] font-mono font-bold px-2.5 py-1 rounded-lg bg-amber-500/15 text-amber-300 border border-amber-500/40">
-                  Mono Fold Active
+              <div className="flex items-center gap-2">
+                <span
+                  className="text-[10px] font-mono font-bold px-2.5 py-1 rounded-lg border"
+                  style={{
+                    backgroundColor: `${accentHex}14`,
+                    borderColor: `${accentHex}44`,
+                    color: accentHex,
+                  }}
+                >
+                  {activeSurroundInfo.badge}
                 </span>
-              )}
+                {dspSettings.monoFoldDown && (
+                  <span className="text-[10px] font-mono font-bold px-2.5 py-1 rounded-lg bg-amber-500/15 text-amber-300 border border-amber-500/40">
+                    Mono Fold Active
+                  </span>
+                )}
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
-              {SURROUND_ORDER.map((modeId) => {
-                const mode = SURROUND_MODES[modeId];
-                const isSelected = (dspSettings.surroundMode ?? 'off') === modeId;
-                return (
-                  <button
-                    key={modeId}
-                    type="button"
-                    onClick={() =>
-                      onChangeDspSettings((prev) => ({
-                        ...prev,
-                        surroundMode: modeId,
-                        monoFoldDown: modeId !== 'off' ? false : prev.monoFoldDown,
-                      }))
-                    }
-                    className={`min-h-[82px] p-3.5 rounded-xl border text-left transition-transform active:scale-95 flex flex-col justify-between ${
-                      isSelected
-                        ? 'bg-slate-800/90 text-white shadow'
-                        : 'border-slate-800 bg-black/40 text-slate-400 hover:text-white hover:border-slate-700'
-                    }`}
-                    style={isSelected ? { borderColor: accentHex } : {}}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span
-                        className="font-bold text-xs"
-                        style={isSelected ? { color: accentHex } : {}}
-                      >
-                        {mode.label}
-                      </span>
-                      {mode.haasLeftMs > 0 && (
-                        <span className="text-[10px] font-mono tabular-nums text-slate-500">
-                          {mode.haasLeftMs}ms
+            {/* Family 1: Stereo Direct & Harman Logic 7 */}
+            <div className="space-y-2">
+              <div className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
+                Stereo Direct &amp; Harman Logic 7 Series
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+                {HARMAN_SURROUND_ORDER.map((modeId) => {
+                  const mode = SURROUND_MODES[modeId];
+                  const isSelected = (dspSettings.surroundMode ?? 'off') === modeId;
+                  return (
+                    <button
+                      key={modeId}
+                      type="button"
+                      onClick={() =>
+                        onChangeDspSettings((prev) => ({
+                          ...prev,
+                          surroundMode: modeId,
+                          monoFoldDown: modeId !== 'off' ? false : prev.monoFoldDown,
+                        }))
+                      }
+                      className={`min-h-[82px] p-3.5 rounded-xl border text-left transition-transform active:scale-95 flex flex-col justify-between ${
+                        isSelected
+                          ? 'bg-slate-800/90 text-white shadow'
+                          : 'border-slate-800 bg-black/40 text-slate-400 hover:text-white hover:border-slate-700'
+                      }`}
+                      style={isSelected ? { borderColor: accentHex } : {}}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span
+                          className="font-bold text-xs"
+                          style={isSelected ? { color: accentHex } : {}}
+                        >
+                          {mode.label}
                         </span>
-                      )}
-                    </div>
-                    <p className="text-[11px] text-slate-400 leading-snug mt-1.5">
-                      {mode.tagline}
-                    </p>
-                  </button>
-                );
-              })}
+                        {mode.haasLeftMs > 0 && (
+                          <span className="text-[10px] font-mono tabular-nums text-slate-500">
+                            {mode.haasLeftMs}/{mode.haasRightMs}ms
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-slate-400 leading-snug mt-1.5">
+                        {mode.tagline}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
-            {/* Surround Intensity & Center Vocal Coherence */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* Family 2: Dolby Surround & Virtual 3D Engines */}
+            <div className="space-y-2">
+              <div className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
+                Dolby Surround &amp; Virtual 3D Spatializer Engines
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                {DOLBY_VIRTUAL_SURROUND_ORDER.map((modeId) => {
+                  const mode = SURROUND_MODES[modeId];
+                  const isSelected = (dspSettings.surroundMode ?? 'off') === modeId;
+                  return (
+                    <button
+                      key={modeId}
+                      type="button"
+                      onClick={() =>
+                        onChangeDspSettings((prev) => ({
+                          ...prev,
+                          surroundMode: modeId,
+                          monoFoldDown: false,
+                        }))
+                      }
+                      className={`min-h-[88px] p-3.5 rounded-xl border text-left transition-transform active:scale-95 flex flex-col justify-between ${
+                        isSelected
+                          ? 'bg-slate-800/90 text-white shadow'
+                          : 'border-slate-800 bg-black/40 text-slate-400 hover:text-white hover:border-slate-700'
+                      }`}
+                      style={isSelected ? { borderColor: accentHex } : {}}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span
+                          className="font-bold text-xs"
+                          style={isSelected ? { color: accentHex } : {}}
+                        >
+                          {mode.label}
+                        </span>
+                        <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-black/60 text-slate-300 border border-slate-700/80">
+                          {mode.badge}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 leading-snug mt-1.5">
+                        {mode.tagline}
+                      </p>
+                      <div className="flex items-center gap-2 mt-2 text-[9px] font-mono text-slate-500">
+                        <span>Haas {mode.haasLeftMs}/{mode.haasRightMs}ms</span>
+                        {mode.useAllPassPhase && <span>· 90° AP</span>}
+                        {mode.crosstalkCancelGain > 0 && <span>· XTC</span>}
+                        {mode.heightBoostMaxDb >= 3 && <span>· Height Dome</span>}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Live Cabin 3D Soundstage Field Radar */}
+            <div className="p-4 rounded-xl bg-black/50 border border-slate-800 flex flex-col sm:flex-row items-center gap-4">
+              <svg
+                viewBox="0 0 220 110"
+                className="w-56 h-28 shrink-0"
+                role="img"
+                aria-label="Live 3D Cabin Surround Soundstage Radar"
+              >
+                {/* Cabin Outline */}
+                <rect
+                  x="64"
+                  y="14"
+                  width="92"
+                  height="82"
+                  rx="22"
+                  fill="#0f172a"
+                  stroke="#334155"
+                  strokeWidth="1.5"
+                />
+                {/* Surround Rear/Side Wrap Field */}
+                {dspSettings.surroundMode !== 'off' && !dspSettings.monoFoldDown && (
+                  <>
+                    <ellipse
+                      cx="110"
+                      cy="58"
+                      rx={38 + (dspSettings.surroundIntensity / 100) * 58}
+                      ry={26 + (dspSettings.surroundIntensity / 100) * 20}
+                      fill={accentHex}
+                      fillOpacity={0.07 + (dspSettings.surroundIntensity / 100) * 0.12}
+                      stroke={accentHex}
+                      strokeOpacity={0.45}
+                      strokeDasharray="4 3"
+                      strokeWidth="1.2"
+                    />
+                    {/* Overhead Virtual Height Dome */}
+                    <circle
+                      cx="110"
+                      cy="52"
+                      r={10 + ((dspSettings.virtualHeight ?? 45) / 100) * (activeSurroundInfo.heightBoostMaxDb * 6.5)}
+                      fill="none"
+                      stroke={accentHex}
+                      strokeOpacity={0.28 + ((dspSettings.virtualHeight ?? 45) / 100) * 0.45}
+                      strokeWidth="1.5"
+                    />
+                    {/* Locked Dash Center Vocal Beam */}
+                    <path
+                      d={`M 110 18 L ${110 - 12 - (dspSettings.centerCoherence / 100) * 14} 44 L ${110 + 12 + (dspSettings.centerCoherence / 100) * 14} 44 Z`}
+                      fill={accentHex}
+                      fillOpacity={0.14 + (dspSettings.centerCoherence / 100) * 0.22}
+                    />
+                  </>
+                )}
+                {/* Front L / C / R & Rear Surround Speaker Nodes */}
+                <circle cx="72" cy="24" r="3.5" fill={accentHex} />
+                <circle cx="148" cy="24" r="3.5" fill={accentHex} />
+                <circle
+                  cx="110"
+                  cy="19"
+                  r="3.2"
+                  fill={dspSettings.surroundMode !== 'off' ? accentHex : '#475569'}
+                />
+                <circle
+                  cx="72"
+                  cy="84"
+                  r="3"
+                  fill={dspSettings.surroundMode !== 'off' ? accentHex : '#475569'}
+                />
+                <circle
+                  cx="148"
+                  cy="84"
+                  r="3"
+                  fill={dspSettings.surroundMode !== 'off' ? accentHex : '#475569'}
+                />
+                <text x="110" y="57" textAnchor="middle" fill="#cbd5e1" fontSize="8" fontFamily="monospace">
+                  {activeSurroundInfo.shortLabel.toUpperCase()}
+                </text>
+              </svg>
+
+              <div className="flex-1 grid grid-cols-2 gap-2.5 w-full text-[11px]">
+                <div className="p-2.5 rounded-lg bg-slate-900/70 border border-slate-800/80">
+                  <div className="text-[10px] text-slate-400">Matrix Topology</div>
+                  <div className="font-bold text-white mt-0.5">{activeSurroundInfo.label}</div>
+                </div>
+                <div className="p-2.5 rounded-lg bg-slate-900/70 border border-slate-800/80">
+                  <div className="text-[10px] text-slate-400">Decorrelation Engine</div>
+                  <div className="font-mono font-bold text-slate-200 mt-0.5">
+                    {dspSettings.surroundMode === 'off'
+                      ? 'Bypass (2.0)'
+                      : activeSurroundInfo.crosstalkCancelGain > 0
+                        ? '90° AP + Haas + XTC'
+                        : activeSurroundInfo.useAllPassPhase
+                          ? '90° All-Pass + Haas'
+                          : 'Dual Haas Matrix'}
+                  </div>
+                </div>
+                <div className="p-2.5 rounded-lg bg-slate-900/70 border border-slate-800/80">
+                  <div className="text-[10px] text-slate-400">Pinna Height Air (7.2 kHz)</div>
+                  <div className="font-mono font-bold mt-0.5" style={{ color: accentHex }}>
+                    {dspSettings.surroundMode === 'off'
+                      ? '0.0 dB'
+                      : `+${(activeSurroundInfo.heightBoostMaxDb * ((dspSettings.virtualHeight ?? 45) / 100)).toFixed(1)} dB`}
+                  </div>
+                </div>
+                <div className="p-2.5 rounded-lg bg-slate-900/70 border border-slate-800/80">
+                  <div className="text-[10px] text-slate-400">Center Dash Lock (2.2 kHz)</div>
+                  <div className="font-mono font-bold mt-0.5" style={{ color: accentHex }}>
+                    {dspSettings.surroundMode === 'off'
+                      ? '0.0 dB'
+                      : `+${(activeSurroundInfo.centerBoostMaxDb * (dspSettings.centerCoherence / 100)).toFixed(1)} dB`}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Surround Immersion, Center Vocal Coherence & Virtual Height Elevation */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
               <div className="p-4 rounded-xl bg-black/40 border border-slate-800 space-y-2.5">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-white">Surround Immersion</span>
@@ -1007,13 +1239,13 @@ export const DspConsolePanel: React.FC<DspConsolePanelProps> = ({
                   style={{ accentColor: accentHex }}
                 />
                 <p className="text-[10px] text-slate-500">
-                  Controls decorrelated side-channel Haas reflections and cabin width bloom
+                  Side-channel Haas wrap, 90° rear decode &amp; XTC width bloom
                 </p>
               </div>
 
               <div className="p-4 rounded-xl bg-black/40 border border-slate-800 space-y-2.5">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-white">Center Vocal Coherence (L+R)</span>
+                  <span className="text-xs font-bold text-white">Center Vocal Lock</span>
                   <span className="text-xs font-mono font-bold tabular-nums" style={{ color: accentHex }}>
                     {dspSettings.centerCoherence}%
                   </span>
@@ -1036,7 +1268,36 @@ export const DspConsolePanel: React.FC<DspConsolePanelProps> = ({
                   style={{ accentColor: accentHex }}
                 />
                 <p className="text-[10px] text-slate-500">
-                  Locks lead vocals cleanly onto the center dashboard at 1.5–3 kHz
+                  Anchors dialogue &amp; lead vocals onto the center dash (2.2 kHz)
+                </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-black/40 border border-slate-800 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-white">Virtual Height 3D</span>
+                  <span className="text-xs font-mono font-bold tabular-nums" style={{ color: accentHex }}>
+                    {dspSettings.virtualHeight ?? 45}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  aria-label="Virtual Height 3D Elevation"
+                  min={0}
+                  max={100}
+                  step={5}
+                  disabled={dspSettings.surroundMode === 'off'}
+                  value={dspSettings.virtualHeight ?? 45}
+                  onChange={(e) =>
+                    onChangeDspSettings((prev) => ({
+                      ...prev,
+                      virtualHeight: Number(e.target.value),
+                    }))
+                  }
+                  className="w-full h-2 bg-slate-800 rounded-lg cursor-pointer disabled:opacity-40"
+                  style={{ accentColor: accentHex }}
+                />
+                <p className="text-[10px] text-slate-500">
+                  Lifts soundstage off door woofers toward windshield &amp; roofline
                 </p>
               </div>
             </div>

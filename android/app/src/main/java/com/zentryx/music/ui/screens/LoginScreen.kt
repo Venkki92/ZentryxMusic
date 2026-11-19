@@ -384,8 +384,8 @@ fun LoginScreen(
                 OutlinedTextField(
                     value = uiState.musicFolder,
                     onValueChange = viewModel::onMusicFolderChanged,
-                    label = { Text("Music Folder Path") },
-                    placeholder = { Text("/Music") },
+                    label = { Text("Default Music Folders (comma-separated)") },
+                    placeholder = { Text("/WoW Radio, /Music") },
                     leadingIcon = { Icon(Icons.Default.Folder, contentDescription = null, tint = accent) },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, imeAction = ImeAction.Done),

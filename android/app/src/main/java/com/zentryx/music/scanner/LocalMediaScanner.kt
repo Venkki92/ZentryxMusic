@@ -37,7 +37,7 @@ class LocalMediaScanner @Inject constructor(
     @IoDispatcher private val ioDispatcher: CoroutineDispatcher
 ) {
 
-    suspend fun scanLocalAudio(explicitTreeUri: Uri? = null): Int = withContext(ioDispatcher) {
+    suspend fun scanLocalAudio(explicitTreeUri: Uri? = null, additive: Boolean = false): Int = withContext(ioDispatcher) {
         val discovered = mutableListOf<SongEntity>()
         val keepIds = mutableListOf<String>()
         val seenKeys = HashSet<String>()
@@ -46,15 +46,28 @@ class LocalMediaScanner @Inject constructor(
             val label = runCatching {
                 DocumentFile.fromTreeUri(context, explicitTreeUri)?.name ?: explicitTreeUri.lastPathSegment
             }.getOrNull() ?: "USB Audio"
-            settingsPreferences.setLocalSourceFolder(explicitTreeUri.toString(), label)
+            settingsPreferences.addLocalSourceFolder(explicitTreeUri.toString(), label)
         }
 
-        val treeUriToScan = explicitTreeUri ?: settingsPreferences.localSourceUriFlow.firstOrNull()?.let {
-            runCatching { Uri.parse(it) }.getOrNull()
+        if (additive && explicitTreeUri != null) {
+            scanSafTree(explicitTreeUri, discovered, keepIds, seenKeys)
+            if (discovered.isNotEmpty()) {
+                discovered.chunked(30).forEach { batch ->
+                    songDao.insertSongs(batch)
+                }
+            }
+            return@withContext discovered.size
         }
 
-        if (treeUriToScan != null) {
-            scanSafTree(treeUriToScan, discovered, keepIds, seenKeys)
+        val savedUris = settingsPreferences.localSourceUrisFlow.firstOrNull().orEmpty()
+            .mapNotNull { (uriStr, _) -> runCatching { Uri.parse(uriStr) }.getOrNull() }
+            .toMutableList()
+        if (explicitTreeUri != null && savedUris.none { it == explicitTreeUri }) {
+            savedUris.add(explicitTreeUri)
+        }
+
+        for (treeUri in savedUris) {
+            scanSafTree(treeUri, discovered, keepIds, seenKeys)
         }
 
         val hasPerm = hasReadAudioPermission()
@@ -69,18 +82,20 @@ class LocalMediaScanner @Inject constructor(
             }
         }
 
-        if (keepIds.isNotEmpty()) {
-            if (keepIds.size <= 900) {
-                songDao.deleteLocalSongsNotIn(keepIds)
-            } else {
-                val keepSet = keepIds.toHashSet()
-                val stale = songDao.getAllSongsOnce()
-                    .filter { it.sourceType == "LOCAL" && !keepSet.contains(it.id) }
-                    .map { it.id }
-                stale.chunked(500).forEach { songDao.deleteSongs(it) }
+        if (!additive) {
+            if (keepIds.isNotEmpty()) {
+                if (keepIds.size <= 900) {
+                    songDao.deleteLocalSongsNotIn(keepIds)
+                } else {
+                    val keepSet = keepIds.toHashSet()
+                    val stale = songDao.getAllSongsOnce()
+                        .filter { it.sourceType == "LOCAL" && !keepSet.contains(it.id) }
+                        .map { it.id }
+                    stale.chunked(500).forEach { songDao.deleteSongs(it) }
+                }
+            } else if (savedUris.isEmpty() && hasPerm) {
+                songDao.deleteAllLocalSongs()
             }
-        } else if (treeUriToScan == null && hasPerm) {
-            songDao.deleteAllLocalSongs()
         }
 
         discovered.size
@@ -298,6 +313,12 @@ class LocalMediaScanner @Inject constructor(
                 if (f.exists() && f.isDirectory && f.canRead()) {
                     add(f to "USB/${f.name}")
                 }
+            }
+            @Suppress("DEPRECATION")
+            val externalRoot = android.os.Environment.getExternalStorageDirectory()
+            val wowRadioDir = File(externalRoot, "WoW Radio")
+            if (wowRadioDir.exists() && wowRadioDir.isDirectory && wowRadioDir.canRead()) {
+                add(wowRadioDir to "Local/WoW Radio")
             }
             @Suppress("DEPRECATION")
             val emulatedMusic = File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MUSIC).absolutePath)

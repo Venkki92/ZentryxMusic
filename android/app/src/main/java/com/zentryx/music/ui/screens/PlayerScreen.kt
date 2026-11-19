@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.zentryx.music.models.RepeatMode
+import com.zentryx.music.ui.components.CrossfadeAlbumArt
 import com.zentryx.music.ui.components.DriveModeHudDialog
 import com.zentryx.music.ui.components.FullscreenVisualizerDialog
 import com.zentryx.music.ui.components.MercedesVisualizerCanvas
@@ -403,14 +404,12 @@ fun PlayerScreen(
                                     .border(1.dp, borderColor, RoundedCornerShape(14.dp)),
                                 contentAlignment = Alignment.Center
                             ) {
-                                if (currentSong.artworkPath != null && File(currentSong.artworkPath).exists()) {
-                                    AsyncImage(
-                                        model = File(currentSong.artworkPath),
-                                        contentDescription = currentSong.album,
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                } else {
+                                CrossfadeAlbumArt(
+                                    artworkPath = currentSong.artworkPath,
+                                    contentDescription = currentSong.album,
+                                    durationMillis = 300,
+                                    modifier = Modifier.fillMaxSize()
+                                ) {
                                     Icon(
                                         imageVector = Icons.Default.MusicNote,
                                         contentDescription = null,

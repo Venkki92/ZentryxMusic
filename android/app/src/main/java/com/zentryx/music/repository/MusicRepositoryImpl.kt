@@ -10,6 +10,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import androidx.work.workDataOf
 import com.zentryx.music.database.dao.PlaylistDao
 import com.zentryx.music.database.dao.SongDao
 import com.zentryx.music.database.entities.PlaylistEntity
@@ -19,17 +20,21 @@ import com.zentryx.music.di.IoDispatcher
 import com.zentryx.music.models.Album
 import com.zentryx.music.models.Artist
 import com.zentryx.music.models.AudioFormat
+import com.zentryx.music.models.ErrorType
 import com.zentryx.music.models.Playlist
 import com.zentryx.music.models.Resource
 import com.zentryx.music.models.ScanProgress
 import com.zentryx.music.models.ScanStatus
+import com.zentryx.music.models.ServerConfig
 import com.zentryx.music.models.Song
 import com.zentryx.music.network.webdav.DiagnosticProbeEntry
 import com.zentryx.music.network.webdav.DiagnosticStepStatus
 import com.zentryx.music.network.webdav.ScanDiagnosticsState
 import com.zentryx.music.network.webdav.WebDavClient
+import com.zentryx.music.network.webdav.WebDavItem
 import com.zentryx.music.network.webdav.WebDavPermissionDecoder
 import com.zentryx.music.network.webdav.WebDavUrlHelper
+import com.zentryx.music.player.SettingsPreferences
 import com.zentryx.music.playlists.M3uPlaylistParser
 import com.zentryx.music.scanner.LibraryScanWorker
 import com.zentryx.music.scanner.LocalMediaScanner
@@ -56,6 +61,7 @@ class MusicRepositoryImpl @Inject constructor(
     private val webDavClient: WebDavClient,
     private val urlHelper: WebDavUrlHelper,
     private val encryptedDataStore: EncryptedDataStore,
+    private val settingsPreferences: SettingsPreferences,
     @IoDispatcher private val ioDispatcher: CoroutineDispatcher
 ) : MusicRepository {
 
@@ -128,6 +134,27 @@ class MusicRepositoryImpl @Inject constructor(
 
     override fun startScan(): Flow<ScanProgress> {
         val scanRequest = OneTimeWorkRequestBuilder<LibraryScanWorker>().build()
+        return enqueueAndObserveScan(scanRequest)
+    }
+
+    override fun scanSpecificWebDavFolder(
+        folderPath: String,
+        additive: Boolean,
+        recursive: Boolean
+    ): Flow<ScanProgress> {
+        val cleanTarget = ServerConfig.normalizeFolderPath(folderPath)
+        val input = workDataOf(
+            LibraryScanWorker.KEY_TARGET_FOLDER_PATH to (if (cleanTarget.isEmpty()) "/" else cleanTarget),
+            LibraryScanWorker.KEY_ADDITIVE_MODE to additive,
+            LibraryScanWorker.KEY_RECURSIVE to recursive
+        )
+        val scanRequest = OneTimeWorkRequestBuilder<LibraryScanWorker>()
+            .setInputData(input)
+            .build()
+        return enqueueAndObserveScan(scanRequest)
+    }
+
+    private fun enqueueAndObserveScan(scanRequest: androidx.work.OneTimeWorkRequest): Flow<ScanProgress> {
         workManager.enqueueUniqueWork(
             LibraryScanWorker.UNIQUE_WORK_NAME,
             ExistingWorkPolicy.REPLACE,
@@ -178,12 +205,45 @@ class MusicRepositoryImpl @Inject constructor(
         }.flowOn(ioDispatcher)
     }
 
+    override suspend fun browseRemoteWebDavFolder(relativePath: String): Resource<List<WebDavItem>> =
+        withContext(ioDispatcher) {
+            val config = encryptedDataStore.serverConfigFlow.firstOrNull()
+                ?: return@withContext Resource.Error(
+                    ErrorType.UNAUTHORIZED,
+                    "Not signed in to Nextcloud WebDAV."
+                )
+            val cleanRel = ServerConfig.normalizeFolderPath(relativePath)
+            val primaryUrl = config.buildWebDavFolderUrl(cleanRel)
+            val primaryRes = webDavClient.listFolder(primaryUrl, config)
+            if (primaryRes is Resource.Success) {
+                return@withContext Resource.Success(
+                    primaryRes.data
+                        .filter { !it.name.startsWith(".") }
+                        .sortedWith(compareByDescending<WebDavItem> { it.isDirectory }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+                )
+            }
+            if (!config.useLegacyWebDav && primaryRes is Resource.Error &&
+                primaryRes.errorType == ErrorType.WEBDAV_UNREACHABLE
+            ) {
+                val legacyCfg = config.copy(useLegacyWebDav = true)
+                val legacyRes = webDavClient.listFolder(legacyCfg.buildWebDavFolderUrl(cleanRel), legacyCfg)
+                if (legacyRes is Resource.Success) {
+                    return@withContext Resource.Success(
+                        legacyRes.data
+                            .filter { !it.name.startsWith(".") }
+                            .sortedWith(compareByDescending<WebDavItem> { it.isDirectory }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+                    )
+                }
+            }
+            primaryRes
+        }
+
     override suspend fun cancelScan() {
         workManager.cancelUniqueWork(LibraryScanWorker.UNIQUE_WORK_NAME)
     }
 
-    override suspend fun scanLocalLibrary(treeUri: Uri?): Int {
-        return localMediaScanner.scanLocalAudio(treeUri)
+    override suspend fun scanLocalLibrary(treeUri: Uri?, additive: Boolean): Int {
+        return localMediaScanner.scanLocalAudio(treeUri, additive = additive)
     }
 
     override fun runScanDiagnostics(startFolderPath: String): Flow<ScanDiagnosticsState> = flow {
@@ -294,19 +354,22 @@ class MusicRepositoryImpl @Inject constructor(
             return@flow
         }
 
-        // Step 3+: Probe configured folder or currently open folder + discovered subdirectories
+        // Step 3+: Probe configured default folders (WoW Radio, Music) + saved extra folders, or currently open folder
         val cleanStart = startFolderPath.trim().trim('/')
         val isLocalFolderOpen = cleanStart.startsWith("Local/", ignoreCase = true) || cleanStart.startsWith("USB/", ignoreCase = true)
-        val configuredRel = activeConfig.musicFolderPath.trim('/')
-        val primaryRelPath = if (cleanStart.isNotEmpty() && !isLocalFolderOpen) cleanStart else configuredRel
-        val primaryUrl = if (primaryRelPath.isEmpty()) {
-            activeConfig.webDavBaseUrl
+        val extraFolders = settingsPreferences.extraWebDavFoldersFlow.firstOrNull().orEmpty()
+        val initialRelPaths = if (cleanStart.isNotEmpty() && !isLocalFolderOpen) {
+            listOf(cleanStart)
         } else {
-            urlHelper.combineUrl(activeConfig.webDavBaseUrl, primaryRelPath)
+            activeConfig.configuredMusicFolders(extraFolders)
         }
+        val primaryRelPath = initialRelPaths.firstOrNull().orEmpty()
 
         val queue = ArrayDeque<Triple<String, String, String?>>() // (url, displayPath, parentReportedPerms)
-        queue.add(Triple(primaryUrl, "/${primaryRelPath}".replace("//", "/"), null))
+        initialRelPaths.forEach { rel ->
+            val targetUrl = activeConfig.buildWebDavFolderUrl(rel)
+            queue.add(Triple(targetUrl, "/$rel".replace("//", "/"), null))
+        }
         val visited = mutableSetOf<String>()
         var probedDirs = 0
         var passedDirs = 0
@@ -538,7 +601,10 @@ class MusicRepositoryImpl @Inject constructor(
             return@withContext Result.failure(IllegalStateException("Connect to Nextcloud first to sync .m3u8 playlists"))
         }
 
-        val musicRootUrl = urlHelper.combineUrl(config.webDavBaseUrl, config.musicFolderPath)
+        val primaryPlaylistParent = config.configuredMusicFolders()
+            .firstOrNull { it.equals("Music", ignoreCase = true) }
+            ?: config.configuredMusicFolders().firstOrNull().orEmpty()
+        val musicRootUrl = config.buildWebDavFolderUrl(primaryPlaylistParent)
         val playlistsFolderUrl = urlHelper.combineUrl(musicRootUrl, "Playlists")
         val mkRes = webDavClient.ensureCollection(playlistsFolderUrl, config)
         if (mkRes is Resource.Error) {

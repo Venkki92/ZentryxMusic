@@ -149,8 +149,21 @@ import { FloatingCockpitBar } from './components/FloatingCockpitBar';
 import { SettingsPanel } from './components/SettingsPanel';
 import { LazyColumn } from './components/LazyColumn';
 import { LazyAlbumArt } from './components/LazyAlbumArt';
+import { CrossfadeAlbumArt } from './components/CrossfadeAlbumArt';
 import { PWAInstallButton, AndroidApkDownloadButton, OfflineIndicator } from './components/PWAComponents';
 import { buildTrackIndexMap } from './utils/mediatekOptimization';
+import {
+  AdaptiveCabinConfig,
+  AdaptiveEvaluationState,
+  CabinMicStatus,
+  DEFAULT_ADAPTIVE_CABIN_CONFIG,
+  INITIAL_ADAPTIVE_STATE,
+  applyAdaptiveCabinOverlay,
+  calculateAdaptiveDspDelta,
+  evaluateAdaptiveCabinState,
+  sanitizeAdaptiveCabinConfig,
+  startCabinMicNoiseMonitor,
+} from './utils/adaptiveCabinProfile';
 import {
   authorizeSavedOfflineFolder,
   clearSavedOfflineFolder,
@@ -159,6 +172,16 @@ import {
   pickOfflineFolder,
   saveTrackToSelectedFolder,
 } from './utils/offlineFolder';
+import {
+  DEFAULT_MUSIC_FOLDERS,
+  DEFAULT_MUSIC_FOLDER_STRING,
+  addFolderToList,
+  mergeDiscoveredTracks,
+  normalizeFolderPath,
+  parseScanFolders,
+  removeFolderFromList,
+  resolveInitialBrowserPath,
+} from './utils/folderScanner';
 import {
   AudioOutputRouteId,
   AUDIO_OUTPUT_ROUTES,
@@ -285,7 +308,27 @@ export default function App() {
   const [serverUrl, setServerUrl] = useState(() => localStorage.getItem('zentryx_nc_server') || 'https://cloud.zentryx.bg');
   const [username, setUsername] = useState(() => localStorage.getItem('zentryx_nc_user') || '');
   const [password, setPassword] = useState(() => localStorage.getItem('zentryx_nc_pass') || '');
-  const [musicFolder, setMusicFolder] = useState(() => localStorage.getItem('zentryx_nc_folder') || 'Music');
+  const [musicFolder, setMusicFolder] = useState(() => {
+    const saved = localStorage.getItem('zentryx_nc_folder');
+    const migrated = localStorage.getItem('zentryx_nc_folders_migrated_v2');
+    if (!saved) return DEFAULT_MUSIC_FOLDER_STRING;
+    if (!migrated && saved.trim().replace(/^\/+/, '').replace(/\/+$/, '') === 'Music') {
+      localStorage.setItem('zentryx_nc_folder', DEFAULT_MUSIC_FOLDER_STRING);
+      localStorage.setItem('zentryx_nc_folders_migrated_v2', '1');
+      return DEFAULT_MUSIC_FOLDER_STRING;
+    }
+    return saved;
+  });
+  const [extraScanFolders, setExtraScanFolders] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem('zentryx_nc_extra_folders');
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string' && x.trim().length > 0) : [];
+    } catch {
+      return [];
+    }
+  });
   const [isLoggedIn, setIsLoggedIn] = useState(() => Boolean(localStorage.getItem('zentryx_nc_user') && localStorage.getItem('zentryx_nc_pass')));
 
   const [showPassword, setShowPassword] = useState(false);
@@ -302,12 +345,12 @@ export default function App() {
 
   // Interactive Folder Browser State
   const [showFolderBrowser, setShowFolderBrowser] = useState(false);
-  const [browserCurrentPath, setBrowserCurrentPath] = useState(() => localStorage.getItem('zentryx_nc_folder') || 'Music');
+  const [browserCurrentPath, setBrowserCurrentPath] = useState(() => resolveInitialBrowserPath(undefined, localStorage.getItem('zentryx_nc_folder') || DEFAULT_MUSIC_FOLDER_STRING));
   const [browserFolders, setBrowserFolders] = useState<WebDAVFolder[]>([]);
   const [browserAudioFiles, setBrowserAudioFiles] = useState<Array<{ href: string; fileName: string; size: number; contentType: string }>>([]);
   const [isBrowserLoading, setIsBrowserLoading] = useState(false);
   const [browserError, setBrowserError] = useState<string | null>(null);
-  const [manualPathInput, setManualPathInput] = useState(() => localStorage.getItem('zentryx_nc_folder') || 'Music');
+  const [manualPathInput, setManualPathInput] = useState(() => resolveInitialBrowserPath(undefined, localStorage.getItem('zentryx_nc_folder') || DEFAULT_MUSIC_FOLDER_STRING));
 
   // Step-by-Step Folder Scan Diagnostics State
   type FolderDiagStatus = 'RUNNING' | 'PASS' | 'WARN' | 'FAIL';
@@ -463,6 +506,30 @@ export default function App() {
   // Per-Output Audio Device Auto-Profile Routing
   const [activeOutputRoute, setActiveOutputRoute] = useState<AudioOutputRouteId>('headunit_speakers');
   const manualOverrideTrackIdsRef = useRef<Set<string>>(new Set());
+
+  // Automated Cabin Noise & Speed Adaptive DSP Profile Switching
+  const [adaptiveCabinConfig, setAdaptiveCabinConfig] = useState<AdaptiveCabinConfig>(() => {
+    try {
+      const saved = localStorage.getItem('zentryx_adaptive_cabin_dsp');
+      if (saved) return sanitizeAdaptiveCabinConfig(JSON.parse(saved));
+    } catch {}
+    return { ...DEFAULT_ADAPTIVE_CABIN_CONFIG };
+  });
+  const [cabinNoiseDb, setCabinNoiseDb] = useState<number | null>(null);
+  const [cabinMicStatus, setCabinMicStatus] = useState<CabinMicStatus>('off');
+  const [adaptiveCabinState, setAdaptiveCabinState] = useState<AdaptiveEvaluationState>(INITIAL_ADAPTIVE_STATE);
+  const latestCabinNoiseRef = useRef<number | null>(null);
+  const latestSpeedKmHRef = useRef<number>(0);
+
+  const adaptiveDspDelta = useMemo(
+    () => calculateAdaptiveDspDelta(adaptiveCabinState.activeProfile, adaptiveCabinConfig),
+    [adaptiveCabinState.activeProfile, adaptiveCabinConfig]
+  );
+
+  const effectiveDspSettings = useMemo(
+    () => applyAdaptiveCabinOverlay(dspSettings, adaptiveDspDelta),
+    [dspSettings, adaptiveDspDelta]
+  );
 
   // Quick Attenuation / "Talk" Ducking (-20dB)
   const [isAttenuated, setIsAttenuated] = useState<boolean>(false);
@@ -1012,7 +1079,15 @@ export default function App() {
   }, [currentTrack, isPlaying, positionSeconds, durationSeconds, coverArtUrls]);
 
   const handleCycleSurroundMode = () => {
-    const order: SurroundModeId[] = ['off', 'logic7_surround', 'concert_hall', 'studio_focused'];
+    const order: SurroundModeId[] = [
+      'off',
+      'logic7_surround',
+      'concert_hall',
+      'studio_focused',
+      'dolby_pro_logic_ii',
+      'dolby_atmos_virtual',
+      'virtual_surround_360',
+    ];
     setDspSettings((prev) => {
       const idx = order.indexOf(prev.surroundMode ?? 'off');
       const nextMode = order[(idx + 1) % order.length];
@@ -1748,8 +1823,11 @@ export default function App() {
       return;
     }
 
-    // Step 3+: Walk target folder and every subdirectory probed during a scan (BFS, cap 40 subdirectories)
-    const queue: Array<{ path: string; knownPerms: string | null }> = [{ path: startPath, knownPerms: null }];
+    // Step 3+: Walk target folder(s) and every subdirectory probed during a scan (BFS, cap 40 subdirectories)
+    const diagRoots = startPath
+      ? parseScanFolders(startPath, startPathOverride === undefined ? extraScanFolders : [])
+      : [''];
+    const queue: Array<{ path: string; knownPerms: string | null }> = diagRoots.map((p) => ({ path: p, knownPerms: null }));
     const visited = new Set<string>();
     const maxDirectories = 40;
     let fallbackQueued = false;
@@ -1837,12 +1915,13 @@ export default function App() {
     );
   };
 
-  // Scan Music Folders with deep subfolder support
+  // Scan Music Folders with multi-root defaults (WoW Radio + Music), deep subfolder support, and additive merge mode
   const scanNextcloudMusic = async (
     user: string,
     pass: string,
     startFolder: string = musicFolder,
-    recursive: boolean = true
+    recursive: boolean = true,
+    additive: boolean = false
   ) => {
     setIsScanning(true);
     setScanProgress(`Connecting to ${user}@cloud.zentryx.bg...`);
@@ -1851,12 +1930,15 @@ export default function App() {
     const authParam = encodeURIComponent(safeBtoa(`${user}:${pass}`));
     const collectedTracks: Track[] = [];
     const visitedFolders = new Set<string>();
-    const folderQueue: string[] = [startFolder.trim()];
-
-    let scannedAny = false;
+    const initialRoots = additive
+      ? [startFolder.trim() === '/' ? '' : normalizeFolderPath(startFolder)]
+      : startFolder.trim() === '' || startFolder.trim() === '/'
+        ? ['']
+        : parseScanFolders(startFolder, extraScanFolders);
+    const folderQueue: string[] = [...initialRoots];
 
     try {
-      while (folderQueue.length > 0 && visitedFolders.size < 60) {
+      while (folderQueue.length > 0 && visitedFolders.size < 250) {
         const currentFld = folderQueue.shift()!;
         const normKey = currentFld.toLowerCase();
         if (visitedFolders.has(normKey)) continue;
@@ -1866,7 +1948,6 @@ export default function App() {
 
         try {
           const { files, subfolders } = await fetchWebDAVFolder(currentFld, user, pass);
-          scannedAny = true;
 
           // Parse audio files into tracks
           for (const f of files) {
@@ -1916,6 +1997,7 @@ export default function App() {
               streamUrl,
               fileName: rawName,
               folderPath: currentFld,
+              sourceType: 'WEBDAV',
             });
           }
 
@@ -1927,29 +2009,30 @@ export default function App() {
               }
             }
           }
-        } catch (err: any) {
-          if (currentFld && (!scannedAny || currentFld === startFolder)) {
-            console.warn(`Folder /${currentFld} not found, falling back to root /`);
-            if (!visitedFolders.has('')) {
-              folderQueue.push('');
-            }
-          }
+        } catch {
+          console.warn(`Folder /${currentFld || 'Root'} could not be read; continuing scan queue.`);
         }
       }
 
-      // If startFolder was "Music" and gave 0 files, try root as fallback
-      if (collectedTracks.length === 0 && startFolder && !visitedFolders.has('')) {
+      // If full scan across all configured roots yielded 0 files, fall back to Nextcloud Root /
+      if (!additive && collectedTracks.length === 0 && !visitedFolders.has('')) {
         setScanProgress('Scanning Root directory for audio files...');
-        try {
-          const { files, subfolders } = await fetchWebDAVFolder('', user, pass);
-          for (const f of files) {
-            const clean = f.fileName.replace(/\.(mp3|flac|m4a|aac|ogg|opus|wav|wma|m4b|alac|aiff)$/i, '');
-            const cleanHref = f.href.replace(/^https?:\/\/[^\/]+/, '');
+        const fallbackQueue: string[] = [''];
+        while (fallbackQueue.length > 0 && visitedFolders.size < 250) {
+          const cur = fallbackQueue.shift()!;
+          const key = cur.toLowerCase();
+          if (visitedFolders.has(key)) continue;
+          visitedFolders.add(key);
+          try {
+            const { files, subfolders } = await fetchWebDAVFolder(cur, user, pass);
+            for (const f of files) {
+              const clean = f.fileName.replace(/\.(mp3|flac|m4a|aac|ogg|opus|wav|wma|m4b|alac|aiff)$/i, '');
+              const cleanHref = f.href.replace(/^https?:\/\/[^\/]+/, '');
               collectedTracks.push({
                 id: f.href,
                 title: clean,
-                artist: 'Nextcloud Audio',
-                album: 'cloud.zentryx.bg',
+                artist: cur ? cur.split('/').pop() || 'Nextcloud Audio' : 'Nextcloud Audio',
+                album: cur || 'cloud.zentryx.bg',
                 duration: '...',
                 durationSeconds: 0,
                 sizeBytes: f.size,
@@ -1957,43 +2040,67 @@ export default function App() {
                 href: f.href,
                 streamUrl: `/api/nextcloud${cleanHref.startsWith('/') ? cleanHref : '/' + cleanHref}?auth=${authParam}`,
                 fileName: f.fileName,
-                folderPath: '',
+                folderPath: cur,
+                sourceType: 'WEBDAV',
               });
-          }
-          if (recursive) {
-            for (const sub of subfolders) {
-              if (['music', 'audio', 'songs', 'media'].includes(sub.name.toLowerCase())) {
-                folderQueue.push(sub.path);
+            }
+            if (recursive) {
+              for (const sub of subfolders) {
+                const lower = sub.name.toLowerCase();
+                if (cur !== '' || ['wow radio', 'music', 'audio', 'songs', 'media', 'radio', 'podcasts'].includes(lower)) {
+                  if (sub.path && !visitedFolders.has(sub.path.toLowerCase())) {
+                    fallbackQueue.push(sub.path);
+                  }
+                }
               }
             }
+          } catch {
+            // root scan fallback handled
           }
-        } catch {
-          // root scan fallback handled
         }
       }
 
-      // Deduplicate by ID
-      const uniqueTracks = Array.from(new Map(collectedTracks.map((t) => [t.id, t])).values());
+      // Deduplicate newly discovered tracks
+      const uniqueDiscovered = Array.from(new Map(collectedTracks.map((t) => [t.id, t])).values());
 
-      setTracks(uniqueTracks);
-      setQueue((prev) => (prev.length === 0 ? uniqueTracks : prev));
-      localStorage.setItem('zentryx_nc_tracks', JSON.stringify(uniqueTracks));
+      // Merge additively or replace cloud tracks while preserving local files
+      const mergeMode = additive ? 'additive' : 'replace-cloud';
+      const mergeResult = mergeDiscoveredTracks(tracks, uniqueDiscovered, mergeMode);
+
+      setTracks(mergeResult.tracks);
+      setQueue((prev) => (prev.length === 0 ? mergeResult.tracks : prev));
+      localStorage.setItem(
+        'zentryx_nc_tracks',
+        JSON.stringify(mergeResult.tracks.filter((t) => t.sourceType !== 'LOCAL'))
+      );
       localStorage.setItem('zentryx_nc_user', user);
       localStorage.setItem('zentryx_nc_pass', pass);
-      localStorage.setItem('zentryx_nc_folder', startFolder);
+      if (!additive) {
+        localStorage.setItem('zentryx_nc_folder', startFolder);
+      }
 
-      if (uniqueTracks.length > 0) {
-        setStatusMessage(`Successfully loaded ${uniqueTracks.length} tracks from Nextcloud`);
+      if (additive) {
+        const displayTarget = `/${normalizeFolderPath(startFolder) || 'Root'}`;
+        if (uniqueDiscovered.length > 0) {
+          setStatusMessage(
+            `Added ${mergeResult.newlyAddedCount} new track(s) from ${displayTarget} (${uniqueDiscovered.length} scanned • ${mergeResult.tracks.length} total in library)`
+          );
+          if (tracks.length === 0) setCurrentTrackIndex(0);
+        } else {
+          setStatusMessage(`No audio files found in ${displayTarget}. Your existing ${tracks.length} track(s) remain untouched.`);
+        }
+      } else if (mergeResult.tracks.length > 0) {
+        const rootsLabel = initialRoots.map((r) => `/${r || 'Root'}`).join(', ');
+        setStatusMessage(`Loaded ${mergeResult.tracks.length} track(s) from ${rootsLabel}`);
         setCurrentTrackIndex(0);
       } else {
-        setStatusMessage(`No audio files found in /${startFolder || 'Root'}. Select your folder in the Folder Browser.`);
-        // If scan produced 0 tracks, automatically open the folder browser
-        openFolderBrowser(startFolder || '');
+        setStatusMessage(`No audio files found in ${initialRoots.map((r) => `/${r || 'Root'}`).join(', ')}. Browse folders to add your music directory.`);
+        openFolderBrowser('');
       }
     } catch (e: any) {
       console.error('Scan error:', e);
       setStatusMessage(`Scan error: ${e.message}`);
-      openFolderBrowser(startFolder || '');
+      openFolderBrowser('');
     } finally {
       setIsScanning(false);
       setScanProgress('');
@@ -2003,7 +2110,7 @@ export default function App() {
 
   // Manual Folder Browser Handlers
   const openFolderBrowser = async (initialPath?: string) => {
-    const targetPath = initialPath !== undefined ? initialPath : (musicFolder || '');
+    const targetPath = resolveInitialBrowserPath(initialPath, musicFolder);
     setShowFolderBrowser(true);
     setBrowserCurrentPath(targetPath);
     setManualPathInput(targetPath);
@@ -2043,12 +2150,33 @@ export default function App() {
     loadBrowserFolder(parent);
   };
 
-  const selectAndScanBrowserFolder = async (folderPath: string, recursive: boolean = true) => {
-    const clean = folderPath.replace(/^\/+/, '').replace(/\/+$/, '');
-    setMusicFolder(clean);
-    localStorage.setItem('zentryx_nc_folder', clean);
+  const addAndScanBrowserFolder = async (folderPath: string, recursive: boolean = true) => {
+    const clean = normalizeFolderPath(folderPath);
+    const labelToStore = clean === '' ? '/' : clean;
+    const baseFolders = parseScanFolders(musicFolder);
+    const isAlreadyInDefaults = baseFolders.some((f) => f.toLowerCase() === clean.toLowerCase());
+    if (!isAlreadyInDefaults) {
+      const updated = addFolderToList(extraScanFolders, labelToStore);
+      setExtraScanFolders(updated);
+      localStorage.setItem('zentryx_nc_extra_folders', JSON.stringify(updated));
+    }
     setShowFolderBrowser(false);
-    await scanNextcloudMusic(username, password, clean, recursive);
+    await scanNextcloudMusic(username, password, labelToStore, recursive, true);
+  };
+
+  const removeExtraScanFolder = (folderPath: string) => {
+    const updated = removeFolderFromList(extraScanFolders, folderPath);
+    setExtraScanFolders(updated);
+    localStorage.setItem('zentryx_nc_extra_folders', JSON.stringify(updated));
+  };
+
+  const selectAndScanBrowserFolder = async (folderPath: string, recursive: boolean = true) => {
+    const clean = normalizeFolderPath(folderPath);
+    const target = clean === '' ? '/' : clean;
+    setMusicFolder(target);
+    localStorage.setItem('zentryx_nc_folder', target);
+    setShowFolderBrowser(false);
+    await scanNextcloudMusic(username, password, target, recursive, false);
   };
 
   // Nextcloud Login Flow v2 Initiation & Polling
@@ -2801,7 +2929,8 @@ export default function App() {
     setIsSyncingPlaylists(true);
     try {
       const basicAuth = safeBtoa(`${username}:${password}`);
-      const cleanRoot = (musicFolder || '').replace(/^\/+/, '').replace(/\/+$/, '');
+      const primaryFolder = parseScanFolders(musicFolder).find((f) => f.toLowerCase() === 'music') ?? parseScanFolders(musicFolder)[0] ?? 'Music';
+      const cleanRoot = normalizeFolderPath(primaryFolder);
       const playlistRelDir = cleanRoot ? `${cleanRoot}/Playlists` : 'Playlists';
       const dirSegs = playlistRelDir.split('/').filter(Boolean).map(encodeURIComponent).join('/');
       const davDirUrl = `/api/nextcloud/remote.php/dav/files/${encodeURIComponent(username)}/${dirSegs}/`;
@@ -3371,7 +3500,7 @@ export default function App() {
       let dspEngine = dspEngineRef.current;
       if (!dspEngine || dspEngine.ctx !== ctx) {
         dspEngine = new HeadunitDspEngine(ctx);
-        dspEngine.applySettings(dspSettings, isMuted ? 0 : volume);
+        dspEngine.applySettings(effectiveDspSettings, isMuted ? 0 : volume, currentGpsSpeed);
         dspEngine.output.connect(analyser);
         dspEngineRef.current = dspEngine;
       }
@@ -4643,15 +4772,74 @@ export default function App() {
   }, [offlineCacheCapMb]);
 
   useEffect(() => {
+    latestCabinNoiseRef.current = cabinNoiseDb;
+  }, [cabinNoiseDb]);
+
+  useEffect(() => {
+    latestSpeedKmHRef.current = currentGpsSpeed;
+  }, [currentGpsSpeed]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('zentryx_adaptive_cabin_dsp', JSON.stringify(adaptiveCabinConfig));
+    } catch {}
+  }, [adaptiveCabinConfig]);
+
+  // Live Cabin Microphone Noise Monitor (automatically releases mic hardware when toggled off or in Speed-only mode)
+  useEffect(() => {
+    if (!adaptiveCabinConfig.enabled || adaptiveCabinConfig.source === 'speed') {
+      setCabinNoiseDb(null);
+      setCabinMicStatus('off');
+      return;
+    }
+
+    const handle = startCabinMicNoiseMonitor({
+      onNoiseDb: (db) => setCabinNoiseDb(db),
+      onStatusChange: (status) => setCabinMicStatus(status),
+      sampleIntervalMs: 250,
+    });
+
+    return () => {
+      handle.stop();
+      setCabinNoiseDb(null);
+    };
+  }, [adaptiveCabinConfig.enabled, adaptiveCabinConfig.source]);
+
+  // Automated Cabin Noise & Speed Profile State Machine Evaluator
+  useEffect(() => {
+    if (!adaptiveCabinConfig.enabled) {
+      setAdaptiveCabinState({
+        ...INITIAL_ADAPTIVE_STATE,
+        triggerReason: 'disabled',
+      });
+      return;
+    }
+
+    const tick = () => {
+      setAdaptiveCabinState((prev) =>
+        evaluateAdaptiveCabinState(prev, adaptiveCabinConfig, {
+          cabinNoiseDb: latestCabinNoiseRef.current,
+          speedKmH: latestSpeedKmHRef.current,
+          nowMs: Date.now(),
+        })
+      );
+    };
+
+    tick();
+    const id = window.setInterval(tick, 400);
+    return () => window.clearInterval(id);
+  }, [adaptiveCabinConfig]);
+
+  useEffect(() => {
     try {
       localStorage.setItem('zentryx_dsp_settings', JSON.stringify(dspSettings));
     } catch {}
     dspEngineRef.current?.applySettings(
-      isHoldBypassed ? { ...dspSettings, dspEnabled: false } : dspSettings,
+      isHoldBypassed ? { ...effectiveDspSettings, dspEnabled: false } : effectiveDspSettings,
       isMuted ? 0 : volume,
       currentGpsSpeed
     );
-  }, [dspSettings, volume, isMuted, isHoldBypassed, currentGpsSpeed]);
+  }, [dspSettings, effectiveDspSettings, volume, isMuted, isHoldBypassed, currentGpsSpeed]);
 
   useEffect(() => {
     try {
@@ -5377,7 +5565,7 @@ export default function App() {
                   <h2 className="text-xl font-bold text-white">No Nextcloud Songs Loaded</h2>
                   <p className="text-xs text-slate-400 leading-relaxed">
                     {isLoggedIn
-                      ? `Connected as ${username} to cloud.zentryx.bg. No audio files found in folder /${musicFolder || 'Root'}.`
+                      ? `Connected as ${username} to cloud.zentryx.bg. Default folders: ${parseScanFolders(musicFolder, extraScanFolders).map((f) => `/${f || 'Root'}`).join(', ')}.`
                       : 'Sign in with your Nextcloud account to stream your personal music collection directly in your cockpit.'}
                   </p>
                 </div>
@@ -5386,12 +5574,12 @@ export default function App() {
                   {isLoggedIn ? (
                     <>
                       <button
-                        onClick={() => openFolderBrowser(musicFolder)}
+                        onClick={() => openFolderBrowser('')}
                         className="px-5 py-3 rounded-2xl font-bold text-xs uppercase tracking-wider text-black flex items-center gap-2 transition-all shadow-lg active:scale-95"
                         style={{ backgroundColor: activeAccent.hex }}
                       >
                         <FolderOpen className="w-4 h-4" />
-                        Browse Nextcloud Folders
+                        Browse &amp; Add Folder
                       </button>
 
                       <button
@@ -5400,7 +5588,7 @@ export default function App() {
                         className="px-4 py-3 rounded-2xl font-bold text-xs text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 flex items-center gap-2 transition-colors"
                       >
                         <RefreshCw className={`w-4 h-4 ${isScanning ? 'animate-spin' : ''}`} />
-                        {isScanning ? scanProgress || 'Scanning...' : 'Rescan /Music'}
+                        {isScanning ? scanProgress || 'Scanning...' : 'Scan WoW Radio & Music'}
                       </button>
 
                       <button
@@ -5478,31 +5666,33 @@ export default function App() {
                         className="headunit-artwork-box w-64 h-64 sm:w-72 sm:h-72 rounded-3xl bg-gradient-to-b from-[#131d33] to-[#070b14] border flex flex-col items-center justify-center shadow-2xl relative overflow-hidden group"
                         style={{ borderColor: activeAccent.border }}
                       >
-                        {currentTrack && coverArtUrls[currentTrack.id] ? (
-                          <img
-                            src={coverArtUrls[currentTrack.id]}
-                            alt={currentTrack.title}
-                            className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105"
-                          />
-                        ) : (
-                          <div className="relative flex items-center justify-center">
-                            <Disc
-                              className={`w-28 h-28 opacity-75 transition-transform duration-1000 ${
-                                isPlaying ? 'animate-spin' : ''
-                              }`}
-                              style={{
-                                color: activeAccent.hex,
-                                animationDuration: '6s',
-                              }}
-                            />
-                            <div
-                              className="absolute w-8 h-8 rounded-full border-2 border-black/80 flex items-center justify-center"
-                              style={{ backgroundColor: activeAccent.hex }}
-                            >
-                              <div className="w-2.5 h-2.5 rounded-full bg-black" />
+                        <CrossfadeAlbumArt
+                          src={currentTrack ? coverArtUrls[currentTrack.id] : null}
+                          alt={currentTrack?.title || 'Album Artwork'}
+                          trackKey={currentTrack?.id}
+                          durationMs={300}
+                          className="w-full h-full"
+                          imgClassName="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105"
+                          fallback={
+                            <div className="relative flex items-center justify-center">
+                              <Disc
+                                className={`w-28 h-28 opacity-75 transition-transform duration-1000 ${
+                                  isPlaying ? 'animate-spin' : ''
+                                }`}
+                                style={{
+                                  color: activeAccent.hex,
+                                  animationDuration: '6s',
+                                }}
+                              />
+                              <div
+                                className="absolute w-8 h-8 rounded-full border-2 border-black/80 flex items-center justify-center"
+                                style={{ backgroundColor: activeAccent.hex }}
+                              >
+                                <div className="w-2.5 h-2.5 rounded-full bg-black" />
+                              </div>
                             </div>
-                          </div>
-                        )}
+                          }
+                        />
 
                         {/* Top Badges */}
                         <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none">
@@ -6031,11 +6221,16 @@ export default function App() {
                     className="w-28 h-28 rounded-2xl bg-black/60 border flex items-center justify-center overflow-hidden shrink-0"
                     style={{ borderColor: activeAccent.border }}
                   >
-                    {coverArtUrls[currentTrack.id] ? (
-                      <img src={coverArtUrls[currentTrack.id]} alt={currentTrack.title} className="w-full h-full object-cover" />
-                    ) : (
-                      <Disc className={`w-12 h-12 ${isPlaying ? 'animate-spin' : ''}`} style={{ color: activeAccent.hex }} />
-                    )}
+                    <CrossfadeAlbumArt
+                      src={coverArtUrls[currentTrack.id]}
+                      alt={currentTrack.title}
+                      trackKey={currentTrack.id}
+                      durationMs={300}
+                      className="w-full h-full"
+                      fallback={
+                        <Disc className={`w-12 h-12 ${isPlaying ? 'animate-spin' : ''}`} style={{ color: activeAccent.hex }} />
+                      }
+                    />
                   </div>
                   <div className="min-w-0 flex-1 space-y-1">
                     <div className="text-lg font-extrabold text-white line-clamp-2 leading-tight">
@@ -6165,11 +6360,12 @@ export default function App() {
                 )}
 
                 <button
-                  onClick={() => openFolderBrowser(musicFolder)}
+                  onClick={() => openFolderBrowser('')}
                   className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#0b1120] text-slate-200 border border-slate-700 hover:text-white flex items-center gap-1.5 transition-colors"
+                  title="Manually browse and add a specific Nextcloud or Local folder to your library"
                 >
                   <FolderOpen className="w-3.5 h-3.5" style={{ color: activeAccent.hex }} />
-                  Select Folder
+                  Add / Scan Folder
                 </button>
 
                 <button
@@ -7034,6 +7230,12 @@ export default function App() {
             onHoldBypassChange={setIsHoldBypassed}
             activeOutputRoute={activeOutputRoute}
             onSelectOutputRoute={handleSelectOutputRoute}
+            adaptiveCabinConfig={adaptiveCabinConfig}
+            onChangeAdaptiveCabinConfig={setAdaptiveCabinConfig}
+            adaptiveCabinState={adaptiveCabinState}
+            adaptiveDspDelta={adaptiveDspDelta}
+            cabinNoiseDb={cabinNoiseDb}
+            cabinMicStatus={cabinMicStatus}
             dualPaneCockpit={dualPaneCockpit}
             onToggleDualPaneCockpit={setDualPaneCockpit}
             driveModeAutoSpeedKmH={driveModeAutoSpeedKmH}
@@ -7233,8 +7435,66 @@ export default function App() {
               </button>
             </div>
 
-            {/* Quick Path Input & Breadcrumbs */}
-            <div className="space-y-2">
+            {/* Quick Path Input, Default Folder Shortcuts & Breadcrumbs */}
+            <div className="space-y-2.5">
+              {/* Quick-jump to default & added folders */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mr-1">Defaults:</span>
+                {DEFAULT_MUSIC_FOLDERS.map((defFolder) => (
+                  <button
+                    key={defFolder}
+                    type="button"
+                    onClick={() => loadBrowserFolder(defFolder)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors ${
+                      normalizeFolderPath(browserCurrentPath).toLowerCase() === defFolder.toLowerCase()
+                        ? 'text-black border-transparent font-bold'
+                        : 'bg-black/50 text-slate-300 border-slate-800 hover:border-slate-600'
+                    }`}
+                    style={
+                      normalizeFolderPath(browserCurrentPath).toLowerCase() === defFolder.toLowerCase()
+                        ? { backgroundColor: activeAccent.hex }
+                        : {}
+                    }
+                  >
+                    /{defFolder}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => loadBrowserFolder('')}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors ${
+                    normalizeFolderPath(browserCurrentPath) === ''
+                      ? 'text-black border-transparent font-bold'
+                      : 'bg-black/50 text-slate-300 border-slate-800 hover:border-slate-600'
+                  }`}
+                  style={normalizeFolderPath(browserCurrentPath) === '' ? { backgroundColor: activeAccent.hex } : {}}
+                >
+                  / (Root)
+                </button>
+                {extraScanFolders.map((extra) => (
+                  <span
+                    key={extra}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold bg-slate-900 border border-slate-700 text-slate-200"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => loadBrowserFolder(extra === '/' ? '' : extra)}
+                      className="hover:underline font-mono"
+                    >
+                      /{extra === '/' ? '' : extra}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removeExtraScanFolder(extra)}
+                      className="text-slate-500 hover:text-red-400 pl-0.5"
+                      title="Remove from auto-scan list"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+
               <div className="flex gap-2">
                 <div className="relative flex-1">
                   <span className="absolute left-3 top-2 text-xs text-slate-500 font-mono">/</span>
@@ -7247,7 +7507,7 @@ export default function App() {
                         loadBrowserFolder(manualPathInput.trim());
                       }
                     }}
-                    placeholder="e.g. Music, Audio, or empty for root"
+                    placeholder="e.g. WoW Radio, Music, Podcasts, or empty for root"
                     className="w-full bg-black/60 border border-slate-800 rounded-xl pl-6 pr-3 py-1.5 text-xs text-white focus:outline-none focus:border-slate-600 font-mono"
                   />
                 </div>
@@ -7326,18 +7586,36 @@ export default function App() {
                   {browserFolders.map((fld, idx) => (
                     <div
                       key={`dir-${idx}`}
-                      onClick={() => loadBrowserFolder(fld.path)}
-                      className="p-2.5 rounded-xl hover:bg-slate-800/50 flex items-center justify-between cursor-pointer transition-colors group"
+                      className="p-2.5 rounded-xl hover:bg-slate-800/50 flex items-center justify-between transition-colors group gap-2"
                     >
-                      <div className="flex items-center gap-2.5 min-w-0 pr-2">
+                      <button
+                        type="button"
+                        onClick={() => loadBrowserFolder(fld.path)}
+                        className="flex items-center gap-2.5 min-w-0 flex-1 text-left"
+                      >
                         <Folder className="w-4 h-4 shrink-0" style={{ color: activeAccent.hex }} />
                         <span className="font-semibold text-xs text-slate-200 group-hover:text-white truncate">
                           {fld.name}
                         </span>
-                      </div>
-                      <div className="flex items-center gap-1 text-[11px] text-slate-400 shrink-0">
-                        <span>Open</span>
-                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => addAndScanBrowserFolder(fld.path, true)}
+                          className="px-2.5 py-1 rounded-lg text-[11px] font-bold text-black transition-all"
+                          style={{ backgroundColor: activeAccent.hex }}
+                          title={`Scan /${fld.path} and add its songs to your existing library`}
+                        >
+                          + Add
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => loadBrowserFolder(fld.path)}
+                          className="flex items-center gap-0.5 px-2 py-1 rounded-lg text-[11px] text-slate-400 hover:text-white bg-black/40 border border-slate-800"
+                        >
+                          <span>Open</span>
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     </div>
                   ))}
@@ -7368,7 +7646,19 @@ export default function App() {
                   <span>Selected Directory:</span>
                   <span className="font-mono text-white font-semibold truncate">/{browserCurrentPath || 'Root'}</span>
                 </div>
-                <div className="flex items-center gap-1.5 shrink-0">
+                <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowFolderBrowser(false);
+                      handleScanLocalFolder();
+                    }}
+                    className="px-3 py-1.5 rounded-xl font-bold text-[11px] text-slate-200 bg-black/60 hover:bg-slate-800 border border-slate-700 flex items-center gap-1.5 shrink-0 transition-colors"
+                    title="Pick a local or USB folder and merge its audio files into your library"
+                  >
+                    <HardDrive className="w-3.5 h-3.5" style={{ color: activeAccent.hex }} />
+                    + Local / USB Folder
+                  </button>
                   <button
                     type="button"
                     disabled={isBatchSyncing}
@@ -7377,7 +7667,7 @@ export default function App() {
                     style={{ backgroundColor: activeAccent.hex }}
                   >
                     <Download className="w-3.5 h-3.5" />
-                    Pin Folder Offline
+                    Pin Offline
                   </button>
                   <button
                     type="button"
@@ -7390,24 +7680,34 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="flex gap-2">
+              <div className="flex flex-col sm:flex-row gap-2">
                 <button
-                  onClick={() => selectAndScanBrowserFolder(browserCurrentPath, true)}
+                  onClick={() => addAndScanBrowserFolder(browserCurrentPath, true)}
                   disabled={isBrowserLoading}
                   className="flex-1 py-3 rounded-xl font-bold text-xs uppercase tracking-wider text-black flex items-center justify-center gap-2 transition-all shadow"
                   style={{ backgroundColor: activeAccent.hex }}
+                  title="Scan this folder & subfolders and append tracks to your existing discovered library"
                 >
                   <FolderCheck className="w-4 h-4" />
-                  Scan This Folder &amp; Subfolders
+                  + Scan &amp; Add Folder to Library
                 </button>
 
                 <button
-                  onClick={() => selectAndScanBrowserFolder(browserCurrentPath, false)}
+                  onClick={() => selectAndScanBrowserFolder(browserCurrentPath, true)}
                   disabled={isBrowserLoading}
-                  className="px-4 py-3 rounded-xl font-bold text-xs text-slate-300 bg-black/60 border border-slate-800 hover:border-slate-700 transition-colors"
-                  title="Scan only files directly in this directory"
+                  className="px-4 py-3 rounded-xl font-bold text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
+                  title="Replace the primary scan folder with only this folder"
                 >
-                  This Folder Only
+                  Replace Only
+                </button>
+
+                <button
+                  onClick={() => addAndScanBrowserFolder(browserCurrentPath, false)}
+                  disabled={isBrowserLoading}
+                  className="px-3.5 py-3 rounded-xl font-bold text-xs text-slate-300 bg-black/60 border border-slate-800 hover:border-slate-700 transition-colors"
+                  title="Add only audio files directly inside this directory (no subfolders)"
+                >
+                  + Direct Only
                 </button>
               </div>
             </div>
@@ -7698,13 +7998,13 @@ export default function App() {
                 </div>
 
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">Music Folder</label>
+                  <label className="block text-xs text-slate-400 mb-1">Default Music Folders (comma-separated)</label>
                   <input
                     type="text"
                     value={musicFolder}
                     onChange={(e) => setMusicFolder(e.target.value)}
                     className="w-full bg-black/60 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-slate-600"
-                    placeholder="Music (or empty for root)"
+                    placeholder="WoW Radio, Music (or / for root)"
                   />
                 </div>
 
@@ -7864,21 +8164,21 @@ export default function App() {
             {currentTrack && (
               <>
                 <div className="flex items-center gap-6">
-                  {coverArtUrls[currentTrack.id] ? (
-                    <img
+                  <div
+                    className="w-28 h-28 sm:w-36 sm:h-36 rounded-3xl bg-[#0b1120] border-2 overflow-hidden shrink-0"
+                    style={{ borderColor: activeAccent.hex }}
+                  >
+                    <CrossfadeAlbumArt
                       src={coverArtUrls[currentTrack.id]}
                       alt={currentTrack.title}
-                      className="w-28 h-28 sm:w-36 sm:h-36 rounded-3xl object-cover border-2"
-                      style={{ borderColor: activeAccent.hex }}
+                      trackKey={currentTrack.id}
+                      durationMs={300}
+                      className="w-full h-full"
+                      fallback={
+                        <Disc className={`w-16 h-16 ${isPlaying ? 'animate-spin' : ''}`} style={{ color: activeAccent.hex }} />
+                      }
                     />
-                  ) : (
-                    <div
-                      className="w-28 h-28 sm:w-36 sm:h-36 rounded-3xl bg-[#0b1120] border-2 flex items-center justify-center"
-                      style={{ borderColor: activeAccent.hex }}
-                    >
-                      <Disc className={`w-16 h-16 ${isPlaying ? 'animate-spin' : ''}`} style={{ color: activeAccent.hex }} />
-                    </div>
-                  )}
+                  </div>
                   <div className="text-left min-w-0 max-w-xl">
                     <h2 className="text-3xl sm:text-5xl font-extrabold text-white line-clamp-2 leading-tight">
                       {currentTrack.title}

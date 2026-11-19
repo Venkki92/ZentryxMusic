@@ -26,6 +26,7 @@ import com.zentryx.music.network.metadata.RangeMetadataReader
 import com.zentryx.music.network.webdav.WebDavClient
 import com.zentryx.music.network.webdav.WebDavItem
 import com.zentryx.music.network.webdav.WebDavUrlHelper
+import com.zentryx.music.player.SettingsPreferences
 import com.zentryx.music.security.EncryptedDataStore
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedFactory
@@ -38,9 +39,9 @@ import java.util.ArrayDeque
 
 /**
  * WorkManager worker responsible for scanning Nextcloud WebDAV music libraries.
- * Uses Dagger @AssistedFactory (via ZentryxWorkerFactory), non-fatal foreground promotion,
- * automatic Nextcloud root fallback if configured folder does not exist or is empty,
- * and safe stale-song cleanup after full traversal.
+ * Scans all configured default folders (WoW Radio + Music) and user-added extra folders,
+ * supports additive single-folder scans (merging discovered tracks without pruning existing songs),
+ * and falls back to Nextcloud root only if all primary folders are empty/unavailable.
  */
 class LibraryScanWorker @AssistedInject constructor(
     @Assisted private val appContext: Context,
@@ -51,6 +52,7 @@ class LibraryScanWorker @AssistedInject constructor(
     private val songDao: SongDao,
     private val folderSyncDao: FolderSyncDao,
     private val encryptedDataStore: EncryptedDataStore,
+    private val settingsPreferences: SettingsPreferences,
     private val artworkDiskCacheManager: ArtworkDiskCacheManager,
     @IoDispatcher private val ioDispatcher: CoroutineDispatcher
 ) : CoroutineWorker(appContext, workerParams) {
@@ -70,6 +72,62 @@ class LibraryScanWorker @AssistedInject constructor(
         const val KEY_FILES_PROCESSED = "key_files_processed"
         const val KEY_STATUS = "key_status"
         const val KEY_ERROR_MESSAGE = "key_error_message"
+
+        const val KEY_TARGET_FOLDER_PATH = "key_target_folder_path"
+        const val KEY_ADDITIVE_MODE = "key_additive_mode"
+        const val KEY_RECURSIVE = "key_recursive"
+
+        internal fun buildCandidateRootsStatic(
+            config: ServerConfig,
+            extraFolders: List<String> = emptyList(),
+            explicitTargetFolder: String? = null
+        ): List<RootCandidate> {
+            val list = mutableListOf<RootCandidate>()
+            val seenUrls = mutableSetOf<String>()
+
+            fun addCandidate(cfg: ServerConfig, url: String, isFallback: Boolean) {
+                val norm = url.trimEnd('/')
+                if (seenUrls.add(norm.lowercase())) {
+                    list.add(RootCandidate(cfg, norm, isFallback))
+                }
+            }
+
+            if (explicitTargetFolder != null) {
+                val targetClean = ServerConfig.normalizeFolderPath(explicitTargetFolder)
+                val targetUrl = config.buildWebDavFolderUrl(targetClean)
+                addCandidate(
+                    config.copy(musicFolderPath = if (targetClean.isEmpty()) "/" else "/$targetClean"),
+                    targetUrl,
+                    isFallback = false
+                )
+                if (!config.useLegacyWebDav) {
+                    val legacyConfig = config.copy(
+                        useLegacyWebDav = true,
+                        musicFolderPath = if (targetClean.isEmpty()) "/" else "/$targetClean"
+                    )
+                    addCandidate(legacyConfig, legacyConfig.buildWebDavFolderUrl(targetClean), isFallback = true)
+                }
+                return list
+            }
+
+            // Full scan: enqueue EVERY configured default folder (e.g. WoW Radio, Music) + saved extra folders
+            val primaryFolders = config.configuredMusicFolders(extraFolders)
+            for (folder in primaryFolders) {
+                val folderUrl = config.buildWebDavFolderUrl(folder)
+                val folderLabel = if (folder.isEmpty()) "/" else "/$folder"
+                addCandidate(config.copy(musicFolderPath = folderLabel), folderUrl, isFallback = false)
+            }
+
+            // Fallback to Nextcloud root only if all primary folders combined discover 0 tracks
+            val baseRootUrl = config.webDavBaseUrl.trimEnd('/')
+            addCandidate(config.copy(musicFolderPath = "/"), baseRootUrl, isFallback = true)
+
+            if (!config.useLegacyWebDav) {
+                val legacyConfig = config.copy(useLegacyWebDav = true, musicFolderPath = "/")
+                addCandidate(legacyConfig, legacyConfig.webDavBaseUrl.trimEnd('/'), isFallback = true)
+            }
+            return list
+        }
     }
 
     private val notificationManager: NotificationManager?
@@ -91,7 +149,16 @@ class LibraryScanWorker @AssistedInject constructor(
             runCatching { createNotificationChannel() }
             runCatching { setForeground(createForegroundInfo("Connecting to Nextcloud WebDAV…", 0, 0)) }
 
-            val candidates = buildCandidateRoots(rawConfig)
+            val explicitTargetFolder = inputData.getString(KEY_TARGET_FOLDER_PATH)?.takeIf { it.isNotEmpty() }
+            val isAdditiveMode = inputData.getBoolean(KEY_ADDITIVE_MODE, false)
+            val isRecursive = inputData.getBoolean(KEY_RECURSIVE, true)
+            val extraFolders = if (explicitTargetFolder == null) {
+                settingsPreferences.extraWebDavFoldersFlow.firstOrNull().orEmpty()
+            } else {
+                emptyList()
+            }
+
+            val candidates = buildCandidateRoots(rawConfig, extraFolders, explicitTargetFolder)
             var lastErrorMessage: String? = null
             var anyRootSucceeded = false
             var totalFilesDiscovered = 0
@@ -102,7 +169,7 @@ class LibraryScanWorker @AssistedInject constructor(
             for ((activeConfig, rootUrl, isFallbackCandidate) in candidates) {
                 if (isStopped) return@withContext Result.retry()
 
-                // Skip fallback root if the configured folder already found tracks
+                // Skip fallback root if primary configured folder(s) already found tracks
                 if (isFallbackCandidate && totalFilesProcessed > 0) {
                     break
                 }
@@ -174,10 +241,12 @@ class LibraryScanWorker @AssistedInject constructor(
 
                     totalFilesDiscovered += audioFiles.size
 
-                    for (subfolder in subfolders) {
-                        val childUrl = urlHelper.resolveHrefUrl(activeConfig.serverUrl, subfolder.href)
-                        if (!visitedFolders.contains(childUrl.trimEnd('/'))) {
-                            folderQueue.add(childUrl)
+                    if (isRecursive) {
+                        for (subfolder in subfolders) {
+                            val childUrl = urlHelper.resolveHrefUrl(activeConfig.serverUrl, subfolder.href)
+                            if (!visitedFolders.contains(childUrl.trimEnd('/'))) {
+                                folderQueue.add(childUrl)
+                            }
                         }
                     }
 
@@ -289,11 +358,18 @@ class LibraryScanWorker @AssistedInject constructor(
                 return@withContext Result.failure(workDataOf(KEY_ERROR_MESSAGE to msg))
             }
 
-            // Prune deleted WebDAV tracks safely only after the full traversal succeeds
-            pruneRemovedWebDavSongs(validWebDavSongIds)
+            // Prune deleted WebDAV tracks ONLY on full non-additive scans so manually added folders never wipe existing songs
+            if (!isAdditiveMode) {
+                pruneRemovedWebDavSongs(validWebDavSongIds)
+            }
 
             runCatching {
-                updateNotification("Library scan complete ($totalFilesProcessed tracks)", totalFilesDiscovered, totalFilesProcessed)
+                val doneMsg = if (isAdditiveMode) {
+                    "Added $totalFilesProcessed track(s) to library"
+                } else {
+                    "Library scan complete ($totalFilesProcessed tracks)"
+                }
+                updateNotification(doneMsg, totalFilesDiscovered, totalFilesProcessed)
             }
             Result.success(
                 workDataOf(
@@ -333,24 +409,11 @@ class LibraryScanWorker @AssistedInject constructor(
         val isFallback: Boolean
     )
 
-    internal fun buildCandidateRoots(config: ServerConfig): List<RootCandidate> {
-        val list = mutableListOf<RootCandidate>()
-        val configuredUrl = config.musicWebDavUrl.trimEnd('/')
-        val baseRootUrl = config.webDavBaseUrl.trimEnd('/')
-
-        list.add(RootCandidate(config, configuredUrl, isFallback = false))
-        if (!configuredUrl.equals(baseRootUrl, ignoreCase = true)) {
-            list.add(RootCandidate(config.copy(musicFolderPath = "/"), baseRootUrl, isFallback = true))
-        }
-        if (!config.useLegacyWebDav) {
-            val legacyConfig = config.copy(useLegacyWebDav = true, musicFolderPath = "/")
-            val legacyUrl = legacyConfig.webDavBaseUrl.trimEnd('/')
-            if (!legacyUrl.equals(baseRootUrl, ignoreCase = true)) {
-                list.add(RootCandidate(legacyConfig, legacyUrl, isFallback = true))
-            }
-        }
-        return list
-    }
+    internal fun buildCandidateRoots(
+        config: ServerConfig,
+        extraFolders: List<String> = emptyList(),
+        explicitTargetFolder: String? = null
+    ): List<RootCandidate> = buildCandidateRootsStatic(config, extraFolders, explicitTargetFolder)
 
     private fun generateSongId(relativePath: String): String {
         val md = MessageDigest.getInstance("SHA-256")

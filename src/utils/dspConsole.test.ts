@@ -112,6 +112,9 @@ describe('DSP Console Engine Math & Validation', () => {
     assert.ok(SURROUND_MODES.logic7_surround.haasLeftMs > 10);
     assert.ok(SURROUND_MODES.concert_hall.haasLeftMs > SURROUND_MODES.logic7_surround.haasLeftMs);
     assert.ok(SURROUND_MODES.studio_focused.centerBoostMaxDb > 0);
+    assert.equal(SURROUND_MODES.dolby_pro_logic_ii.useAllPassPhase, true);
+    assert.ok(SURROUND_MODES.dolby_atmos_virtual.heightBoostMaxDb >= 4.0);
+    assert.ok(SURROUND_MODES.virtual_surround_360.crosstalkCancelGain > 0.1);
   });
 
   it('matches presets deterministically from track genre, folder path, and title', () => {
@@ -229,9 +232,10 @@ describe('DSP Console Engine Math & Validation', () => {
       autoGenrePresetEnabled: true,
       autoSwitchDevicePreset: true,
       devicePresetMap: { bluetooth_a2dp: 'rock_metal' },
-      surroundMode: 'logic7_surround',
+      surroundMode: 'dolby_atmos_virtual',
       surroundIntensity: 140,
       centerCoherence: 73,
+      virtualHeight: 112,
       roadNoiseEqEnabled: true,
       bands16: [25, -25, 3],
     });
@@ -256,14 +260,32 @@ describe('DSP Console Engine Math & Validation', () => {
     assert.equal(sanitized.autoSwitchDevicePreset, true);
     assert.equal(sanitized.devicePresetMap.bluetooth_a2dp, 'rock_metal');
     assert.equal(sanitized.devicePresetMap.headunit_speakers, DEFAULT_DEVICE_PRESET_MAP.headunit_speakers);
-    assert.equal(sanitized.surroundMode, 'logic7_surround');
+    assert.equal(sanitized.surroundMode, 'dolby_atmos_virtual');
     assert.equal(sanitized.surroundIntensity, 100);
     assert.equal(sanitized.centerCoherence, 75);
+    assert.equal(sanitized.virtualHeight, 100);
     assert.equal(sanitized.roadNoiseEqEnabled, true);
     assert.equal(sanitized.bands16[0], 12);
     assert.equal(sanitized.bands16[1], -12);
     assert.equal(sanitized.bands16[2], 3);
     assert.equal(sanitized.bands16[15], 0);
+
+    const atmosCurve = buildDspResponseCurvePoints(
+      {
+        dspEnabled: true,
+        bands16: new Array(16).fill(0) as DspBandGains16,
+        bassBoostDb: 0,
+        bassBoostFreqHz: 65,
+        hpfCutoffHz: 0,
+        loudnessContour: false,
+        surroundMode: 'dolby_atmos_virtual',
+        centerCoherence: 50,
+        virtualHeight: 100,
+      },
+      85
+    );
+    const heightPoint = atmosCurve.find((p) => p.freq >= 6500 && p.freq <= 8000)!;
+    assert.ok(heightPoint.db > 2.0, `Expected Atmos virtual height lift at ~7.2 kHz, got ${heightPoint.db} dB`);
 
     const presets = sanitizeCustomPresets([
       null,

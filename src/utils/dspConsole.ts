@@ -16,60 +16,163 @@ export type LimiterCeilingDb = 0 | -0.5 | -1.5 | -3.0;
 export type ListeningStagePreset = 'all' | 'driver' | 'driver_rhd' | 'center' | 'custom';
 export type CompressorProfileId = 'off' | 'balanced' | 'night_highway' | 'club_punch';
 export type AudioOutputRouteId = 'headunit_speakers' | 'bluetooth_a2dp' | 'usb_dac_aux';
-export type SurroundModeId = 'off' | 'logic7_surround' | 'concert_hall' | 'studio_focused';
+export type SurroundModeId =
+  | 'off'
+  | 'logic7_surround'
+  | 'concert_hall'
+  | 'studio_focused'
+  | 'dolby_pro_logic_ii'
+  | 'dolby_atmos_virtual'
+  | 'virtual_surround_360';
+
+export const SURROUND_MODE_ORDER: readonly SurroundModeId[] = [
+  'off',
+  'logic7_surround',
+  'concert_hall',
+  'studio_focused',
+  'dolby_pro_logic_ii',
+  'dolby_atmos_virtual',
+  'virtual_surround_360',
+];
 
 export const SURROUND_MODES: Record<
   SurroundModeId,
   {
     label: string;
     shortLabel: string;
+    badge: string;
+    family: 'harman' | 'dolby_virtual';
     tagline: string;
     haasLeftMs: number;
     haasRightMs: number;
     sideWetScale: number;
     centerBoostMaxDb: number;
     sideWidthTarget: number;
+    sideBandpassHz: number;
+    sideBandpassQ: number;
+    heightBoostMaxDb: number;
+    useAllPassPhase: boolean;
+    crosstalkCancelGain: number;
   }
 > = {
   off: {
     label: 'Stereo Direct',
     shortLabel: 'Direct',
+    badge: '2.0 DIRECT',
+    family: 'harman',
     tagline: 'Pure uncolored 2-channel stereo path',
     haasLeftMs: 0,
     haasRightMs: 0,
     sideWetScale: 0,
     centerBoostMaxDb: 0,
     sideWidthTarget: 100,
+    sideBandpassHz: 1600,
+    sideBandpassQ: 0.55,
+    heightBoostMaxDb: 0,
+    useAllPassPhase: false,
+    crosstalkCancelGain: 0,
   },
   logic7_surround: {
     label: 'Logic 7 Surround',
     shortLabel: 'Logic 7',
+    badge: 'LOGIC 7',
+    family: 'harman',
     tagline: 'Harman-inspired 5.1 matrix: locked dash vocals + wraparound cabin ambience',
     haasLeftMs: 14,
     haasRightMs: 21,
     sideWetScale: 0.34,
     centerBoostMaxDb: 3.0,
     sideWidthTarget: 125,
+    sideBandpassHz: 1600,
+    sideBandpassQ: 0.55,
+    heightBoostMaxDb: 1.4,
+    useAllPassPhase: false,
+    crosstalkCancelGain: 0,
   },
   concert_hall: {
     label: 'Concert Hall',
     shortLabel: 'Concert',
+    badge: 'HALL 7.1',
+    family: 'harman',
     tagline: 'Deep spacious early reflections & wide acoustic venue bloom',
     haasLeftMs: 22,
     haasRightMs: 31,
     sideWetScale: 0.44,
     centerBoostMaxDb: 1.8,
     sideWidthTarget: 138,
+    sideBandpassHz: 1500,
+    sideBandpassQ: 0.5,
+    heightBoostMaxDb: 2.2,
+    useAllPassPhase: true,
+    crosstalkCancelGain: 0,
   },
   studio_focused: {
     label: 'Studio Focused',
     shortLabel: 'Studio',
+    badge: 'STUDIO',
+    family: 'harman',
     tagline: 'Tight nearfield center lock with crisp micro-air separation',
     haasLeftMs: 7,
     haasRightMs: 11,
     sideWetScale: 0.18,
     centerBoostMaxDb: 3.6,
     sideWidthTarget: 112,
+    sideBandpassHz: 1900,
+    sideBandpassQ: 0.7,
+    heightBoostMaxDb: 0.9,
+    useAllPassPhase: false,
+    crosstalkCancelGain: 0,
+  },
+  dolby_pro_logic_ii: {
+    label: 'Dolby Pro Logic II',
+    shortLabel: 'Dolby PLII',
+    badge: 'DOLBY PLII',
+    family: 'dolby_virtual',
+    tagline: '5.1 Music Matrix: 90° phase-shifted rear surround (7 kHz band-limited) + dash center',
+    haasLeftMs: 16,
+    haasRightMs: 20,
+    sideWetScale: 0.4,
+    centerBoostMaxDb: 3.4,
+    sideWidthTarget: 128,
+    sideBandpassHz: 1250,
+    sideBandpassQ: 0.48,
+    heightBoostMaxDb: 1.6,
+    useAllPassPhase: true,
+    crosstalkCancelGain: 0,
+  },
+  dolby_atmos_virtual: {
+    label: 'Dolby Virtual Atmos',
+    shortLabel: 'Atmos 3D',
+    badge: 'ATMOS 3D',
+    family: 'dolby_virtual',
+    tagline: '3D cabin height dome: pinna overhead elevation air + multi-tap 360° spatial field',
+    haasLeftMs: 11,
+    haasRightMs: 19,
+    sideWetScale: 0.42,
+    centerBoostMaxDb: 3.2,
+    sideWidthTarget: 136,
+    sideBandpassHz: 2100,
+    sideBandpassQ: 0.45,
+    heightBoostMaxDb: 4.2,
+    useAllPassPhase: true,
+    crosstalkCancelGain: 0.08,
+  },
+  virtual_surround_360: {
+    label: '360° Virtualizer',
+    shortLabel: 'Virtual 360',
+    badge: 'VIRTUAL 360',
+    family: 'dolby_virtual',
+    tagline: 'Cross-talk cancelled binaural / wide cabin 360° virtual surround + Android HW Virtualizer',
+    haasLeftMs: 18,
+    haasRightMs: 27,
+    sideWetScale: 0.48,
+    centerBoostMaxDb: 2.2,
+    sideWidthTarget: 146,
+    sideBandpassHz: 1750,
+    sideBandpassQ: 0.42,
+    heightBoostMaxDb: 3.2,
+    useAllPassPhase: true,
+    crosstalkCancelGain: 0.16,
   },
 };
 
@@ -118,6 +221,7 @@ export interface DspSettings {
   surroundMode: SurroundModeId;
   surroundIntensity: number; // 0 to 100%
   centerCoherence: number; // 0 to 100% (Mid L+R vocal focus)
+  virtualHeight: number; // 0 to 100% (Atmos / 360 overhead elevation air)
   roadNoiseEqEnabled: boolean; // Speed-sensitive cabin spectral tilt
 }
 
@@ -328,6 +432,7 @@ export const DEFAULT_DSP_SETTINGS: DspSettings = {
   surroundMode: 'off',
   surroundIntensity: 65,
   centerCoherence: 55,
+  virtualHeight: 45,
   roadNoiseEqEnabled: false,
 };
 
@@ -585,7 +690,7 @@ export function buildDspResponseCurvePoints(
     Partial<
       Pick<
         DspSettings,
-        'subLpfHz' | 'subTrimDb' | 'fader' | 'crossoverSlopeDb' | 'roadNoiseEqEnabled' | 'surroundMode' | 'centerCoherence'
+        'subLpfHz' | 'subTrimDb' | 'fader' | 'crossoverSlopeDb' | 'roadNoiseEqEnabled' | 'surroundMode' | 'centerCoherence' | 'virtualHeight'
       >
     >,
   volumePercent: number,
@@ -611,6 +716,10 @@ export function buildDspResponseCurvePoints(
   const centerBoostDb =
     surroundSpec && settings.surroundMode && settings.surroundMode !== 'off'
       ? surroundSpec.centerBoostMaxDb * ((settings.centerCoherence ?? 55) / 100) * 0.6
+      : 0;
+  const heightBoostDb =
+    surroundSpec && settings.surroundMode && settings.surroundMode !== 'off'
+      ? surroundSpec.heightBoostMaxDb * ((settings.virtualHeight ?? 45) / 100) * 0.8
       : 0;
 
   const pts: Array<{ x: number; y: number; freq: number; db: number }> = [];
@@ -659,10 +768,16 @@ export function buildDspResponseCurvePoints(
         db += roadNoise.vocalPresenceDb * Math.exp(-0.5 * vDist * vDist);
       }
 
-      // Logic 7 / Surround Center Vocal Coherence bell (~2.2 kHz)
+      // Logic 7 / Dolby / Virtual Surround Center Vocal Coherence bell (~2.2 kHz)
       if (centerBoostDb > 0.05) {
         const cDist = (Math.log2(freq) - Math.log2(2200)) / 0.65;
         db += centerBoostDb * Math.exp(-0.5 * cDist * cDist);
+      }
+
+      // Dolby Virtual Atmos / 360° Virtualizer Pinna Overhead Elevation bell (~7.2 kHz)
+      if (heightBoostDb > 0.05) {
+        const hDist = (Math.log2(freq) - Math.log2(7200)) / 0.72;
+        db += heightBoostDb * Math.exp(-0.5 * hDist * hDist);
       }
 
       // Rear-stage subtle upper-high warmth when faded rearward
@@ -698,7 +813,7 @@ export function sanitizeDspSettings(raw: unknown): DspSettings {
   const validCeilings: LimiterCeilingDb[] = [0, -0.5, -1.5, -3.0];
   const validStages: ListeningStagePreset[] = ['all', 'driver', 'driver_rhd', 'center', 'custom'];
   const validComp: CompressorProfileId[] = ['off', 'balanced', 'night_highway', 'club_punch'];
-  const validSurround: SurroundModeId[] = ['off', 'logic7_surround', 'concert_hall', 'studio_focused'];
+  const validSurround: SurroundModeId[] = [...SURROUND_MODE_ORDER];
 
   const rawMap = obj.devicePresetMap && typeof obj.devicePresetMap === 'object'
     ? (obj.devicePresetMap as Record<string, unknown>)
@@ -763,6 +878,7 @@ export function sanitizeDspSettings(raw: unknown): DspSettings {
       : 'off',
     surroundIntensity: clampNumber(Number(obj.surroundIntensity ?? DEFAULT_DSP_SETTINGS.surroundIntensity), 0, 100, 5),
     centerCoherence: clampNumber(Number(obj.centerCoherence ?? DEFAULT_DSP_SETTINGS.centerCoherence), 0, 100, 5),
+    virtualHeight: clampNumber(Number(obj.virtualHeight ?? DEFAULT_DSP_SETTINGS.virtualHeight), 0, 100, 5),
     roadNoiseEqEnabled: typeof obj.roadNoiseEqEnabled === 'boolean' ? obj.roadNoiseEqEnabled : false,
   };
 }

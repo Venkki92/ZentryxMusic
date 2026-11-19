@@ -202,7 +202,14 @@ export interface DriverProfile {
   rightDelayMs: number;
   balance: number;
   fader: number;
-  surroundMode: 'off' | 'logic7_surround' | 'concert_hall' | 'studio_focused';
+  surroundMode:
+    | 'off'
+    | 'logic7_surround'
+    | 'concert_hall'
+    | 'studio_focused'
+    | 'dolby_pro_logic_ii'
+    | 'dolby_atmos_virtual'
+    | 'virtual_surround_360';
   surroundIntensity: number;
   selectedPresetId: string;
   subTrimDb: number;
@@ -272,7 +279,15 @@ export function sanitizeDriverProfiles(raw: unknown): DriverProfile[] {
   const validAccents = new Set(['LIME', 'AMBER', 'CYAN', 'SILVER', 'RED']);
   const validThemes = new Set(['auto', 'night', 'day']);
   const validStages = new Set(['all', 'driver', 'driver_rhd', 'center', 'custom']);
-  const validSurround = new Set(['off', 'logic7_surround', 'concert_hall', 'studio_focused']);
+  const validSurround = new Set([
+    'off',
+    'logic7_surround',
+    'concert_hall',
+    'studio_focused',
+    'dolby_pro_logic_ii',
+    'dolby_atmos_virtual',
+    'virtual_surround_360',
+  ]);
 
   const out: DriverProfile[] = [];
   for (const item of raw) {

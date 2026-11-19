@@ -60,6 +60,13 @@ import {
 } from '../utils/carConvenience';
 import { PWAInstallButton, AndroidApkDownloadButton } from './PWAComponents';
 import { DiagnosticLogEntry } from '../App';
+import { AdaptiveCabinCard } from './AdaptiveCabinCard';
+import {
+  AdaptiveCabinConfig,
+  AdaptiveDspDelta,
+  AdaptiveEvaluationState,
+  CabinMicStatus,
+} from '../utils/adaptiveCabinProfile';
 
 export interface SettingsPanelProps {
   accentHex: string;
@@ -81,6 +88,16 @@ export interface SettingsPanelProps {
   onHoldBypassChange?: (bypassed: boolean) => void;
   activeOutputRoute?: AudioOutputRouteId;
   onSelectOutputRoute?: (route: AudioOutputRouteId) => void;
+
+  // Automated Cabin Noise & Speed Adaptive DSP Profile Switching
+  adaptiveCabinConfig: AdaptiveCabinConfig;
+  onChangeAdaptiveCabinConfig: (
+    next: AdaptiveCabinConfig | ((prev: AdaptiveCabinConfig) => AdaptiveCabinConfig)
+  ) => void;
+  adaptiveCabinState: AdaptiveEvaluationState;
+  adaptiveDspDelta: AdaptiveDspDelta;
+  cabinNoiseDb: number | null;
+  cabinMicStatus: CabinMicStatus;
 
   // Attenuation
   isAttenuated: boolean;
@@ -251,6 +268,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onHoldBypassChange,
   activeOutputRoute,
   onSelectOutputRoute,
+
+  adaptiveCabinConfig,
+  onChangeAdaptiveCabinConfig,
+  adaptiveCabinState,
+  adaptiveDspDelta,
+  cabinNoiseDb,
+  cabinMicStatus,
 
   isAttenuated,
   onToggleAttenuation,
@@ -541,6 +565,23 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             activeOutputRoute={activeOutputRoute}
             onSelectOutputRoute={onSelectOutputRoute}
             getAudioContext={getAudioContext}
+            adaptiveCabinEnabled={adaptiveCabinConfig.enabled}
+            adaptiveProfileId={adaptiveCabinState.activeProfile}
+            adaptiveDspDelta={adaptiveDspDelta}
+            onToggleAdaptiveCabin={() =>
+              onChangeAdaptiveCabinConfig((prev) => ({ ...prev, enabled: !prev.enabled }))
+            }
+          />
+
+          <AdaptiveCabinCard
+            accentHex={accentHex}
+            config={adaptiveCabinConfig}
+            onChangeConfig={onChangeAdaptiveCabinConfig}
+            evalState={adaptiveCabinState}
+            activeDelta={adaptiveDspDelta}
+            cabinNoiseDb={cabinNoiseDb}
+            micStatus={cabinMicStatus}
+            currentSpeedKmH={currentGpsSpeed}
           />
 
           {/* Quick Talk Attenuation, ReplayGain & Crossfade */}
@@ -1859,7 +1900,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   {isLoggedIn ? username : 'Not signed in'}
                 </div>
                 <div className="text-xs text-slate-400 font-mono mt-0.5">
-                  cloud.zentryx.bg • /{musicFolder || 'Root'}
+                  cloud.zentryx.bg • {musicFolder || 'WoW Radio, Music'}
                 </div>
               </div>
 
@@ -1892,16 +1933,18 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
             {/* Folder Browser Link */}
             {isLoggedIn && (
-              <div className="flex items-center justify-between p-3.5 rounded-xl bg-black/40 border border-slate-800">
-                <div className="flex items-center gap-2.5">
-                  <FolderOpen className="w-4 h-4 text-slate-400" />
-                  <span className="text-xs text-slate-300">Active Music Folder: <strong>/{musicFolder}</strong></span>
+              <div className="flex items-center justify-between p-3.5 rounded-xl bg-black/40 border border-slate-800 gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <FolderOpen className="w-4 h-4 text-slate-400 shrink-0" />
+                  <span className="text-xs text-slate-300 truncate">
+                    Scan Folders: <strong>{musicFolder || 'WoW Radio, Music'}</strong>
+                  </span>
                 </div>
                 <button
                   onClick={onOpenFolderBrowser}
-                  className="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 text-white transition-colors"
+                  className="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 text-white transition-colors shrink-0"
                 >
-                  Browse Folders
+                  + Add / Browse Folders
                 </button>
               </div>
             )}

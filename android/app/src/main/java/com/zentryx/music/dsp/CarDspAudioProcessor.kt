@@ -56,6 +56,7 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
     @Volatile private var surroundMode: SurroundMode = SurroundMode.OFF
     @Volatile private var surroundIntensity: Int = 55
     @Volatile private var centerCoherence: Int = 45
+    @Volatile private var virtualHeight: Int = 45
     @Volatile private var roadNoiseEqEnabled: Boolean = true
     @Volatile private var currentSpeedKmH: Float = 0f
     @Volatile private var replayGainLinear: Float = 1.0f
@@ -102,17 +103,33 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
     private var rnMidX1L = 0.0; private var rnMidX2L = 0.0; private var rnMidY1L = 0.0; private var rnMidY2L = 0.0
     private var rnMidX1R = 0.0; private var rnMidX2R = 0.0; private var rnMidY1R = 0.0; private var rnMidY2R = 0.0
 
-    // Logic 7 Surround Matrix: Mid 2.2 kHz bandpass + Side 350-4500 Hz bandpass + Haas delay buffer
+    // Surround Matrix: Mid 2.2 kHz bandpass + Side bandpass + Dolby PLII 90° All-Pass + Haas + Atmos Height + 360° XTC
     private var l7MidB0 = 0.0; private var l7MidB1 = 0.0; private var l7MidB2 = 0.0; private var l7MidA1 = 0.0; private var l7MidA2 = 0.0
     private var l7MidX1 = 0.0; private var l7MidX2 = 0.0; private var l7MidY1 = 0.0; private var l7MidY2 = 0.0
     private var l7SideB0 = 0.0; private var l7SideB1 = 0.0; private var l7SideB2 = 0.0; private var l7SideA1 = 0.0; private var l7SideA2 = 0.0
     private var l7SideX1 = 0.0; private var l7SideX2 = 0.0; private var l7SideY1 = 0.0; private var l7SideY2 = 0.0
+    private var l7ApActive = false
+    private var l7ApB0 = 1.0; private var l7ApB1 = 0.0; private var l7ApB2 = 0.0; private var l7ApA1 = 0.0; private var l7ApA2 = 0.0
+    private var l7ApX1 = 0.0; private var l7ApX2 = 0.0; private var l7ApY1 = 0.0; private var l7ApY2 = 0.0
     private var haasSideBuffer = FloatArray(2048)
     private var haasWritePos = 0
     private var haasDelayLeftSamples = 0
     private var haasDelayRightSamples = 0
     private var l7CenterInjectGain = 0.0
     private var l7SideWetGain = 0.0
+
+    // Dolby Virtual Atmos / 360° Overhead Pinna Height Elevation Filter (7.2 kHz peaking)
+    private var heightActive = false
+    private var heightB0 = 1.0; private var heightB1 = 0.0; private var heightB2 = 0.0; private var heightA1 = 0.0; private var heightA2 = 0.0
+    private var heightX1L = 0.0; private var heightX2L = 0.0; private var heightY1L = 0.0; private var heightY2L = 0.0
+    private var heightX1R = 0.0; private var heightX2R = 0.0; private var heightY1R = 0.0; private var heightY2R = 0.0
+
+    // 360° Virtualizer Inter-Aural Cross-Talk Cancellation (0.55 ms ITD inverted cross-feed)
+    private var xtcBufferL = FloatArray(128)
+    private var xtcBufferR = FloatArray(128)
+    private var xtcWritePos = 0
+    private var xtcDelaySamples = 24
+    private var xtcGain = 0.0
 
     // L/R Stage Time Alignment Delay buffer
     private var delayBufferL = FloatArray(1024)
@@ -139,6 +156,7 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         surroundMode = settings.surroundMode
         surroundIntensity = settings.surroundIntensity.coerceIn(0, 100)
         centerCoherence = settings.centerCoherence.coerceIn(0, 100)
+        virtualHeight = settings.virtualHeight.coerceIn(0, 100)
         roadNoiseEqEnabled = settings.roadNoiseEqEnabled
         coeffVersion++
     }
@@ -260,7 +278,7 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             rnMidActive = false
         }
 
-        // 4. Harman Logic 7 Matrix Filters (Mid 2.2 kHz bandpass + Side 1.4 kHz wide bandpass)
+        // 4. Harman Logic 7 / Dolby Pro Logic II / Dolby Virtual Atmos / 360° Virtualizer Matrix
         if (surroundMode != SurroundMode.OFF && 2200.0 < sr * 0.45) {
             val wMid = 2.0 * PI * 2200.0 / sr
             val aMid = sin(wMid) / (2.0 * 1.0)
@@ -271,8 +289,9 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             l7MidA1 = (-2.0 * cos(wMid)) / a0Mid
             l7MidA2 = (1.0 - aMid) / a0Mid
 
-            val wSide = 2.0 * PI * 1400.0 / sr
-            val aSide = sin(wSide) / (2.0 * 0.65)
+            val sideHz = surroundMode.sideBandpassHz.toDouble().coerceIn(800.0, sr * 0.35)
+            val wSide = 2.0 * PI * sideHz / sr
+            val aSide = sin(wSide) / (2.0 * 0.62)
             val a0Side = 1.0 + aSide
             l7SideB0 = aSide / a0Side
             l7SideB1 = 0.0
@@ -280,14 +299,52 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             l7SideA1 = (-2.0 * cos(wSide)) / a0Side
             l7SideA2 = (1.0 - aSide) / a0Side
 
+            // Dolby Pro Logic II / Virtual 3D 90-degree All-Pass Phase Shift @ 1.1 kHz
+            l7ApActive = surroundMode.useAllPassPhase && 1100.0 < sr * 0.45
+            if (l7ApActive) {
+                val wAp = 2.0 * PI * 1100.0 / sr
+                val csAp = cos(wAp)
+                val alphaAp = sin(wAp) / (2.0 * 0.7071)
+                val a0Ap = 1.0 + alphaAp
+                l7ApB0 = (1.0 - alphaAp) / a0Ap
+                l7ApB1 = (-2.0 * csAp) / a0Ap
+                l7ApB2 = (1.0 + alphaAp) / a0Ap
+                l7ApA1 = (-2.0 * csAp) / a0Ap
+                l7ApA2 = (1.0 - alphaAp) / a0Ap
+            }
+
+            // Overhead Pinna Height Elevation Filter @ 7.2 kHz (Atmos 3D / Virtual 360)
+            val heightDb = (virtualHeight / 100.0) * surroundMode.heightWeight * 4.2
+            if (heightDb >= 0.1 && 7200.0 < sr * 0.45) {
+                heightActive = true
+                val aH = 10.0.pow(heightDb / 40.0)
+                val wH = 2.0 * PI * 7200.0 / sr
+                val csH = cos(wH)
+                val alphaH = sin(wH) / (2.0 * 0.85)
+                val a0H = 1.0 + alphaH / aH
+                heightB0 = (1.0 + alphaH * aH) / a0H
+                heightB1 = (-2.0 * csH) / a0H
+                heightB2 = (1.0 - alphaH * aH) / a0H
+                heightA1 = (-2.0 * csH) / a0H
+                heightA2 = (1.0 - alphaH / aH) / a0H
+            } else {
+                heightActive = false
+            }
+
             val maxHaas = haasSideBuffer.size - 1
             haasDelayLeftSamples = ((surroundMode.haasLeftMs / 1000f) * sampleRateHz).roundToInt().coerceIn(1, maxHaas)
             haasDelayRightSamples = ((surroundMode.haasRightMs / 1000f) * sampleRateHz).roundToInt().coerceIn(1, maxHaas)
             l7CenterInjectGain = (centerCoherence / 100.0) * surroundMode.centerWeight * 0.42
             l7SideWetGain = (surroundIntensity / 100.0) * surroundMode.sideWeight * 0.65
+
+            xtcDelaySamples = (0.00055 * sampleRateHz).roundToInt().coerceIn(1, xtcBufferL.size - 1)
+            xtcGain = (surroundIntensity / 100.0) * surroundMode.crosstalkCancelGain.toDouble()
         } else {
             l7CenterInjectGain = 0.0
             l7SideWetGain = 0.0
+            l7ApActive = false
+            heightActive = false
+            xtcGain = 0.0
         }
 
         // 5. Limiter & L/R Stage Time Alignment
@@ -311,7 +368,8 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         val useSubStage = dspEnabled && (subPhaseInverted || subLpfHz > 0 || abs(subTrimDb) >= 0.1f || subDelaySamples > 0)
         val useRoadNoise = dspEnabled && (rnLowActive || rnMidActive)
         val useSurround = dspEnabled && channelCount == 2 && !monoFoldDown &&
-            surroundMode != SurroundMode.OFF && (l7CenterInjectGain > 0.002 || l7SideWetGain > 0.002)
+            surroundMode != SurroundMode.OFF &&
+            (l7CenterInjectGain > 0.002 || l7SideWetGain > 0.002 || heightActive || xtcGain > 0.002)
         val useLimiterClamp = dspEnabled && peakLimiterCeilingDb < -0.05f
         val useDsp = dspEnabled &&
             (hpfHz > 0 || leftDelaySamples > 0 || rightDelaySamples > 0 ||
@@ -430,8 +488,14 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
                     val midBp = l7MidB0 * midIn + l7MidB1 * l7MidX1 + l7MidB2 * l7MidX2 - l7MidA1 * l7MidY1 - l7MidA2 * l7MidY2
                     l7MidX2 = l7MidX1; l7MidX1 = midIn; l7MidY2 = l7MidY1; l7MidY1 = midBp
 
-                    val sideBp = l7SideB0 * sideIn + l7SideB1 * l7SideX1 + l7SideB2 * l7SideX2 - l7SideA1 * l7SideY1 - l7SideA2 * l7SideY2
+                    var sideBp = l7SideB0 * sideIn + l7SideB1 * l7SideX1 + l7SideB2 * l7SideX2 - l7SideA1 * l7SideY1 - l7SideA2 * l7SideY2
                     l7SideX2 = l7SideX1; l7SideX1 = sideIn; l7SideY2 = l7SideY1; l7SideY1 = sideBp
+
+                    if (l7ApActive) {
+                        val apOut = l7ApB0 * sideBp + l7ApB1 * l7ApX1 + l7ApB2 * l7ApX2 - l7ApA1 * l7ApY1 - l7ApA2 * l7ApY2
+                        l7ApX2 = l7ApX1; l7ApX1 = sideBp; l7ApY2 = l7ApY1; l7ApY1 = apOut
+                        sideBp = apOut
+                    }
 
                     haasSideBuffer[haasWritePos] = sideBp.toFloat()
                     val haasL = haasSideBuffer[(haasWritePos - haasDelayLeftSamples + haasLen) % haasLen].toDouble()
@@ -439,8 +503,31 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
                     haasWritePos = (haasWritePos + 1) % haasLen
 
                     val centerLift = midBp * l7CenterInjectGain
-                    l += centerLift + haasL * l7SideWetGain
-                    r += centerLift - haasR * l7SideWetGain
+                    var outL = l + centerLift + haasL * l7SideWetGain
+                    var outR = r + centerLift - haasR * l7SideWetGain
+
+                    if (xtcGain > 0.002) {
+                        val xtcLen = xtcBufferL.size
+                        xtcBufferL[xtcWritePos] = l.toFloat()
+                        xtcBufferR[xtcWritePos] = r.toFloat()
+                        val xtcRead = (xtcWritePos - xtcDelaySamples + xtcLen) % xtcLen
+                        outL -= xtcBufferR[xtcRead].toDouble() * xtcGain
+                        outR -= xtcBufferL[xtcRead].toDouble() * xtcGain
+                        xtcWritePos = (xtcWritePos + 1) % xtcLen
+                    }
+
+                    if (heightActive) {
+                        val hL = heightB0 * outL + heightB1 * heightX1L + heightB2 * heightX2L - heightA1 * heightY1L - heightA2 * heightY2L
+                        heightX2L = heightX1L; heightX1L = outL; heightY2L = heightY1L; heightY1L = hL
+                        outL = hL
+
+                        val hR = heightB0 * outR + heightB1 * heightX1R + heightB2 * heightX2R - heightA1 * heightY1R - heightA2 * heightY2R
+                        heightX2R = heightX1R; heightX1R = outR; heightY2R = heightY1R; heightY1R = hR
+                        outR = hR
+                    }
+
+                    l = outL
+                    r = outR
                 }
 
                 if (effectiveWidth != 1.0f) {
@@ -525,6 +612,9 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
 
         l7MidX1 = 0.0; l7MidX2 = 0.0; l7MidY1 = 0.0; l7MidY2 = 0.0
         l7SideX1 = 0.0; l7SideX2 = 0.0; l7SideY1 = 0.0; l7SideY2 = 0.0
+        l7ApX1 = 0.0; l7ApX2 = 0.0; l7ApY1 = 0.0; l7ApY2 = 0.0
+        heightX1L = 0.0; heightX2L = 0.0; heightY1L = 0.0; heightY2L = 0.0
+        heightX1R = 0.0; heightX2R = 0.0; heightY1R = 0.0; heightY2R = 0.0
 
         subDelayBufferL.fill(0f)
         subDelayBufferR.fill(0f)
@@ -532,6 +622,10 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
 
         haasSideBuffer.fill(0f)
         haasWritePos = 0
+
+        xtcBufferL.fill(0f)
+        xtcBufferR.fill(0f)
+        xtcWritePos = 0
 
         delayBufferL.fill(0f)
         delayBufferR.fill(0f)

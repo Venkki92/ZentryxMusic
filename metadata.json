@@ -1,7 +1,9 @@
 {
   "name": "Zentryx Music",
   "description": "Automotive 1024x600 8-inch Nextcloud music player with real-time 16-band Web Audio DSP, Pioneer TS-E170Ci tuning, Mercedes visualizers, and offline caching.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": [
+    "microphone"
+  ],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]

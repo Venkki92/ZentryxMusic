@@ -8,6 +8,7 @@ import android.media.audiofx.BassBoost
 import android.media.audiofx.DynamicsProcessing
 import android.media.audiofx.Equalizer
 import android.media.audiofx.LoudnessEnhancer
+import android.media.audiofx.Virtualizer
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -16,11 +17,14 @@ import com.zentryx.music.player.SettingsPreferences
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -37,7 +41,8 @@ import kotlin.math.abs
 class AndroidDspAudioEngine @Inject constructor(
     @ApplicationContext private val context: Context,
     private val settingsPreferences: SettingsPreferences,
-    private val carDspAudioProcessor: CarDspAudioProcessor
+    private val carDspAudioProcessor: CarDspAudioProcessor,
+    private val cabinNoiseMonitor: CabinNoiseMonitor
 ) {
     companion object {
         private const val TAG = "ZentryxDspEngine"
@@ -59,6 +64,9 @@ class AndroidDspAudioEngine @Inject constructor(
     private val _isGlobalEqAttached = MutableStateFlow(false)
     val isGlobalEqAttached: StateFlow<Boolean> = _isGlobalEqAttached.asStateFlow()
 
+    private val _isHardwareVirtualizerActive = MutableStateFlow(false)
+    val isHardwareVirtualizerActive: StateFlow<Boolean> = _isHardwareVirtualizerActive.asStateFlow()
+
     private val _activeOutputRoute = MutableStateFlow(detectCurrentOutputRoute())
     val activeOutputRoute: StateFlow<AudioOutputRoute> = _activeOutputRoute.asStateFlow()
 
@@ -73,6 +81,20 @@ class AndroidDspAudioEngine @Inject constructor(
     private var isHoldBypassed: Boolean = false
     private var preHoldDspEnabled: Boolean = true
 
+    private val _adaptiveCabinConfig = MutableStateFlow(AdaptiveCabinConfig())
+    val adaptiveCabinConfig: StateFlow<AdaptiveCabinConfig> = _adaptiveCabinConfig.asStateFlow()
+
+    private val _adaptiveEvaluationState = MutableStateFlow(AdaptiveEvaluationState())
+    val adaptiveEvaluationState: StateFlow<AdaptiveEvaluationState> = _adaptiveEvaluationState.asStateFlow()
+
+    private val _adaptiveDspDelta = MutableStateFlow(AdaptiveDspDelta())
+    val adaptiveDspDelta: StateFlow<AdaptiveDspDelta> = _adaptiveDspDelta.asStateFlow()
+
+    val cabinNoiseDb: StateFlow<Float?> = cabinNoiseMonitor.cabinNoiseDb
+    val cabinMicStatus: StateFlow<CabinMicMonitorStatus> = cabinNoiseMonitor.status
+
+    private var adaptiveEvalJob: Job? = null
+
     private var currentAudioSessionId: Int = 0
     private var globalSessionRequested: Boolean = false
     private var attachedSessionId: Int = -1
@@ -82,6 +104,7 @@ class AndroidDspAudioEngine @Inject constructor(
     private var legacyEqualizer: Equalizer? = null
     private var legacyBassBoost: BassBoost? = null
     private var legacyLoudness: LoudnessEnhancer? = null
+    private var hardwareVirtualizer: Virtualizer? = null
 
     private val audioDeviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
@@ -98,8 +121,14 @@ class AndroidDspAudioEngine @Inject constructor(
             settingsPreferences.dspSettingsJsonFlow.collectLatest { json ->
                 val parsed = deserializeDspSettings(json)
                 _dspSettings.value = parsed
-                carDspAudioProcessor.updateSettings(parsed)
-                applyDspToHardware(parsed)
+                applyEffectiveDsp(parsed)
+            }
+        }
+        scope.launch {
+            settingsPreferences.adaptiveCabinConfigJsonFlow.collectLatest { json ->
+                val parsed = deserializeAdaptiveCabinConfig(json)
+                _adaptiveCabinConfig.value = parsed
+                syncAdaptiveMonitoring(parsed)
             }
         }
         scope.launch {
@@ -119,6 +148,80 @@ class AndroidDspAudioEngine @Inject constructor(
             audioManager?.registerAudioDeviceCallback(audioDeviceCallback, Handler(Looper.getMainLooper()))
         } catch (t: Throwable) {
             Log.w(TAG, "AudioDeviceCallback registration warning: ${t.message}")
+        }
+    }
+
+    private fun applyEffectiveDsp(baseSettings: DspSettings) {
+        val effective = applyAdaptiveCabinOverlay(baseSettings, _adaptiveDspDelta.value)
+        carDspAudioProcessor.updateSettings(effective)
+        applyDspToHardware(effective)
+    }
+
+    private fun syncAdaptiveMonitoring(config: AdaptiveCabinConfig) {
+        if (!config.enabled) {
+            adaptiveEvalJob?.cancel()
+            adaptiveEvalJob = null
+            cabinNoiseMonitor.stop()
+            _adaptiveEvaluationState.value = AdaptiveEvaluationState(
+                activeProfile = AdaptiveCabinProfile.QUIET,
+                triggerReason = "disabled"
+            )
+            if (_adaptiveDspDelta.value.profile != AdaptiveCabinProfile.QUIET) {
+                _adaptiveDspDelta.value = AdaptiveDspDelta()
+                applyEffectiveDsp(_dspSettings.value)
+            }
+            return
+        }
+
+        if (config.source == AdaptiveCabinSource.SPEED) {
+            cabinNoiseMonitor.stop()
+        } else {
+            cabinNoiseMonitor.start()
+        }
+
+        if (adaptiveEvalJob?.isActive != true) {
+            adaptiveEvalJob = scope.launch {
+                while (isActive) {
+                    val cfg = _adaptiveCabinConfig.value
+                    val nextState = evaluateAdaptiveCabinState(
+                        prevState = _adaptiveEvaluationState.value,
+                        config = cfg,
+                        cabinNoiseDb = cabinNoiseMonitor.cabinNoiseDb.value,
+                        speedKmH = currentVehicleSpeedKmH,
+                        nowMs = System.currentTimeMillis()
+                    )
+                    _adaptiveEvaluationState.value = nextState
+                    val nextDelta = calculateAdaptiveDspDelta(nextState.activeProfile, cfg)
+                    if (nextDelta != _adaptiveDspDelta.value) {
+                        _adaptiveDspDelta.value = nextDelta
+                        applyEffectiveDsp(_dspSettings.value)
+                    }
+                    delay(400L)
+                }
+            }
+        } else {
+            val nextDelta = calculateAdaptiveDspDelta(_adaptiveEvaluationState.value.activeProfile, config)
+            if (nextDelta != _adaptiveDspDelta.value) {
+                _adaptiveDspDelta.value = nextDelta
+                applyEffectiveDsp(_dspSettings.value)
+            }
+        }
+    }
+
+    fun updateAdaptiveCabinConfig(newConfig: AdaptiveCabinConfig) {
+        val safe = sanitizeAdaptiveCabinConfig(newConfig)
+        _adaptiveCabinConfig.value = safe
+        syncAdaptiveMonitoring(safe)
+        scope.launch {
+            settingsPreferences.saveAdaptiveCabinConfigJson(serializeAdaptiveCabinConfig(safe))
+        }
+    }
+
+    fun restartCabinMicMonitorIfEnabled() {
+        val cfg = _adaptiveCabinConfig.value
+        if (cfg.enabled && cfg.source != AdaptiveCabinSource.SPEED) {
+            cabinNoiseMonitor.stop()
+            cabinNoiseMonitor.start()
         }
     }
 
@@ -200,8 +303,7 @@ class AndroidDspAudioEngine @Inject constructor(
             isHoldBypassed = false
             val restored = _dspSettings.value.copy(dspEnabled = preHoldDspEnabled)
             _dspSettings.value = restored
-            carDspAudioProcessor.updateSettings(restored)
-            applyDspToHardware(restored)
+            applyEffectiveDsp(restored)
         }
     }
 
@@ -279,9 +381,18 @@ class AndroidDspAudioEngine @Inject constructor(
             if (attached) attachedSessionId = currentAudioSessionId
         }
 
+        if (attached && attachedSessionId >= 0) {
+            hardwareVirtualizer = try {
+                Virtualizer(0, attachedSessionId)
+            } catch (t: Throwable) {
+                Log.w(TAG, "Hardware Virtualizer unavailable on headunit (PCM surround still active): ${t.message}")
+                null
+            }
+        }
+
         _isAttached.value = attached
         _isGlobalEqAttached.value = globalSucceeded
-        applyDspToHardware(_dspSettings.value)
+        applyEffectiveDsp(_dspSettings.value)
     }
 
     private fun initDynamicsProcessing(sessionId: Int): Boolean {
@@ -325,8 +436,7 @@ class AndroidDspAudioEngine @Inject constructor(
 
     fun updateSettings(newSettings: DspSettings) {
         _dspSettings.value = newSettings
-        carDspAudioProcessor.updateSettings(newSettings)
-        applyDspToHardware(newSettings)
+        applyEffectiveDsp(newSettings)
         scope.launch {
             settingsPreferences.saveDspSettingsJson(serializeDspSettings(newSettings))
         }
@@ -340,7 +450,7 @@ class AndroidDspAudioEngine @Inject constructor(
         val clamped = boostDb.coerceIn(0f, 6f)
         if (abs(clamped - dynamicSdvcBoostDb) < 0.1f) return
         dynamicSdvcBoostDb = clamped
-        applyDspToHardware(_dspSettings.value)
+        applyEffectiveDsp(_dspSettings.value)
     }
 
     fun saveCustomPreset(name: String) {
@@ -375,7 +485,40 @@ class AndroidDspAudioEngine @Inject constructor(
         }
     }
 
+    private fun applyHardwareVirtualizer(settings: DspSettings) {
+        val virt = hardwareVirtualizer
+        if (virt == null) {
+            _isHardwareVirtualizerActive.value = false
+            return
+        }
+        try {
+            val shouldEnable = settings.dspEnabled &&
+                !settings.monoFoldDown &&
+                settings.surroundMode != SurroundMode.OFF &&
+                settings.surroundIntensity > 0
+            virt.enabled = shouldEnable
+            if (shouldEnable && virt.strengthSupported) {
+                val scale = when (settings.surroundMode) {
+                    SurroundMode.VIRTUAL_SURROUND_360 -> 1.0f
+                    SurroundMode.DOLBY_ATMOS_VIRTUAL -> 0.85f
+                    SurroundMode.DOLBY_PRO_LOGIC_II -> 0.72f
+                    SurroundMode.CONCERT_HALL -> 0.78f
+                    SurroundMode.LOGIC7_SURROUND -> 0.65f
+                    SurroundMode.STUDIO_FOCUSED -> 0.35f
+                    SurroundMode.OFF -> 0f
+                }
+                val permille = (settings.surroundIntensity * 10f * scale).toInt().coerceIn(0, 1000)
+                virt.setStrength(permille.toShort())
+            }
+            _isHardwareVirtualizerActive.value = shouldEnable
+        } catch (t: Throwable) {
+            Log.w(TAG, "Hardware Virtualizer apply warning: ${t.message}")
+            _isHardwareVirtualizerActive.value = false
+        }
+    }
+
     private fun applyDspToHardware(settings: DspSettings) {
+        applyHardwareVirtualizer(settings)
         val sdvcActive = dynamicSdvcBoostDb > 0.1f
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val dp = dynamicsProcessing
@@ -478,12 +621,15 @@ class AndroidDspAudioEngine @Inject constructor(
         try { legacyEqualizer?.release() } catch (_: Throwable) {}
         try { legacyBassBoost?.release() } catch (_: Throwable) {}
         try { legacyLoudness?.release() } catch (_: Throwable) {}
+        try { hardwareVirtualizer?.release() } catch (_: Throwable) {}
         dynamicsProcessing = null
         legacyEqualizer = null
         legacyBassBoost = null
         legacyLoudness = null
+        hardwareVirtualizer = null
         attachedSessionId = -1
         _isAttached.value = false
         _isGlobalEqAttached.value = false
+        _isHardwareVirtualizerActive.value = false
     }
 }

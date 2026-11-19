@@ -1,6 +1,7 @@
 import React from 'react';
 import { Play, Pause, SkipForward, Disc, Cloud } from 'lucide-react';
 import { Track } from '../App';
+import { CrossfadeAlbumArt } from './CrossfadeAlbumArt';
 
 interface StickyMiniPlayerProps {
   currentTrack?: Track;
@@ -49,14 +50,19 @@ export const StickyMiniPlayer: React.FC<StickyMiniPlayerProps> = ({
             className="w-12 h-12 rounded-xl overflow-hidden bg-black/60 border flex items-center justify-center shrink-0 shadow-md group-hover:scale-105 transition-transform"
             style={{ borderColor: `${accentHex}66` }}
           >
-            {coverUrl ? (
-              <img src={coverUrl} alt="Cover" className="w-full h-full object-cover" />
-            ) : (
-              <Disc
-                className={`w-6 h-6 transition-transform ${isPlaying ? 'animate-spin' : ''}`}
-                style={{ color: accentHex, animationDuration: '6s' }}
-              />
-            )}
+            <CrossfadeAlbumArt
+              src={coverUrl}
+              alt={currentTrack.title || 'Cover'}
+              trackKey={currentTrack.id}
+              durationMs={300}
+              className="w-full h-full"
+              fallback={
+                <Disc
+                  className={`w-6 h-6 transition-transform ${isPlaying ? 'animate-spin' : ''}`}
+                  style={{ color: accentHex, animationDuration: '6s' }}
+                />
+              }
+            />
           </div>
 
           <div className="min-w-0 flex-1">

@@ -1,5 +1,8 @@
 package com.zentryx.music.ui.screens
 
+import android.Manifest
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -44,7 +47,7 @@ import kotlin.math.roundToInt
 
 private enum class DspConsoleTab(val label: String) {
     EQ_PRESETS("EQ & Presets"),
-    LOGIC7_SURROUND("Logic 7 Surround"),
+    LOGIC7_SURROUND("Surround 3D"),
     STAGE_XOVER("Stage & X-Over"),
     CABIN_RTA("Cabin RTA")
 }
@@ -67,6 +70,7 @@ fun DspConsoleScreen(
     val customPresets by viewModel.customDspPresets.collectAsStateWithLifecycle()
     val isAttached by viewModel.isDspAttached.collectAsStateWithLifecycle()
     val isGlobalEqAttached by viewModel.isGlobalEqAttached.collectAsStateWithLifecycle()
+    val isHwVirtualizerActive by viewModel.isHardwareVirtualizerActive.collectAsStateWithLifecycle()
     val globalEqRequested by viewModel.globalAudioSessionAttach.collectAsStateWithLifecycle()
     val activeOutputRoute by viewModel.activeOutputRoute.collectAsStateWithLifecycle()
     val activeCompareSlot by viewModel.activeCompareSlot.collectAsStateWithLifecycle()
@@ -78,6 +82,20 @@ fun DspConsoleScreen(
     val rtaStatusText by viewModel.rtaStatusText.collectAsStateWithLifecycle()
     val rtaLiveBandsDb by viewModel.rtaLiveBandsDb.collectAsStateWithLifecycle()
     val rtaResult by viewModel.rtaResult.collectAsStateWithLifecycle()
+
+    val adaptiveConfig by viewModel.adaptiveCabinConfig.collectAsStateWithLifecycle()
+    val adaptiveState by viewModel.adaptiveEvaluationState.collectAsStateWithLifecycle()
+    val adaptiveDelta by viewModel.adaptiveDspDelta.collectAsStateWithLifecycle()
+    val cabinNoiseDb by viewModel.cabinNoiseDb.collectAsStateWithLifecycle()
+    val cabinMicStatus by viewModel.cabinMicStatus.collectAsStateWithLifecycle()
+
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            viewModel.onRecordAudioPermissionGranted()
+        }
+    }
 
     val accent by viewModel.accentColor.collectAsStateWithLifecycle()
     val accentColor = Color(accent.hexColor)
@@ -98,7 +116,7 @@ fun DspConsoleScreen(
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Icon(imageVector = Icons.Default.GraphicEq, contentDescription = null, tint = accentColor)
                         Text(
-                            text = "PRO DSP & LOGIC 7 CONSOLE",
+                            text = "PRO DSP & SURROUND 3D",
                             style = MaterialTheme.typography.titleSmall.copy(
                                 fontWeight = FontWeight.Black,
                                 letterSpacing = 1.2.sp,
@@ -527,10 +545,36 @@ fun DspConsoleScreen(
                                 }
                             }
                         }
+
+                        // Automated Cabin Noise & Speed Adaptive DSP Profile Switcher
+                        AdaptiveCabinProfileCard(
+                            config = adaptiveConfig,
+                            evalState = adaptiveState,
+                            delta = adaptiveDelta,
+                            cabinNoiseDb = cabinNoiseDb,
+                            micStatus = cabinMicStatus,
+                            currentSpeedKmH = currentSpeedKmH,
+                            accentColor = accentColor,
+                            surfaceColor = surfaceColor,
+                            borderColor = borderColor,
+                            onUpdateConfig = { next ->
+                                if (next.enabled && next.source != AdaptiveCabinSource.SPEED &&
+                                    cabinMicStatus == CabinMicMonitorStatus.PERMISSION_REQUIRED
+                                ) {
+                                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                                viewModel.updateAdaptiveCabinConfig(next)
+                            },
+                            onRequestMicPermission = {
+                                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            }
+                        )
                     }
 
                     DspConsoleTab.LOGIC7_SURROUND -> {
-                        // Harman Logic 7 Matrix Upmixer + Surround Mode Selector
+                        // Harman Logic 7 + Dolby Surround + 360° Virtualizer Matrix
+                        val harmanModes = SurroundMode.entries.filter { !it.isDolbyOrVirtual }
+                        val dolbyVirtualModes = SurroundMode.entries.filter { it.isDolbyOrVirtual }
                         Surface(
                             shape = RoundedCornerShape(12.dp),
                             color = surfaceColor,
@@ -538,17 +582,31 @@ fun DspConsoleScreen(
                         ) {
                             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                    Column {
-                                        Text("HARMAN LOGIC 7 SURROUND MATRIX", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black, letterSpacing = 1.sp, color = accentColor))
-                                        Text("Mid (L+R) 2.2 kHz center vocal lock + decorrelated Side (L-R) Haas cabin reflections", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("SURROUND MATRIX — HARMAN LOGIC 7 • DOLBY • VIRTUAL 3D", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black, letterSpacing = 1.sp, color = accentColor))
+                                        Text("M/S center vocal lock, 90° Dolby Pro Logic II rear matrix, Atmos pinna height & 360° XTC", fontSize = 11.sp, color = Color(0xFF94A3B8))
                                     }
-                                    Surface(shape = RoundedCornerShape(6.dp), color = accentColor.copy(alpha = 0.16f)) {
-                                        Text(dsp.surroundMode.badge, fontSize = 10.sp, fontWeight = FontWeight.Black, color = accentColor, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        if (dsp.surroundMode != SurroundMode.OFF && !dsp.monoFoldDown) {
+                                            Surface(shape = RoundedCornerShape(6.dp), color = Color(0xFF0A0F1E), modifier = Modifier.border(0.5.dp, borderColor, RoundedCornerShape(6.dp))) {
+                                                Text(
+                                                    text = if (isHwVirtualizerActive) "PCM + HW VIRT" else "PCM 3D MATRIX",
+                                                    fontSize = 9.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    color = Color(0xFFCBD5E1),
+                                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp)
+                                                )
+                                            }
+                                        }
+                                        Surface(shape = RoundedCornerShape(6.dp), color = accentColor.copy(alpha = 0.16f)) {
+                                            Text(dsp.surroundMode.badge, fontSize = 10.sp, fontWeight = FontWeight.Black, color = accentColor, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
+                                        }
                                     }
                                 }
 
+                                Text("DIRECT & HARMAN LOGIC 7 SERIES", fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp, color = Color(0xFF64748B))
                                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    SurroundMode.entries.forEach { mode ->
+                                    harmanModes.forEach { mode ->
                                         val selected = dsp.surroundMode == mode
                                         Surface(
                                             shape = RoundedCornerShape(10.dp),
@@ -557,11 +615,19 @@ fun DspConsoleScreen(
                                                 .weight(1f)
                                                 .border(1.dp, if (selected) accentColor else borderColor, RoundedCornerShape(10.dp))
                                                 .pointerInput(mode) {
-                                                    detectTapGestures { viewModel.updateDspSettings(dsp.copy(dspEnabled = true, surroundMode = mode)) }
+                                                    detectTapGestures {
+                                                        viewModel.updateDspSettings(
+                                                            dsp.copy(
+                                                                dspEnabled = true,
+                                                                surroundMode = mode,
+                                                                monoFoldDown = if (mode != SurroundMode.OFF) false else dsp.monoFoldDown
+                                                            )
+                                                        )
+                                                    }
                                                 }
                                         ) {
                                             Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                Text(mode.label, fontSize = 12.sp, fontWeight = FontWeight.Black, color = if (selected) accentColor else Color.White)
+                                                Text(mode.label, fontSize = 12.sp, fontWeight = FontWeight.Black, color = if (selected) accentColor else Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                                 Text(mode.desc, fontSize = 10.sp, color = Color(0xFF94A3B8), lineHeight = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                                 Text(
                                                     text = if (mode == SurroundMode.OFF) "0 ms Haas" else "Haas ${mode.haasLeftMs.toInt()}/${mode.haasRightMs.toInt()} ms",
@@ -574,10 +640,54 @@ fun DspConsoleScreen(
                                     }
                                 }
 
-                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                Text("DOLBY SURROUND & VIRTUAL 3D SPATIALIZER ENGINES", fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp, color = Color(0xFF64748B))
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    dolbyVirtualModes.forEach { mode ->
+                                        val selected = dsp.surroundMode == mode
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = if (selected) accentColor.copy(alpha = 0.16f) else Color(0xFF0A0F1E),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .border(1.dp, if (selected) accentColor else borderColor, RoundedCornerShape(10.dp))
+                                                .pointerInput(mode) {
+                                                    detectTapGestures {
+                                                        viewModel.updateDspSettings(
+                                                            dsp.copy(
+                                                                dspEnabled = true,
+                                                                surroundMode = mode,
+                                                                monoFoldDown = false
+                                                            )
+                                                        )
+                                                    }
+                                                }
+                                        ) {
+                                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                                    Text(mode.label, fontSize = 12.sp, fontWeight = FontWeight.Black, color = if (selected) accentColor else Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                                    Text(mode.badge, fontSize = 8.sp, fontFamily = FontFamily.Monospace, color = if (selected) accentColor else Color(0xFF94A3B8))
+                                                }
+                                                Text(mode.desc, fontSize = 10.sp, color = Color(0xFF94A3B8), lineHeight = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                                val tagSuffix = buildString {
+                                                    append("Haas ${mode.haasLeftMs.toInt()}/${mode.haasRightMs.toInt()}ms")
+                                                    if (mode.useAllPassPhase) append(" • 90° AP")
+                                                    if (mode.crosstalkCancelGain > 0f) append(" • XTC")
+                                                }
+                                                Text(
+                                                    text = tagSuffix,
+                                                    fontSize = 9.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    color = if (selected) accentColor else Color(0xFF64748B)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                     Column(modifier = Modifier.weight(1f)) {
                                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                            Text("Surround Wrap Intensity", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                            Text("Surround Immersion", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                             Text("${dsp.surroundIntensity}%", fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = accentColor)
                                         }
                                         Slider(
@@ -590,12 +700,25 @@ fun DspConsoleScreen(
                                     }
                                     Column(modifier = Modifier.weight(1f)) {
                                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                            Text("Center Vocal Coherence (2.2 kHz)", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                            Text("Center Lock (2.2 kHz)", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                             Text("${dsp.centerCoherence}%", fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = accentColor)
                                         }
                                         Slider(
                                             value = dsp.centerCoherence.toFloat(),
                                             onValueChange = { viewModel.updateDspSettings(dsp.copy(centerCoherence = (it / 5f).roundToInt() * 5)) },
+                                            valueRange = 0f..100f,
+                                            enabled = dsp.surroundMode != SurroundMode.OFF,
+                                            colors = SliderDefaults.colors(thumbColor = accentColor, activeTrackColor = accentColor)
+                                        )
+                                    }
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                            Text("Virtual Height 3D", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                            Text("${dsp.virtualHeight}%", fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = accentColor)
+                                        }
+                                        Slider(
+                                            value = dsp.virtualHeight.toFloat(),
+                                            onValueChange = { viewModel.updateDspSettings(dsp.copy(virtualHeight = (it / 5f).roundToInt() * 5)) },
                                             valueRange = 0f..100f,
                                             enabled = dsp.surroundMode != SurroundMode.OFF,
                                             colors = SliderDefaults.colors(thumbColor = accentColor, activeTrackColor = accentColor)
@@ -1152,5 +1275,270 @@ private fun CabinStage2DPad(
         drawCircle(color = accentColor.copy(alpha = 0.25f), radius = 16.dp.toPx(), center = Offset(targetX, targetY))
         drawCircle(color = accentColor, radius = 8.dp.toPx(), center = Offset(targetX, targetY))
         drawCircle(color = Color.Black, radius = 3.dp.toPx(), center = Offset(targetX, targetY))
+    }
+}
+
+@Composable
+private fun AdaptiveCabinProfileCard(
+    config: AdaptiveCabinConfig,
+    evalState: AdaptiveEvaluationState,
+    delta: AdaptiveDspDelta,
+    cabinNoiseDb: Float?,
+    micStatus: CabinMicMonitorStatus,
+    currentSpeedKmH: Float,
+    accentColor: Color,
+    surfaceColor: Color,
+    borderColor: Color,
+    onUpdateConfig: (AdaptiveCabinConfig) -> Unit,
+    onRequestMicPermission: () -> Unit
+) {
+    var showThresholds by remember { mutableStateOf(false) }
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = surfaceColor,
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, if (config.enabled) accentColor.copy(alpha = 0.6f) else borderColor, RoundedCornerShape(12.dp))
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(imageVector = Icons.Default.Speed, contentDescription = null, tint = accentColor, modifier = Modifier.size(18.dp))
+                    Column {
+                        Text(
+                            text = "AUTO CABIN NOISE & SPEED DSP PROFILE",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = 1.sp,
+                                color = if (config.enabled) accentColor else Color.White
+                            )
+                        )
+                        Text(
+                            text = if (config.enabled) {
+                                "${evalState.activeProfile.label} · Gain +${String.format(Locale.US, "%.1f", delta.gainDb)} dB · Bal ${if (delta.balanceDelta > 0) "+" else ""}${delta.balanceDelta} · Fad ${if (delta.faderDelta > 0) "+" else ""}${delta.faderDelta}"
+                            } else {
+                                "Off · Base manual DSP gain and cabin balance preserved"
+                            },
+                            fontSize = 11.sp,
+                            color = Color(0xFF94A3B8),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                Switch(
+                    checked = config.enabled,
+                    onCheckedChange = { enabled -> onUpdateConfig(config.copy(enabled = enabled)) },
+                    colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = accentColor)
+                )
+            }
+
+            // Live Sensor Readouts (Mic dB SPL & GPS km/h)
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFF0A0F1E),
+                    modifier = Modifier.weight(1f).border(0.5.dp, borderColor, RoundedCornerShape(8.dp))
+                ) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Cabin Mic Noise", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                            Text(
+                                text = when {
+                                    config.source == AdaptiveCabinSource.SPEED -> "Bypassed"
+                                    cabinNoiseDb != null -> "${String.format(Locale.US, "%.1f", cabinNoiseDb)} dB"
+                                    else -> micStatus.label
+                                },
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                color = if (config.enabled && cabinNoiseDb != null) accentColor else Color(0xFFCBD5E1)
+                            )
+                        }
+                        val noiseFrac = if (config.enabled && cabinNoiseDb != null) {
+                            ((cabinNoiseDb - 32f) / 62f).coerceIn(0.03f, 1f)
+                        } else 0f
+                        LinearProgressIndicator(
+                            progress = { noiseFrac },
+                            color = if (cabinNoiseDb != null && cabinNoiseDb >= config.noiseExtremeDb) Color(0xFFF59E0B) else accentColor,
+                            trackColor = Color(0xFF1E293B),
+                            modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp))
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFF0A0F1E),
+                    modifier = Modifier.weight(1f).border(0.5.dp, borderColor, RoundedCornerShape(8.dp))
+                ) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Vehicle GPS Speed", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                            Text(
+                                text = if (config.source == AdaptiveCabinSource.MICROPHONE) "Bypassed" else "${currentSpeedKmH.toInt()} km/h",
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                color = if (config.enabled && config.source != AdaptiveCabinSource.MICROPHONE) accentColor else Color(0xFFCBD5E1)
+                            )
+                        }
+                        val speedFrac = if (config.enabled && config.source != AdaptiveCabinSource.MICROPHONE) {
+                            (currentSpeedKmH / config.speedHighKmH.coerceAtLeast(120).toFloat()).coerceIn(0f, 1f)
+                        } else 0f
+                        LinearProgressIndicator(
+                            progress = { speedFrac },
+                            color = accentColor,
+                            trackColor = Color(0xFF1E293B),
+                            modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp))
+                        )
+                    }
+                }
+            }
+
+            if (config.enabled && config.source != AdaptiveCabinSource.SPEED && micStatus == CabinMicMonitorStatus.PERMISSION_REQUIRED) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFFF59E0B).copy(alpha = 0.12f),
+                    modifier = Modifier.fillMaxWidth().border(0.5.dp, Color(0xFFF59E0B).copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Grant Microphone access for live cabin dB sensing (GPS speed still active)",
+                            fontSize = 10.sp,
+                            color = Color(0xFFFDE68A),
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = onRequestMicPermission, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                            Text("Allow Mic", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF59E0B))
+                        }
+                    }
+                }
+            }
+
+            // 4-Stage Profile Status Row
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                AdaptiveCabinProfile.entries.forEach { profile ->
+                    val isActive = config.enabled && evalState.activeProfile == profile
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (isActive) accentColor.copy(alpha = 0.16f) else Color(0xFF0A0F1E),
+                        modifier = Modifier
+                            .weight(1f)
+                            .border(0.8.dp, if (isActive) accentColor else borderColor, RoundedCornerShape(8.dp))
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                            Text(
+                                text = profile.shortLabel,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isActive) accentColor else Color.White,
+                                maxLines = 1
+                            )
+                            Text(
+                                text = if (profile == AdaptiveCabinProfile.QUIET) "Base DSP" else "+${profile.baseGainDb}dB · Bal ${profile.baseBalanceShift}",
+                                fontSize = 9.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = Color(0xFF94A3B8),
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Sensor Source, Strength & Cabin Focus Chips
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Source", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8))
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                        AdaptiveCabinSource.entries.forEach { src ->
+                            FilterChip(
+                                selected = config.source == src,
+                                onClick = { onUpdateConfig(config.copy(source = src)) },
+                                label = { Text(src.label, fontSize = 10.sp) },
+                                colors = FilterChipDefaults.filterChipColors(selectedContainerColor = accentColor.copy(alpha = 0.2f), selectedLabelColor = accentColor)
+                            )
+                        }
+                    }
+                }
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Strength", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8))
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                        AdaptiveCabinSensitivity.entries.forEach { sens ->
+                            FilterChip(
+                                selected = config.sensitivity == sens,
+                                onClick = { onUpdateConfig(config.copy(sensitivity = sens)) },
+                                label = { Text(sens.label, fontSize = 10.sp) },
+                                colors = FilterChipDefaults.filterChipColors(selectedContainerColor = accentColor.copy(alpha = 0.2f), selectedLabelColor = accentColor)
+                            )
+                        }
+                    }
+                }
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Balance Focus", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8))
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                        AdaptiveCabinFocus.entries.forEach { focus ->
+                            FilterChip(
+                                selected = config.cabinFocus == focus,
+                                onClick = { onUpdateConfig(config.copy(cabinFocus = focus)) },
+                                label = { Text(focus.label, fontSize = 10.sp) },
+                                colors = FilterChipDefaults.filterChipColors(selectedContainerColor = accentColor.copy(alpha = 0.2f), selectedLabelColor = accentColor)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Expandable Thresholds
+            OutlinedButton(
+                onClick = { showThresholds = !showThresholds },
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                modifier = Modifier.fillMaxWidth().height(34.dp)
+            ) {
+                Text(
+                    text = if (showThresholds) "Hide Noise & Speed Thresholds" else "Customize Noise (dB) & Speed (km/h) Thresholds",
+                    fontSize = 11.sp,
+                    color = Color.White
+                )
+            }
+
+            if (showThresholds) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Highway Noise Trigger: ${config.noiseLoudDb} dB", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = Color.White)
+                        Slider(
+                            value = config.noiseLoudDb.toFloat(),
+                            onValueChange = { onUpdateConfig(config.copy(noiseLoudDb = it.roundToInt())) },
+                            valueRange = 55f..80f,
+                            colors = SliderDefaults.colors(thumbColor = accentColor, activeTrackColor = accentColor)
+                        )
+                    }
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Highway Speed Trigger: ${config.speedHighwayKmH} km/h", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = Color.White)
+                        Slider(
+                            value = config.speedHighwayKmH.toFloat(),
+                            onValueChange = { onUpdateConfig(config.copy(speedHighwayKmH = (it / 5f).roundToInt() * 5)) },
+                            valueRange = 55f..125f,
+                            colors = SliderDefaults.colors(thumbColor = accentColor, activeTrackColor = accentColor)
+                        )
+                    }
+                }
+            }
+        }
     }
 }

@@ -87,24 +87,19 @@ fun MiniPlayer(
                         modifier = Modifier.weight(1f),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        if (currentSong.artworkPath != null && File(currentSong.artworkPath).exists()) {
-                            AsyncImage(
-                                model = File(currentSong.artworkPath),
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .border(1.dp, borderCol, RoundedCornerShape(8.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CrossfadeAlbumArt(
+                                artworkPath = currentSong.artworkPath,
                                 contentDescription = "Album Artwork",
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .border(1.dp, borderCol, RoundedCornerShape(8.dp)),
-                                contentScale = ContentScale.Crop
-                            )
-                        } else {
-                            Box(
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                                    .border(1.dp, borderCol, RoundedCornerShape(8.dp)),
-                                contentAlignment = Alignment.Center
+                                durationMillis = 300,
+                                modifier = Modifier.fillMaxSize()
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.MusicNote,

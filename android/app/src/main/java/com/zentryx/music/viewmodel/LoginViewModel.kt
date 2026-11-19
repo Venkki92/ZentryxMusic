@@ -28,7 +28,7 @@ data class LoginUiState(
     val serverUrl: String = "https://cloud.zentryx.bg",
     val username: String = "",
     val password: String = "",
-    val musicFolder: String = "/Music",
+    val musicFolder: String = ServerConfig.DEFAULT_MUSIC_FOLDER_PATH,
     val isTesting: Boolean = false,
     val isLoggingIn: Boolean = false,
     val isPollingLoginFlow: Boolean = false,
@@ -106,7 +106,7 @@ class LoginViewModel @Inject constructor(
             username = _uiState.value.username.trim(),
             tokenOrPassword = _uiState.value.password,
             sslCertificateFingerprint = _uiState.value.pinnedFingerprint,
-            musicFolderPath = _uiState.value.musicFolder.trim().ifEmpty { "/Music" }
+            musicFolderPath = _uiState.value.musicFolder.trim().ifEmpty { ServerConfig.DEFAULT_MUSIC_FOLDER_PATH }
         )
     }
 
@@ -262,7 +262,7 @@ class LoginViewModel @Inject constructor(
                     is Resource.Success -> {
                         val finalConfig = pollResult.data.copy(
                             sslCertificateFingerprint = pinned ?: pollResult.data.sslCertificateFingerprint,
-                            musicFolderPath = _uiState.value.musicFolder.trim().ifEmpty { "/Music" }
+                            musicFolderPath = _uiState.value.musicFolder.trim().ifEmpty { ServerConfig.DEFAULT_MUSIC_FOLDER_PATH }
                         )
                         authRepository.saveCredentials(finalConfig)
                         _uiState.update {

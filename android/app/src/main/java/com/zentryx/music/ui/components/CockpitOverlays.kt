@@ -188,14 +188,12 @@ fun DriveModeHudDialog(
                             .border(1.dp, accentColor.copy(alpha = 0.45f), RoundedCornerShape(16.dp)),
                         contentAlignment = Alignment.Center
                     ) {
-                        if (song?.artworkPath != null && File(song.artworkPath).exists()) {
-                            AsyncImage(
-                                model = File(song.artworkPath),
-                                contentDescription = song.album,
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Crop
-                            )
-                        } else {
+                        CrossfadeAlbumArt(
+                            artworkPath = song?.artworkPath,
+                            contentDescription = song?.album,
+                            durationMillis = 300,
+                            modifier = Modifier.fillMaxSize()
+                        ) {
                             Icon(imageVector = Icons.Default.MusicNote, contentDescription = null, tint = accentColor, modifier = Modifier.size(48.dp))
                         }
                     }

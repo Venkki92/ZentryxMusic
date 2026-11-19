@@ -33,6 +33,7 @@ class EncryptedDataStore @Inject constructor(
         private val KEY_MUSIC_FOLDER = stringPreferencesKey("music_folder")
         private val KEY_IS_LOGGED_IN = booleanPreferencesKey("is_logged_in")
         private val KEY_LEGACY_WEBDAV = booleanPreferencesKey("use_legacy_webdav")
+        private val KEY_FOLDERS_MIGRATED_V2 = booleanPreferencesKey("music_folders_migrated_v2")
     }
 
     val serverConfigFlow: Flow<ServerConfig?> = context.dataStore.data.map { preferences ->
@@ -49,12 +50,21 @@ class EncryptedDataStore @Inject constructor(
             return@map null
         }
 
+        val storedFolder = preferences[KEY_MUSIC_FOLDER]
+        val migratedV2 = preferences[KEY_FOLDERS_MIGRATED_V2] ?: false
+        val effectiveFolder = when {
+            storedFolder.isNullOrBlank() -> ServerConfig.DEFAULT_MUSIC_FOLDER_PATH
+            !migratedV2 && ServerConfig.normalizeFolderPath(storedFolder).equals("Music", ignoreCase = true) ->
+                ServerConfig.DEFAULT_MUSIC_FOLDER_PATH
+            else -> storedFolder
+        }
+
         ServerConfig(
             serverUrl = serverUrl,
             username = username,
             tokenOrPassword = decryptedToken,
             sslCertificateFingerprint = preferences[KEY_SSL_FINGERPRINT],
-            musicFolderPath = preferences[KEY_MUSIC_FOLDER] ?: "/Music",
+            musicFolderPath = effectiveFolder,
             isLoggedIn = true,
             useLegacyWebDav = preferences[KEY_LEGACY_WEBDAV] ?: false
         )
@@ -74,6 +84,7 @@ class EncryptedDataStore @Inject constructor(
             preferences[KEY_MUSIC_FOLDER] = config.musicFolderPath
             preferences[KEY_IS_LOGGED_IN] = config.isLoggedIn
             preferences[KEY_LEGACY_WEBDAV] = config.useLegacyWebDav
+            preferences[KEY_FOLDERS_MIGRATED_V2] = true
         }
     }
 

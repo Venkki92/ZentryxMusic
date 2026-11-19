@@ -11,10 +11,69 @@ data class ServerConfig(
     val username: String,                     // Canonical Nextcloud username / user_id
     val tokenOrPassword: String,              // App password or user password
     val sslCertificateFingerprint: String? = null, // SHA-256 hash for Trust-On-First-Use (TOFU)
-    val musicFolderPath: String = "/Music",   // Root folder path for library scans
+    val musicFolderPath: String = DEFAULT_MUSIC_FOLDER_PATH, // Default folders for library scans
     val isLoggedIn: Boolean = false,
     val useLegacyWebDav: Boolean = false      // Fallback to /remote.php/webdav if /dav/files/<user> returns 404
 ) {
+    companion object {
+        val DEFAULT_MUSIC_FOLDERS: List<String> = listOf("WoW Radio", "Music")
+        const val DEFAULT_MUSIC_FOLDER_PATH: String = "/WoW Radio, /Music"
+
+        fun normalizeFolderPath(raw: String?): String {
+            if (raw.isNullOrBlank()) return ""
+            return raw.trim()
+                .replace('\\', '/')
+                .replace(Regex("/+"), "/")
+                .trim('/')
+                .trim()
+        }
+
+        /**
+         * Parses comma/semicolon/newline-separated music folders plus optional user-added folders.
+         * Defaults to ["WoW Radio", "Music"] when blank. Preserves explicit "/" as "" (Nextcloud root).
+         */
+        fun parseFolderList(raw: String?, extraFolders: List<String> = emptyList()): List<String> {
+            val out = mutableListOf<String>()
+            val seen = mutableSetOf<String>()
+
+            fun addUnique(path: String) {
+                val key = path.lowercase()
+                if (seen.add(key)) out.add(path)
+            }
+
+            val trimmed = raw?.trim().orEmpty()
+            if (trimmed == "/") {
+                addUnique("")
+            } else if (trimmed.isNotEmpty()) {
+                trimmed.split(Regex("[,;\\n]+")).forEach { token ->
+                    val t = token.trim()
+                    if (t == "/") {
+                        addUnique("")
+                    } else {
+                        val clean = normalizeFolderPath(t)
+                        if (clean.isNotEmpty()) addUnique(clean)
+                    }
+                }
+            }
+
+            if (out.isEmpty()) {
+                DEFAULT_MUSIC_FOLDERS.forEach { addUnique(it) }
+            }
+
+            extraFolders.forEach { extra ->
+                val t = extra.trim()
+                if (t == "/") {
+                    addUnique("")
+                } else {
+                    val clean = normalizeFolderPath(t)
+                    if (clean.isNotEmpty()) addUnique(clean)
+                }
+            }
+
+            return out
+        }
+    }
+
     private fun encodeSegment(seg: String): String =
         URLEncoder.encode(seg, "UTF-8")
             .replace("+", "%20")
@@ -46,18 +105,36 @@ data class ServerConfig(
         get() = "${serverUrl.trimEnd('/')}/remote.php/webdav"
 
     /**
-     * Builds the WebDAV endpoint pointing specifically to the music directory.
+     * Returns all configured primary music folders (defaulting to ["WoW Radio", "Music"])
+     * combined with any extra manually added folders.
+     */
+    fun configuredMusicFolders(extraFolders: List<String> = emptyList()): List<String> =
+        parseFolderList(musicFolderPath, extraFolders)
+
+    /**
+     * Builds a properly percent-encoded WebDAV URL for a specific relative folder path.
+     */
+    fun buildWebDavFolderUrl(relativeFolderPath: String): String {
+        val cleanRoot = normalizeFolderPath(relativeFolderPath)
+        return if (cleanRoot.isEmpty()) {
+            webDavBaseUrl
+        } else {
+            val encodedSegments = cleanRoot.split('/')
+                .filter { it.isNotEmpty() }
+                .joinToString("/") { encodeSegment(it) }
+            if (encodedSegments.isEmpty()) webDavBaseUrl else "$webDavBaseUrl/$encodedSegments"
+        }
+    }
+
+    /**
+     * Builds all primary WebDAV folder URLs configured for this server.
+     */
+    val musicWebDavUrls: List<String>
+        get() = configuredMusicFolders().map { buildWebDavFolderUrl(it) }
+
+    /**
+     * Builds the WebDAV endpoint pointing to the first configured music directory.
      */
     val musicWebDavUrl: String
-        get() {
-            val cleanRoot = musicFolderPath.trim('/')
-            return if (cleanRoot.isEmpty()) {
-                webDavBaseUrl
-            } else {
-                val encodedSegments = cleanRoot.split('/')
-                    .filter { it.isNotEmpty() }
-                    .joinToString("/") { encodeSegment(it) }
-                if (encodedSegments.isEmpty()) webDavBaseUrl else "$webDavBaseUrl/$encodedSegments"
-            }
-        }
+        get() = buildWebDavFolderUrl(configuredMusicFolders().firstOrNull().orEmpty())
 }

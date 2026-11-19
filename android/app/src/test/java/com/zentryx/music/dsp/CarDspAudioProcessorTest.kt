@@ -279,5 +279,75 @@ class CarDspAudioProcessorTest {
         }
         assertTrue("Logic 7 stereo output should preserve & widen L/R spatial difference", diffSum > 100_000L)
     }
-}
 
+    @Test
+    fun `dolby virtual atmos boosts 7200Hz height elevation over stereo direct`() {
+        val sampleRate = 48000
+        val frames = 2400
+
+        fun measure7200HzPeak(mode: SurroundMode, height: Int): Int {
+            val p = CarDspAudioProcessor()
+            p.configure(AudioFormat(sampleRate, 2, C.ENCODING_PCM_16BIT))
+            p.updateSettings(
+                DspSettings(
+                    dspEnabled = true,
+                    hpfCutoffHz = HpfCutoffHz.OFF,
+                    roadNoiseEqEnabled = false,
+                    surroundMode = mode,
+                    surroundIntensity = 70,
+                    centerCoherence = 50,
+                    virtualHeight = height,
+                    peakLimiterCeilingDb = 0f
+                )
+            )
+            p.flush()
+            val input = buildStereoPcmBuffer(frames, sampleRate, 7200.0, 9000, 9000)
+            p.queueInput(input)
+            val out = p.getOutput().order(ByteOrder.LITTLE_ENDIAN)
+            var peak = 0
+            for (i in 0 until frames) {
+                val l = abs(out.getShort().toInt())
+                out.getShort()
+                if (i >= frames / 2 && l > peak) peak = l
+            }
+            return peak
+        }
+
+        val directPeak = measure7200HzPeak(SurroundMode.OFF, 0)
+        val atmosPeak = measure7200HzPeak(SurroundMode.DOLBY_ATMOS_VIRTUAL, 100)
+        assertTrue("Dolby Virtual Atmos 7.2 kHz peak ($atmosPeak) should exceed Direct ($directPeak)", atmosPeak > directPeak + 2000)
+    }
+
+    @Test
+    fun `dolby pro logic ii and 360 virtualizer process stereo cleanly with cross-talk cancellation`() {
+        val sampleRate = 48000
+        val frames = 2400
+        for (mode in listOf(SurroundMode.DOLBY_PRO_LOGIC_II, SurroundMode.VIRTUAL_SURROUND_360)) {
+            val p = CarDspAudioProcessor()
+            p.configure(AudioFormat(sampleRate, 2, C.ENCODING_PCM_16BIT))
+            p.updateSettings(
+                DspSettings(
+                    dspEnabled = true,
+                    hpfCutoffHz = HpfCutoffHz.OFF,
+                    roadNoiseEqEnabled = false,
+                    surroundMode = mode,
+                    surroundIntensity = 85,
+                    centerCoherence = 60,
+                    virtualHeight = 70,
+                    peakLimiterCeilingDb = -0.5f
+                )
+            )
+            p.flush()
+            val input = buildStereoPcmBuffer(frames, sampleRate, 1200.0, 11000, 1500)
+            p.queueInput(input)
+            val out = p.getOutput().order(ByteOrder.LITTLE_ENDIAN)
+            var diffSum = 0L
+            for (i in 0 until frames) {
+                val l = out.getShort().toInt()
+                val r = out.getShort().toInt()
+                if (i >= frames / 2) diffSum += abs(l - r)
+            }
+            assertTrue("$mode should generate active wide stereo spatial field (diffSum=$diffSum)", diffSum > 100_000L)
+        }
+    }
+}

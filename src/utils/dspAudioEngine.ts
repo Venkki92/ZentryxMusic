@@ -67,14 +67,20 @@ export class HeadunitDspEngine {
   private readonly centerCoherenceFilter: BiquadFilterNode;
   private readonly centerCoherenceWetGain: GainNode;
 
-  // Side (L-R) decorrelated ambient reflection path
+  // Side (L-R) decorrelated ambient reflection path + Dolby PLII 90-deg all-pass + Virtual Atmos Height + 360° XTC
   private readonly sideLIn: GainNode;
   private readonly sideRIn: GainNode;
   private readonly sideBandpass: BiquadFilterNode;
+  private readonly sideAllpassPhase: BiquadFilterNode;
   private readonly sideHaasDelayL: DelayNode;
   private readonly sideHaasDelayR: DelayNode;
   private readonly sideWetGainL: GainNode;
   private readonly sideWetGainR: GainNode;
+  private readonly heightElevationNode: BiquadFilterNode;
+  private readonly xtcDelayLToR: DelayNode;
+  private readonly xtcDelayRToL: DelayNode;
+  private readonly xtcGainLToR: GainNode;
+  private readonly xtcGainRToL: GainNode;
 
   // Time Alignment + 2D Cabin Stage
   private readonly leftDelayNode: DelayNode;
@@ -187,7 +193,7 @@ export class HeadunitDspEngine {
     this.centerCoherenceWetGain = ctx.createGain();
     this.centerCoherenceWetGain.gain.value = 0;
 
-    // Logic 7 / Concert Hall Side Haas Reflection path (Side = 0.5*(L-R) -> Bandpass -> Haas Delay -> +/- L/R)
+    // Logic 7 / Dolby PLII / Atmos / Virtual 360 Side Haas Reflection path + 90-deg All-Pass Phase
     this.sideLIn = ctx.createGain();
     this.sideLIn.gain.value = 0.5;
     this.sideRIn = ctx.createGain();
@@ -196,6 +202,10 @@ export class HeadunitDspEngine {
     this.sideBandpass.type = 'bandpass';
     this.sideBandpass.frequency.value = 1600;
     this.sideBandpass.Q.value = 0.55;
+    this.sideAllpassPhase = ctx.createBiquadFilter();
+    this.sideAllpassPhase.type = 'allpass';
+    this.sideAllpassPhase.frequency.value = 1100;
+    this.sideAllpassPhase.Q.value = 0.707;
     this.sideHaasDelayL = ctx.createDelay(0.06);
     this.sideHaasDelayR = ctx.createDelay(0.06);
     this.sideHaasDelayL.delayTime.value = 0.014;
@@ -204,6 +214,23 @@ export class HeadunitDspEngine {
     this.sideWetGainR = ctx.createGain();
     this.sideWetGainL.gain.value = 0;
     this.sideWetGainR.gain.value = 0;
+
+    // Dolby Virtual Atmos / 360° Overhead Pinna Elevation Filter (~7.2 kHz height cue lift)
+    this.heightElevationNode = ctx.createBiquadFilter();
+    this.heightElevationNode.type = 'peaking';
+    this.heightElevationNode.frequency.value = 7200;
+    this.heightElevationNode.Q.value = 0.85;
+    this.heightElevationNode.gain.value = 0;
+
+    // 360° Virtualizer Inter-Aural Cross-Talk Cancellation (0.55 ms ITD inverted cross-feed)
+    this.xtcDelayLToR = ctx.createDelay(0.01);
+    this.xtcDelayRToL = ctx.createDelay(0.01);
+    this.xtcDelayLToR.delayTime.value = 0.00055;
+    this.xtcDelayRToL.delayTime.value = 0.00055;
+    this.xtcGainLToR = ctx.createGain();
+    this.xtcGainRToL = ctx.createGain();
+    this.xtcGainLToR.gain.value = 0;
+    this.xtcGainRToL.gain.value = 0;
 
     this.leftDelayNode = ctx.createDelay(0.05);
     this.rightDelayNode = ctx.createDelay(0.05);
@@ -272,26 +299,35 @@ export class HeadunitDspEngine {
     this.centerCoherenceWetGain.connect(this.leftDelayNode);
     this.centerCoherenceWetGain.connect(this.rightDelayNode);
 
-    // Logic 7 Side Haas decorrelated ambience feed into L & R
+    // Side Haas decorrelated ambience feed (with Dolby PLII 90-deg All-Pass Phase stage)
     this.splitter.connect(this.sideLIn, 0);
     this.splitter.connect(this.sideRIn, 1);
     this.sideLIn.connect(this.sideBandpass);
     this.sideRIn.connect(this.sideBandpass);
-    this.sideBandpass.connect(this.sideHaasDelayL);
-    this.sideBandpass.connect(this.sideHaasDelayR);
+    this.sideBandpass.connect(this.sideAllpassPhase);
+    this.sideAllpassPhase.connect(this.sideHaasDelayL);
+    this.sideAllpassPhase.connect(this.sideHaasDelayR);
     this.sideHaasDelayL.connect(this.sideWetGainL);
     this.sideHaasDelayR.connect(this.sideWetGainR);
     this.sideWetGainL.connect(this.leftDelayNode);
     this.sideWetGainR.connect(this.rightDelayNode);
 
-    // Time alignment & balance -> merger
+    // 360° Virtualizer Inter-Aural Cross-Talk Cancellation inverted cross-feed
+    this.splitter.connect(this.xtcDelayLToR, 0);
+    this.xtcDelayLToR.connect(this.xtcGainLToR);
+    this.xtcGainLToR.connect(this.rightDelayNode);
+    this.splitter.connect(this.xtcDelayRToL, 1);
+    this.xtcDelayRToL.connect(this.xtcGainRToL);
+    this.xtcGainRToL.connect(this.leftDelayNode);
+
+    // Time alignment & balance -> merger -> Virtual Atmos Pinna Height Elevation -> Compressor -> Limiter
     this.leftDelayNode.connect(this.leftBalanceGain);
     this.leftBalanceGain.connect(this.merger, 0, 0);
     this.rightDelayNode.connect(this.rightBalanceGain);
     this.rightBalanceGain.connect(this.merger, 0, 1);
 
-    // Final stage: Dynamics Compressor -> Brickwall Peak Limiter Ceiling -> Output
-    this.merger.connect(this.compressorNode);
+    this.merger.connect(this.heightElevationNode);
+    this.heightElevationNode.connect(this.compressorNode);
     this.compressorNode.connect(this.peakLimiterShaper);
     this.peakLimiterShaper.connect(this.output);
   }
@@ -396,15 +432,30 @@ export class HeadunitDspEngine {
       const centerLinearAdd = (dbToLinearGain(surroundSpec.centerBoostMaxDb * coherenceNorm) - 1) * 0.7;
       smoothSet(this.centerCoherenceWetGain.gain, Math.max(0, Math.min(0.45, centerLinearAdd)), this.ctx);
 
+      const heightNorm = Math.max(0, Math.min(100, settings.virtualHeight ?? 45)) / 100;
+      const heightDb = surroundSpec.heightBoostMaxDb * heightNorm;
+      smoothSet(this.heightElevationNode.gain, heightDb, this.ctx);
+
+      smoothSet(this.sideBandpass.frequency, surroundSpec.sideBandpassHz, this.ctx);
+      smoothSet(this.sideBandpass.Q, surroundSpec.sideBandpassQ, this.ctx);
+      smoothSet(this.sideAllpassPhase.frequency, surroundSpec.useAllPassPhase ? 1100 : 18000, this.ctx);
+
       const sideWet = surroundSpec.sideWetScale * intensityNorm;
       smoothSet(this.sideHaasDelayL.delayTime, surroundSpec.haasLeftMs / 1000, this.ctx);
       smoothSet(this.sideHaasDelayR.delayTime, surroundSpec.haasRightMs / 1000, this.ctx);
       smoothSet(this.sideWetGainL.gain, sideWet, this.ctx);
       smoothSet(this.sideWetGainR.gain, -sideWet, this.ctx);
+
+      const xtcNeg = -(surroundSpec.crosstalkCancelGain * intensityNorm);
+      smoothSet(this.xtcGainLToR.gain, xtcNeg, this.ctx);
+      smoothSet(this.xtcGainRToL.gain, xtcNeg, this.ctx);
     } else {
       smoothSet(this.centerCoherenceWetGain.gain, 0, this.ctx);
+      smoothSet(this.heightElevationNode.gain, 0, this.ctx);
       smoothSet(this.sideWetGainL.gain, 0, this.ctx);
       smoothSet(this.sideWetGainR.gain, 0, this.ctx);
+      smoothSet(this.xtcGainLToR.gain, 0, this.ctx);
+      smoothSet(this.xtcGainRToL.gain, 0, this.ctx);
     }
 
     // 8. Cabin Time Alignment (L/R Delays in seconds)

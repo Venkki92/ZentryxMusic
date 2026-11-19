@@ -94,7 +94,12 @@ enum class SurroundMode(
     val haasLeftMs: Float,
     val haasRightMs: Float,
     val sideWeight: Float,
-    val centerWeight: Float
+    val centerWeight: Float,
+    val heightWeight: Float = 0f,
+    val sideBandpassHz: Float = 1400f,
+    val useAllPassPhase: Boolean = false,
+    val crosstalkCancelGain: Float = 0f,
+    val isDolbyOrVirtual: Boolean = false
 ) {
     OFF(
         id = "off",
@@ -104,7 +109,8 @@ enum class SurroundMode(
         haasLeftMs = 0f,
         haasRightMs = 0f,
         sideWeight = 0f,
-        centerWeight = 0f
+        centerWeight = 0f,
+        heightWeight = 0f
     ),
     LOGIC7_SURROUND(
         id = "logic7_surround",
@@ -114,7 +120,9 @@ enum class SurroundMode(
         haasLeftMs = 14f,
         haasRightMs = 21f,
         sideWeight = 0.55f,
-        centerWeight = 0.45f
+        centerWeight = 0.45f,
+        heightWeight = 0.32f,
+        sideBandpassHz = 1600f
     ),
     CONCERT_HALL(
         id = "concert_hall",
@@ -124,7 +132,10 @@ enum class SurroundMode(
         haasLeftMs = 22f,
         haasRightMs = 31f,
         sideWeight = 0.72f,
-        centerWeight = 0.30f
+        centerWeight = 0.30f,
+        heightWeight = 0.52f,
+        sideBandpassHz = 1500f,
+        useAllPassPhase = true
     ),
     STUDIO_FOCUSED(
         id = "studio_focused",
@@ -134,7 +145,53 @@ enum class SurroundMode(
         haasLeftMs = 7f,
         haasRightMs = 11f,
         sideWeight = 0.28f,
-        centerWeight = 0.65f
+        centerWeight = 0.65f,
+        heightWeight = 0.22f,
+        sideBandpassHz = 1900f
+    ),
+    DOLBY_PRO_LOGIC_II(
+        id = "dolby_pro_logic_ii",
+        label = "Dolby Pro Logic II",
+        badge = "DOLBY PLII",
+        desc = "5.1 Music Matrix: 90° phase-shifted rear surround + locked dash center",
+        haasLeftMs = 16f,
+        haasRightMs = 20f,
+        sideWeight = 0.65f,
+        centerWeight = 0.55f,
+        heightWeight = 0.38f,
+        sideBandpassHz = 1250f,
+        useAllPassPhase = true,
+        isDolbyOrVirtual = true
+    ),
+    DOLBY_ATMOS_VIRTUAL(
+        id = "dolby_atmos_virtual",
+        label = "Dolby Virtual Atmos",
+        badge = "ATMOS 3D",
+        desc = "3D cabin height dome: overhead pinna air + multi-tap 360° surround field",
+        haasLeftMs = 11f,
+        haasRightMs = 19f,
+        sideWeight = 0.68f,
+        centerWeight = 0.52f,
+        heightWeight = 1.0f,
+        sideBandpassHz = 2100f,
+        useAllPassPhase = true,
+        crosstalkCancelGain = 0.08f,
+        isDolbyOrVirtual = true
+    ),
+    VIRTUAL_SURROUND_360(
+        id = "virtual_surround_360",
+        label = "360° Virtualizer",
+        badge = "VIRTUAL 360",
+        desc = "Cross-talk cancelled 360° binaural/cabin virtual surround + Android HW Virtualizer",
+        haasLeftMs = 18f,
+        haasRightMs = 27f,
+        sideWeight = 0.78f,
+        centerWeight = 0.36f,
+        heightWeight = 0.76f,
+        sideBandpassHz = 1750f,
+        useAllPassPhase = true,
+        crosstalkCancelGain = 0.16f,
+        isDolbyOrVirtual = true
     );
 
     companion object {
@@ -184,6 +241,7 @@ data class DspSettings(
     val surroundMode: SurroundMode = SurroundMode.OFF,
     val surroundIntensity: Int = 55, // 0 .. 100
     val centerCoherence: Int = 45,   // 0 .. 100
+    val virtualHeight: Int = 45,     // 0 .. 100 (Atmos / 360 overhead pinna air)
     val roadNoiseEqEnabled: Boolean = true,
     val compressorProfile: CompressorProfile = CompressorProfile.BALANCED,
     val subPhaseInverted: Boolean = false,
@@ -399,6 +457,7 @@ fun serializeDspSettings(settings: DspSettings): String {
         put("surroundMode", settings.surroundMode.id)
         put("surroundIntensity", settings.surroundIntensity)
         put("centerCoherence", settings.centerCoherence)
+        put("virtualHeight", settings.virtualHeight)
         put("roadNoiseEqEnabled", settings.roadNoiseEqEnabled)
         put("compressorProfile", settings.compressorProfile.id)
         put("subPhaseInverted", settings.subPhaseInverted)
@@ -455,6 +514,7 @@ fun deserializeDspSettings(json: String?): DspSettings {
             surroundMode = SurroundMode.fromId(obj.optString("surroundMode", "off")),
             surroundIntensity = obj.optInt("surroundIntensity", 55).coerceIn(0, 100),
             centerCoherence = obj.optInt("centerCoherence", 45).coerceIn(0, 100),
+            virtualHeight = obj.optInt("virtualHeight", 45).coerceIn(0, 100),
             roadNoiseEqEnabled = obj.optBoolean("roadNoiseEqEnabled", true),
             compressorProfile = CompressorProfile.fromId(obj.optString("compressorProfile", "balanced")),
             subPhaseInverted = obj.optBoolean("subPhaseInverted", false),
@@ -563,10 +623,16 @@ fun effectiveBandGainDb(
         gain += rnMidDb * midFactor
     }
 
-    // Logic 7 Center Vocal Coherence subtle presence visualization
-    if (settings.surroundMode != SurroundMode.OFF && !settings.monoFoldDown && freq in 1600f..3500f) {
-        val coherenceLift = (settings.centerCoherence / 100f) * settings.surroundMode.centerWeight * 1.8f
-        gain += if (freq == 2500f) coherenceLift else coherenceLift * 0.55f
+    // Logic 7 / Dolby / Virtual Surround Center Vocal Coherence & Overhead Pinna Height preview
+    if (settings.surroundMode != SurroundMode.OFF && !settings.monoFoldDown) {
+        if (freq in 1600f..3500f) {
+            val coherenceLift = (settings.centerCoherence / 100f) * settings.surroundMode.centerWeight * 1.8f
+            gain += if (freq == 2500f) coherenceLift else coherenceLift * 0.55f
+        }
+        if (freq in 5000f..11000f && settings.surroundMode.heightWeight > 0.05f) {
+            val heightLift = (settings.virtualHeight / 100f) * settings.surroundMode.heightWeight * 3.4f
+            gain += if (freq == 7000f) heightLift else heightLift * 0.5f
+        }
     }
 
     // Fletcher-Munson Loudness Contour (+3.5dB low, +2.5dB high lift)

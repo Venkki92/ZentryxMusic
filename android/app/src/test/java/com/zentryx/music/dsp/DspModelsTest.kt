@@ -184,29 +184,44 @@ class DspModelsTest {
     fun `24 dB per oct LR4 slope attenuates sub-cutoff deeper than 12 dB per oct BW2`() {
         val bw2 = DspSettings(bands16 = List(16) { 0f }, bassBoostDb = 0f, loudnessContour = false, hpfCutoffHz = HpfCutoffHz.HZ_80, crossoverSlopeDb = 12)
         val lr4 = bw2.copy(crossoverSlopeDb = 24)
-        val gainBw2 = effectiveBandGainDb(0, bw2)
-        val gainLr4 = effectiveBandGainDb(0, lr4)
-        assertTrue("LR4 ($gainLr4) should attenuate 32Hz deeper than BW2 ($gainBw2)", gainLr4 < gainBw2)
+        // Band 1 is 64 Hz (0.32 octaves below 80 Hz cutoff): BW2 ~ -3.9 dB vs LR4 ~ -7.7 dB
+        val gainBw2 = effectiveBandGainDb(1, bw2)
+        val gainLr4 = effectiveBandGainDb(1, lr4)
+        assertTrue("LR4 ($gainLr4) should attenuate 64Hz deeper than BW2 ($gainBw2)", gainLr4 < gainBw2 - 2f)
     }
 
     @Test
-    fun `logic 7 surround and new acoustic fields survive json roundtrip`() {
+    fun `logic 7 and dolby virtual surround fields survive json roundtrip`() {
         val src = DspSettings(
-            surroundMode = SurroundMode.LOGIC7_SURROUND,
+            surroundMode = SurroundMode.DOLBY_ATMOS_VIRTUAL,
             surroundIntensity = 75,
             centerCoherence = 60,
+            virtualHeight = 85,
             roadNoiseEqEnabled = false,
             crossoverSlopeDb = 24,
             subDelayMs = 8.5f
         )
         val decoded = deserializeDspSettings(serializeDspSettings(src))
-        assertEquals(SurroundMode.LOGIC7_SURROUND, decoded.surroundMode)
+        assertEquals(SurroundMode.DOLBY_ATMOS_VIRTUAL, decoded.surroundMode)
         assertEquals(75, decoded.surroundIntensity)
         assertEquals(60, decoded.centerCoherence)
+        assertEquals(85, decoded.virtualHeight)
         assertEquals(false, decoded.roadNoiseEqEnabled)
         assertEquals(24, decoded.crossoverSlopeDb)
         assertEquals(8.5f, decoded.subDelayMs, 0.01f)
+        assertTrue(SurroundMode.DOLBY_PRO_LOGIC_II.useAllPassPhase)
+        assertTrue(SurroundMode.VIRTUAL_SURROUND_360.crosstalkCancelGain > 0.1f)
+
+        val flatAtmos = DspSettings(
+            bands16 = List(16) { 0f },
+            bassBoostDb = 0f,
+            loudnessContour = false,
+            roadNoiseEqEnabled = false,
+            surroundMode = SurroundMode.DOLBY_ATMOS_VIRTUAL,
+            virtualHeight = 100
+        )
+        // Index 10 is 7000 Hz
+        val heightGain = effectiveBandGainDb(10, flatAtmos)
+        assertTrue("Expected Atmos 7kHz pinna height lift > 2.0 dB (got $heightGain)", heightGain > 2.0f)
     }
 }
-
-

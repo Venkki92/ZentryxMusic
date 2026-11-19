@@ -11,8 +11,12 @@ import com.zentryx.music.dsp.AudioOutputRoute
 import com.zentryx.music.dsp.DspSettings
 import com.zentryx.music.models.Album
 import com.zentryx.music.models.Artist
+import com.zentryx.music.models.AudioFormat
 import com.zentryx.music.models.Playlist
+import com.zentryx.music.models.Resource
 import com.zentryx.music.models.ScanProgress
+import com.zentryx.music.models.ScanStatus
+import com.zentryx.music.models.ServerConfig
 import com.zentryx.music.models.Song
 import com.zentryx.music.network.webdav.ScanDiagnosticsState
 import com.zentryx.music.player.SettingsPreferences
@@ -37,6 +41,20 @@ import javax.inject.Inject
 enum class LibraryTab {
     SONGS, ALBUMS, ARTISTS, FOLDERS, PLAYLISTS, RECENT, MOST_PLAYED, RESUME, FAVORITES, OFFLINE
 }
+
+data class RemoteFolderEntry(
+    val name: String,
+    val relativePath: String
+)
+
+data class RemoteFolderBrowserState(
+    val isOpen: Boolean = false,
+    val currentPath: String = "",
+    val folders: List<RemoteFolderEntry> = emptyList(),
+    val audioFileCount: Int = 0,
+    val isLoading: Boolean = false,
+    val errorMessage: String? = null
+)
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
@@ -207,6 +225,12 @@ class LibraryViewModel @Inject constructor(
     private val _showDiagnosticsDialog = MutableStateFlow(false)
     val showDiagnosticsDialog: StateFlow<Boolean> = _showDiagnosticsDialog.asStateFlow()
 
+    private val _remoteFolderBrowserState = MutableStateFlow(RemoteFolderBrowserState())
+    val remoteFolderBrowserState: StateFlow<RemoteFolderBrowserState> = _remoteFolderBrowserState.asStateFlow()
+
+    val extraWebDavFolders: StateFlow<List<String>> = settingsPreferences.extraWebDavFoldersFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     private val _serverUrl = MutableStateFlow("")
     val serverUrl: StateFlow<String> = _serverUrl.asStateFlow()
 
@@ -304,15 +328,23 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
-    fun scanLocalAudio(treeUri: Uri? = null) {
+    fun scanLocalAudio(treeUri: Uri? = null, additive: Boolean = false) {
         viewModelScope.launch {
             _isLocalScanning.value = true
             try {
-                val count = musicRepository.scanLocalLibrary(treeUri)
+                val count = musicRepository.scanLocalLibrary(treeUri, additive = additive)
                 _playlistSyncMessage.value = if (count > 0) {
-                    "Scanned $count local USB/device audio tracks"
+                    if (additive) {
+                        "Added $count local/USB track(s) to your library"
+                    } else {
+                        "Scanned $count local USB/device audio tracks"
+                    }
                 } else {
-                    "0 local tracks found — tap 'Pick USB Folder' to grant USB drive access"
+                    if (additive) {
+                        "0 audio files found in that folder — existing library untouched"
+                    } else {
+                        "0 local tracks found — tap 'Add Folder' or 'USB Folder' to grant drive access"
+                    }
                 }
             } catch (t: Throwable) {
                 _playlistSyncMessage.value = "Local scan error: ${t.localizedMessage ?: "Permission or I/O failure"}"
@@ -493,6 +525,97 @@ class LibraryViewModel @Inject constructor(
         viewModelScope.launch {
             musicRepository.cancelScan()
             _scanProgress.value = ScanProgress.Idle
+        }
+    }
+
+    fun openRemoteFolderPicker(initialPath: String = "") {
+        val clean = ServerConfig.normalizeFolderPath(initialPath)
+        _remoteFolderBrowserState.value = RemoteFolderBrowserState(
+            isOpen = true,
+            currentPath = clean,
+            isLoading = true
+        )
+        loadRemoteFolder(clean)
+    }
+
+    fun dismissRemoteFolderPicker() {
+        _remoteFolderBrowserState.value = _remoteFolderBrowserState.value.copy(isOpen = false)
+    }
+
+    fun loadRemoteFolder(path: String) {
+        val clean = ServerConfig.normalizeFolderPath(path)
+        _remoteFolderBrowserState.value = _remoteFolderBrowserState.value.copy(
+            isOpen = true,
+            currentPath = clean,
+            isLoading = true,
+            errorMessage = null
+        )
+        viewModelScope.launch {
+            when (val res = musicRepository.browseRemoteWebDavFolder(clean)) {
+                is Resource.Success -> {
+                    val dirs = res.data.filter { it.isDirectory }.map { item ->
+                        val childRel = if (clean.isEmpty()) item.name else "$clean/${item.name}"
+                        RemoteFolderEntry(name = item.name, relativePath = childRel)
+                    }
+                    val audioCount = res.data.count { !it.isDirectory && AudioFormat.isSupported(it.name) }
+                    _remoteFolderBrowserState.value = _remoteFolderBrowserState.value.copy(
+                        currentPath = clean,
+                        folders = dirs,
+                        audioFileCount = audioCount,
+                        isLoading = false,
+                        errorMessage = null
+                    )
+                }
+                is Resource.Error -> {
+                    _remoteFolderBrowserState.value = _remoteFolderBrowserState.value.copy(
+                        currentPath = clean,
+                        folders = emptyList(),
+                        audioFileCount = 0,
+                        isLoading = false,
+                        errorMessage = res.message
+                    )
+                }
+                is Resource.Loading -> Unit
+            }
+        }
+    }
+
+    fun navigateRemoteFolderUp() {
+        val cur = _remoteFolderBrowserState.value.currentPath.trim('/')
+        if (cur.isEmpty()) return
+        val parent = if (cur.contains('/')) cur.substringBeforeLast('/') else ""
+        loadRemoteFolder(parent)
+    }
+
+    fun scanAndAddRemoteFolder(folderPath: String, recursive: Boolean = true) {
+        val clean = ServerConfig.normalizeFolderPath(folderPath)
+        val display = if (clean.isEmpty()) "/" else "/$clean"
+        dismissRemoteFolderPicker()
+        scanJob?.cancel()
+        scanJob = viewModelScope.launch {
+            val isDefault = ServerConfig.DEFAULT_MUSIC_FOLDERS.any { it.equals(clean, ignoreCase = true) }
+            if (!isDefault) {
+                settingsPreferences.addExtraWebDavFolder(if (clean.isEmpty()) "/" else clean)
+            }
+            _playlistSyncMessage.value = "Scanning $display & adding to library…"
+            musicRepository.scanSpecificWebDavFolder(
+                folderPath = if (clean.isEmpty()) "/" else clean,
+                additive = true,
+                recursive = recursive
+            ).collect { progress ->
+                _scanProgress.value = progress
+                if (progress.status == ScanStatus.COMPLETED) {
+                    _playlistSyncMessage.value = "Added ${progress.filesProcessed} track(s) from $display to library"
+                } else if (progress.status == ScanStatus.ERROR && !progress.errorMessage.isNullOrBlank()) {
+                    _playlistSyncMessage.value = "Scan error ($display): ${progress.errorMessage}"
+                }
+            }
+        }
+    }
+
+    fun removeExtraRemoteFolder(folderPath: String) {
+        viewModelScope.launch {
+            settingsPreferences.removeExtraWebDavFolder(folderPath)
         }
     }
 

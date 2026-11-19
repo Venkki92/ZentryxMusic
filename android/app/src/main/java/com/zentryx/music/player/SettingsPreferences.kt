@@ -12,6 +12,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.map
+import org.json.JSONArray
 import org.json.JSONObject
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -64,6 +65,8 @@ class SettingsPreferences @Inject constructor(
         private val KEY_CUSTOM_DOWNLOAD_LABEL = stringPreferencesKey("custom_download_folder_label")
         private val KEY_LOCAL_SOURCE_URI = stringPreferencesKey("local_source_tree_uri")
         private val KEY_LOCAL_SOURCE_LABEL = stringPreferencesKey("local_source_folder_label")
+        private val KEY_EXTRA_LOCAL_URIS_JSON = stringPreferencesKey("extra_local_source_uris_json")
+        private val KEY_EXTRA_WEBDAV_FOLDERS_JSON = stringPreferencesKey("extra_webdav_scan_folders_json")
         private val KEY_OFFLINE_ONLY = booleanPreferencesKey("offline_only_mode")
 
         // Steering Wheel Controls (CAN-Bus SWC)
@@ -86,6 +89,7 @@ class SettingsPreferences @Inject constructor(
         // 16-Band DSP Console & Visualizers
         private val KEY_DSP_SETTINGS_JSON = stringPreferencesKey("dsp_settings_json")
         private val KEY_CUSTOM_DSP_PRESETS_JSON = stringPreferencesKey("custom_dsp_presets_json")
+        private val KEY_ADAPTIVE_CABIN_CONFIG_JSON = stringPreferencesKey("adaptive_cabin_config_json")
         private val KEY_VISUALIZER_MODE = stringPreferencesKey("visualizer_mode")
         private val KEY_VISUALIZER_COLORWAY = stringPreferencesKey("visualizer_colorway")
 
@@ -127,6 +131,37 @@ class SettingsPreferences @Inject constructor(
     val customDownloadLabelFlow: Flow<String?> = context.settingsDataStore.data.map { it[KEY_CUSTOM_DOWNLOAD_LABEL] }
     val localSourceUriFlow: Flow<String?> = context.settingsDataStore.data.map { it[KEY_LOCAL_SOURCE_URI] }
     val localSourceLabelFlow: Flow<String?> = context.settingsDataStore.data.map { it[KEY_LOCAL_SOURCE_LABEL] }
+    val localSourceUrisFlow: Flow<List<Pair<String, String>>> = context.settingsDataStore.data.map { prefs ->
+        val out = linkedMapOf<String, String>()
+        prefs[KEY_LOCAL_SOURCE_URI]?.takeIf { it.isNotBlank() }?.let { uri ->
+            out[uri] = prefs[KEY_LOCAL_SOURCE_LABEL] ?: "Local USB Folder"
+        }
+        val rawJson = prefs[KEY_EXTRA_LOCAL_URIS_JSON]
+        if (!rawJson.isNullOrBlank()) {
+            runCatching {
+                val arr = JSONArray(rawJson)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val u = obj.optString("uri").trim()
+                    val lbl = obj.optString("label").ifBlank { "Local Folder" }
+                    if (u.isNotEmpty()) out[u] = lbl
+                }
+            }
+        }
+        out.entries.map { it.key to it.value }
+    }
+    val extraWebDavFoldersFlow: Flow<List<String>> = context.settingsDataStore.data.map { prefs ->
+        val rawJson = prefs[KEY_EXTRA_WEBDAV_FOLDERS_JSON] ?: return@map emptyList()
+        runCatching {
+            val arr = JSONArray(rawJson)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val v = arr.optString(i).trim()
+                    if (v.isNotEmpty()) add(v)
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
     val offlineOnlyFlow: Flow<Boolean> = context.settingsDataStore.data.map { it[KEY_OFFLINE_ONLY] ?: false }
 
     val swcLongPressActionFlow: Flow<String> = context.settingsDataStore.data.map { it[KEY_SWC_LONG_PRESS_ACTION] ?: "SEEK_15S" }
@@ -147,6 +182,7 @@ class SettingsPreferences @Inject constructor(
 
     val dspSettingsJsonFlow: Flow<String?> = context.settingsDataStore.data.map { it[KEY_DSP_SETTINGS_JSON] }
     val customDspPresetsJsonFlow: Flow<String?> = context.settingsDataStore.data.map { it[KEY_CUSTOM_DSP_PRESETS_JSON] }
+    val adaptiveCabinConfigJsonFlow: Flow<String?> = context.settingsDataStore.data.map { it[KEY_ADAPTIVE_CABIN_CONFIG_JSON] }
     val visualizerModeFlow: Flow<String> = context.settingsDataStore.data.map { it[KEY_VISUALIZER_MODE] ?: "gauge" }
     val visualizerColorwayFlow: Flow<String> = context.settingsDataStore.data.map { it[KEY_VISUALIZER_COLORWAY] ?: "amber" }
     val dualPaneCockpitFlow: Flow<Boolean> = context.settingsDataStore.data.map { it[KEY_DUAL_PANE_COCKPIT] ?: true }
@@ -195,6 +231,75 @@ class SettingsPreferences @Inject constructor(
             prefs[KEY_LOCAL_SOURCE_LABEL] = label ?: "Local USB Folder"
         }
     }
+
+    suspend fun addLocalSourceFolder(uri: String, label: String?) = context.settingsDataStore.edit { prefs ->
+        val cleanUri = uri.trim()
+        if (cleanUri.isEmpty()) return@edit
+        val cleanLabel = label?.takeIf { it.isNotBlank() } ?: "Local USB Folder"
+        prefs[KEY_LOCAL_SOURCE_URI] = cleanUri
+        prefs[KEY_LOCAL_SOURCE_LABEL] = cleanLabel
+
+        val existing = linkedMapOf<String, String>()
+        prefs[KEY_EXTRA_LOCAL_URIS_JSON]?.let { raw ->
+            runCatching {
+                val arr = JSONArray(raw)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val u = obj.optString("uri").trim()
+                    if (u.isNotEmpty()) existing[u] = obj.optString("label").ifBlank { "Local Folder" }
+                }
+            }
+        }
+        existing[cleanUri] = cleanLabel
+        val outArr = JSONArray()
+        existing.forEach { (u, lbl) ->
+            outArr.put(JSONObject().put("uri", u).put("label", lbl))
+        }
+        prefs[KEY_EXTRA_LOCAL_URIS_JSON] = outArr.toString()
+    }
+
+    suspend fun addExtraWebDavFolder(folderPath: String) = context.settingsDataStore.edit { prefs ->
+        val trimmed = folderPath.trim()
+        val normalized = if (trimmed == "/") "/" else trimmed.replace('\\', '/').trim('/')
+        if (normalized.isEmpty()) return@edit
+
+        val current = mutableListOf<String>()
+        prefs[KEY_EXTRA_WEBDAV_FOLDERS_JSON]?.let { raw ->
+            runCatching {
+                val arr = JSONArray(raw)
+                for (i in 0 until arr.length()) {
+                    val v = arr.optString(i).trim()
+                    if (v.isNotEmpty()) current.add(v)
+                }
+            }
+        }
+        if (current.none { it.equals(normalized, ignoreCase = true) }) {
+            current.add(normalized)
+        }
+        val outArr = JSONArray()
+        current.forEach { outArr.put(it) }
+        prefs[KEY_EXTRA_WEBDAV_FOLDERS_JSON] = outArr.toString()
+    }
+
+    suspend fun removeExtraWebDavFolder(folderPath: String) = context.settingsDataStore.edit { prefs ->
+        val target = if (folderPath.trim() == "/") "/" else folderPath.trim().replace('\\', '/').trim('/')
+        val current = mutableListOf<String>()
+        prefs[KEY_EXTRA_WEBDAV_FOLDERS_JSON]?.let { raw ->
+            runCatching {
+                val arr = JSONArray(raw)
+                for (i in 0 until arr.length()) {
+                    val v = arr.optString(i).trim()
+                    if (v.isNotEmpty() && !v.equals(target, ignoreCase = true)) {
+                        current.add(v)
+                    }
+                }
+            }
+        }
+        val outArr = JSONArray()
+        current.forEach { outArr.put(it) }
+        prefs[KEY_EXTRA_WEBDAV_FOLDERS_JSON] = outArr.toString()
+    }
+
     suspend fun setOfflineOnly(enabled: Boolean) = context.settingsDataStore.edit { it[KEY_OFFLINE_ONLY] = enabled }
     suspend fun setSwcLongPressAction(action: String) = context.settingsDataStore.edit { it[KEY_SWC_LONG_PRESS_ACTION] = action }
     suspend fun setSwcDoublePressAction(action: String) = context.settingsDataStore.edit { it[KEY_SWC_DOUBLE_PRESS_ACTION] = action }
@@ -209,6 +314,7 @@ class SettingsPreferences @Inject constructor(
     suspend fun setIdleScreensaverSeconds(seconds: Int) = context.settingsDataStore.edit { it[KEY_IDLE_SCREENSAVER_SEC] = seconds }
     suspend fun saveDspSettingsJson(json: String) = context.settingsDataStore.edit { it[KEY_DSP_SETTINGS_JSON] = json }
     suspend fun saveCustomDspPresetsJson(json: String) = context.settingsDataStore.edit { it[KEY_CUSTOM_DSP_PRESETS_JSON] = json }
+    suspend fun saveAdaptiveCabinConfigJson(json: String) = context.settingsDataStore.edit { it[KEY_ADAPTIVE_CABIN_CONFIG_JSON] = json }
     suspend fun setVisualizerMode(modeId: String) = context.settingsDataStore.edit { it[KEY_VISUALIZER_MODE] = modeId }
     suspend fun setVisualizerColorway(colorwayId: String) = context.settingsDataStore.edit { it[KEY_VISUALIZER_COLORWAY] = colorwayId }
     suspend fun setDualPaneCockpit(enabled: Boolean) = context.settingsDataStore.edit { it[KEY_DUAL_PANE_COCKPIT] = enabled }
@@ -263,6 +369,7 @@ class SettingsPreferences @Inject constructor(
             prefs?.get(KEY_SWC_CUSTOM_KEYMAP_JSON)?.let { put("swcCustomKeyMapJson", it) }
             prefs?.get(KEY_DSP_SETTINGS_JSON)?.let { put("dspSettingsJson", it) }
             prefs?.get(KEY_CUSTOM_DSP_PRESETS_JSON)?.let { put("customDspPresetsJson", it) }
+            prefs?.get(KEY_ADAPTIVE_CABIN_CONFIG_JSON)?.let { put("adaptiveCabinConfigJson", it) }
         }.toString(2)
     }
 
@@ -304,6 +411,7 @@ class SettingsPreferences @Inject constructor(
                 obj.optString("swcCustomKeyMapJson").takeIf { it.isNotBlank() }?.let { prefs[KEY_SWC_CUSTOM_KEYMAP_JSON] = it }
                 obj.optString("dspSettingsJson").takeIf { it.isNotBlank() }?.let { prefs[KEY_DSP_SETTINGS_JSON] = it }
                 obj.optString("customDspPresetsJson").takeIf { it.isNotBlank() }?.let { prefs[KEY_CUSTOM_DSP_PRESETS_JSON] = it }
+                obj.optString("adaptiveCabinConfigJson").takeIf { it.isNotBlank() }?.let { prefs[KEY_ADAPTIVE_CABIN_CONFIG_JSON] = it }
             }
             true
         } catch (_: Throwable) {

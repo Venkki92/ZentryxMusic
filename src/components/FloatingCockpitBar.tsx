@@ -11,6 +11,7 @@ import {
   Maximize2,
   Disc3,
 } from 'lucide-react';
+import { CrossfadeAlbumArt } from './CrossfadeAlbumArt';
 
 interface FloatingCockpitBarProps {
   visible: boolean;
@@ -121,11 +122,14 @@ export const FloatingCockpitBar: React.FC<FloatingCockpitBarProps> = ({
       {/* Track Row + Transport Controls */}
       <div className="flex items-center gap-2.5">
         <div className="w-11 h-11 rounded-xl bg-slate-900 border border-slate-800 overflow-hidden shrink-0 flex items-center justify-center">
-          {coverUrl ? (
-            <img src={coverUrl} alt="" className="w-full h-full object-cover" />
-          ) : (
-            <Disc3 className="w-5 h-5 text-slate-500" />
-          )}
+          <CrossfadeAlbumArt
+            src={coverUrl}
+            alt={title || 'Cover'}
+            trackKey={title}
+            durationMs={300}
+            className="w-full h-full"
+            fallback={<Disc3 className="w-5 h-5 text-slate-500" />}
+          />
         </div>
 
         <div className="min-w-0 flex-1">

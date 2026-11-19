@@ -49,16 +49,19 @@ import com.zentryx.music.models.Artist
 import com.zentryx.music.models.PlaybackState
 import com.zentryx.music.models.Playlist
 import com.zentryx.music.models.ScanStatus
+import com.zentryx.music.models.ServerConfig
 import com.zentryx.music.models.Song
 import com.zentryx.music.network.webdav.DiagnosticProbeEntry
 import com.zentryx.music.network.webdav.DiagnosticStepStatus
 import com.zentryx.music.network.webdav.ScanDiagnosticsState
+import com.zentryx.music.ui.components.CrossfadeAlbumArt
 import com.zentryx.music.ui.components.DriveModeHudDialog
 import com.zentryx.music.ui.components.MiniPlayer
 import com.zentryx.music.ui.components.StreamCodecInspectorDialog
 import com.zentryx.music.ui.components.rememberVoiceSearchLauncher
 import com.zentryx.music.viewmodel.LibraryTab
 import com.zentryx.music.viewmodel.LibraryViewModel
+import com.zentryx.music.viewmodel.RemoteFolderBrowserState
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
@@ -111,6 +114,8 @@ fun LibraryScreen(
     val playlistSyncMessage by viewModel.playlistSyncMessage.collectAsStateWithLifecycle()
     val diagnosticsState by viewModel.diagnosticsState.collectAsStateWithLifecycle()
     val showDiagnosticsDialog by viewModel.showDiagnosticsDialog.collectAsStateWithLifecycle()
+    val remoteFolderBrowserState by viewModel.remoteFolderBrowserState.collectAsStateWithLifecycle()
+    val extraWebDavFolders by viewModel.extraWebDavFolders.collectAsStateWithLifecycle()
 
     val isWideViewport = LocalConfiguration.current.screenWidthDp >= 820
     val isDualPaneActive = dualPaneCockpit && isWideViewport
@@ -154,7 +159,7 @@ fun LibraryScreen(
                 context.contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             } catch (_: SecurityException) {
             }
-            viewModel.scanLocalAudio(treeUri)
+            viewModel.scanLocalAudio(treeUri, additive = true)
         }
     }
 
@@ -323,10 +328,16 @@ fun LibraryScreen(
                         }
                     } else {
                         IconButton(
+                            onClick = { viewModel.openRemoteFolderPicker("") },
+                            modifier = Modifier.size(42.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.CreateNewFolder, contentDescription = "Add & Scan Folder", tint = accent)
+                        }
+                        IconButton(
                             onClick = { viewModel.startScan() },
                             modifier = Modifier.size(42.dp)
                         ) {
-                            Icon(imageVector = Icons.Default.Sync, contentDescription = "Scan", tint = accent)
+                            Icon(imageVector = Icons.Default.Sync, contentDescription = "Scan Defaults", tint = accent)
                         }
                     }
 
@@ -691,6 +702,7 @@ fun LibraryScreen(
                         } else if (pagedSongs.itemCount == 0) {
                             EmptyLibraryView(
                                 onScan = { viewModel.startScan() },
+                                onAddSpecificFolder = { viewModel.openRemoteFolderPicker("") },
                                 onScanLocal = triggerLocalScan,
                                 onPickUsbFolder = { usbFolderPicker.launch(null) }
                             )
@@ -859,6 +871,16 @@ fun LibraryScreen(
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f)
                                 )
+                                Button(
+                                    onClick = { viewModel.openRemoteFolderPicker("") },
+                                    colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = Color.Black),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) {
+                                    Icon(imageVector = Icons.Default.CreateNewFolder, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("+ Add Folder", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                }
                                 OutlinedButton(
                                     onClick = { viewModel.pinFolderOffline(folderBrowserPath) },
                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
@@ -866,7 +888,7 @@ fun LibraryScreen(
                                 ) {
                                     Icon(imageVector = Icons.Default.DownloadForOffline, contentDescription = null, tint = accent, modifier = Modifier.size(14.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Pin Folder", fontSize = 10.sp, color = accent, maxLines = 1)
+                                    Text("Pin", fontSize = 10.sp, color = accent, maxLines = 1)
                                 }
                                 OutlinedButton(
                                     onClick = { viewModel.startScanDiagnostics() },
@@ -875,7 +897,7 @@ fun LibraryScreen(
                                 ) {
                                     Icon(imageVector = Icons.Default.NetworkCheck, contentDescription = null, tint = accent, modifier = Modifier.size(14.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Scan Diagnostics", fontSize = 10.sp, color = Color.White, maxLines = 1)
+                                    Text("Diagnostics", fontSize = 10.sp, color = Color.White, maxLines = 1)
                                 }
                                 OutlinedButton(
                                     onClick = { usbFolderPicker.launch(null) },
@@ -884,16 +906,15 @@ fun LibraryScreen(
                                 ) {
                                     Icon(imageVector = Icons.Default.Usb, contentDescription = null, tint = accent, modifier = Modifier.size(14.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("USB Folder", fontSize = 10.sp, color = Color.White, maxLines = 1)
+                                    Text("+ USB", fontSize = 10.sp, color = Color.White, maxLines = 1)
                                 }
-                                Button(
+                                OutlinedButton(
                                     onClick = triggerLocalScan,
                                     enabled = !isLocalScanning,
-                                    colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = Color.Black),
                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                                     modifier = Modifier.height(32.dp)
                                 ) {
-                                    Text(if (isLocalScanning) "Scanning…" else "Scan Local", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                    Text(if (isLocalScanning) "Scanning…" else "Scan Local", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1)
                                 }
                             }
 
@@ -1426,6 +1447,24 @@ fun LibraryScreen(
         )
     }
 
+    if (remoteFolderBrowserState.isOpen) {
+        AddSpecificFolderDialog(
+            state = remoteFolderBrowserState,
+            extraFolders = extraWebDavFolders,
+            accent = accent,
+            surfaceColor = surfaceColor,
+            onNavigateFolder = { path -> viewModel.loadRemoteFolder(path) },
+            onNavigateUp = { viewModel.navigateRemoteFolderUp() },
+            onScanAndAddFolder = { path, recursive -> viewModel.scanAndAddRemoteFolder(path, recursive) },
+            onRemoveExtraFolder = { path -> viewModel.removeExtraRemoteFolder(path) },
+            onPickLocalFolder = {
+                viewModel.dismissRemoteFolderPicker()
+                usbFolderPicker.launch(null)
+            },
+            onDismiss = { viewModel.dismissRemoteFolderPicker() }
+        )
+    }
+
     if (showDriveModeHud) {
         DriveModeHudDialog(
             playbackState = playbackState,
@@ -1547,14 +1586,12 @@ private fun CockpitNowPlayingPane(
                         .clickable { onOpenFullPlayer() },
                     contentAlignment = Alignment.Center
                 ) {
-                    if (song.artworkPath != null && File(song.artworkPath).exists()) {
-                        AsyncImage(
-                            model = File(song.artworkPath),
-                            contentDescription = song.album,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    } else {
+                    CrossfadeAlbumArt(
+                        artworkPath = song.artworkPath,
+                        contentDescription = song.album,
+                        durationMillis = 300,
+                        modifier = Modifier.fillMaxSize()
+                    ) {
                         Icon(imageVector = Icons.Default.MusicNote, contentDescription = null, tint = accent, modifier = Modifier.size(52.dp))
                     }
                 }
@@ -2374,6 +2411,7 @@ private fun ArtistListItem(artist: Artist) {
 @Composable
 private fun EmptyLibraryView(
     onScan: () -> Unit,
+    onAddSpecificFolder: () -> Unit = {},
     onScanLocal: () -> Unit = {},
     onPickUsbFolder: () -> Unit = {}
 ) {
@@ -2399,7 +2437,7 @@ private fun EmptyLibraryView(
             )
             Spacer(modifier = Modifier.height(6.dp))
             Text(
-                text = "Scan your Nextcloud WebDAV folders or Local USB / Device audio storage.",
+                text = "Default folders: /WoW Radio & /Music.\nScan defaults or manually add any Nextcloud or Local/USB folder.",
                 style = MaterialTheme.typography.bodySmall.copy(color = Color(0xFF94A3B8)),
                 textAlign = TextAlign.Center
             )
@@ -2412,7 +2450,15 @@ private fun EmptyLibraryView(
                 ) {
                     Icon(imageVector = Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Scan Nextcloud", fontWeight = FontWeight.Bold)
+                    Text("Scan Defaults", fontWeight = FontWeight.Bold)
+                }
+                OutlinedButton(
+                    onClick = onAddSpecificFolder,
+                    modifier = Modifier.height(44.dp)
+                ) {
+                    Icon(imageVector = Icons.Default.CreateNewFolder, contentDescription = null, tint = accent, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("+ Add Folder", color = Color.White, fontWeight = FontWeight.Bold)
                 }
                 OutlinedButton(
                     onClick = onScanLocal,
@@ -2428,7 +2474,333 @@ private fun EmptyLibraryView(
                 ) {
                     Icon(imageVector = Icons.Default.Usb, contentDescription = null, tint = accent, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Pick USB Folder", color = Color.White, fontWeight = FontWeight.Bold)
+                    Text("+ USB Folder", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AddSpecificFolderDialog(
+    state: RemoteFolderBrowserState,
+    extraFolders: List<String>,
+    accent: Color,
+    surfaceColor: Color,
+    onNavigateFolder: (String) -> Unit,
+    onNavigateUp: () -> Unit,
+    onScanAndAddFolder: (String, Boolean) -> Unit,
+    onRemoveExtraFolder: (String) -> Unit,
+    onPickLocalFolder: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var manualPath by remember(state.currentPath) { mutableStateOf(state.currentPath) }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            shape = RoundedCornerShape(18.dp),
+            color = Color(0xFF0B1120),
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .fillMaxHeight(0.86f)
+                .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(18.dp))
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Icon(
+                            imageVector = Icons.Default.CreateNewFolder,
+                            contentDescription = null,
+                            tint = accent,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Add & Scan Specific Folder",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp
+                            )
+                            Text(
+                                text = "Discovered songs are merged into your existing library",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(34.dp)) {
+                        Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = Color(0xFF94A3B8))
+                    }
+                }
+
+                // Quick Default & Added Folder Shortcuts
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ServerConfig.DEFAULT_MUSIC_FOLDERS.forEach { defName ->
+                        val selected = state.currentPath.equals(defName, ignoreCase = true)
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (selected) accent else surfaceColor,
+                            modifier = Modifier
+                                .border(0.5.dp, if (selected) accent else Color(0xFF334155), RoundedCornerShape(8.dp))
+                                .clickable { onNavigateFolder(defName) }
+                        ) {
+                            Text(
+                                text = "/$defName",
+                                color = if (selected) Color.Black else Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                            )
+                        }
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (state.currentPath.isEmpty()) accent else surfaceColor,
+                        modifier = Modifier
+                            .border(0.5.dp, if (state.currentPath.isEmpty()) accent else Color(0xFF334155), RoundedCornerShape(8.dp))
+                            .clickable { onNavigateFolder("") }
+                    ) {
+                        Text(
+                            text = "/ (Root)",
+                            color = if (state.currentPath.isEmpty()) Color.Black else Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                    extraFolders.take(3).forEach { extra ->
+                        val cleanExtra = ServerConfig.normalizeFolderPath(extra)
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF1E293B),
+                            modifier = Modifier.border(0.5.dp, Color(0xFF475569), RoundedCornerShape(8.dp))
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(start = 8.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+                            ) {
+                                Text(
+                                    text = "/${cleanExtra.ifEmpty { "Root" }}",
+                                    color = Color(0xFFE2E8F0),
+                                    fontSize = 11.sp,
+                                    modifier = Modifier.clickable { onNavigateFolder(cleanExtra) }
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Remove saved folder",
+                                    tint = Color(0xFF94A3B8),
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .clickable { onRemoveExtraFolder(extra) }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Direct Path Input + Open + Up
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (state.currentPath.isNotEmpty()) {
+                        OutlinedButton(
+                            onClick = onNavigateUp,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                            modifier = Modifier.height(42.dp)
+                        ) {
+                            Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Up", fontSize = 12.sp)
+                        }
+                    }
+                    OutlinedTextField(
+                        value = manualPath,
+                        onValueChange = { manualPath = it },
+                        placeholder = { Text("Folder path (e.g. WoW Radio, Music, Podcasts)", fontSize = 12.sp) },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = accent,
+                            unfocusedBorderColor = Color(0xFF334155),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        )
+                    )
+                    Button(
+                        onClick = { onNavigateFolder(manualPath) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B), contentColor = Color.White),
+                        modifier = Modifier.height(44.dp)
+                    ) {
+                        Text("Open", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                }
+
+                // Remote Folder Listing
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF060B16),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .border(0.5.dp, Color(0xFF1E293B), RoundedCornerShape(12.dp))
+                ) {
+                    when {
+                        state.isLoading -> {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = accent)
+                                    Text("Loading /${state.currentPath.ifEmpty { "Root" }}…", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                                }
+                            }
+                        }
+                        !state.errorMessage.isNullOrBlank() -> {
+                            Column(
+                                modifier = Modifier.fillMaxSize().padding(16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Text(state.errorMessage, color = Color(0xFFF87171), fontSize = 12.sp, textAlign = TextAlign.Center)
+                                Spacer(modifier = Modifier.height(10.dp))
+                                OutlinedButton(onClick = { onNavigateFolder("") }) {
+                                    Text("Go to Root (/)", color = Color.White, fontSize = 12.sp)
+                                }
+                            }
+                        }
+                        state.folders.isEmpty() -> {
+                            Box(modifier = Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = if (state.audioFileCount > 0) {
+                                        "${state.audioFileCount} audio file(s) ready in /${state.currentPath.ifEmpty { "Root" }}.\nTap '+ Scan & Add Folder' below to merge them into your library."
+                                    } else {
+                                        "No subfolders in /${state.currentPath.ifEmpty { "Root" }}."
+                                    },
+                                    color = Color(0xFF94A3B8),
+                                    fontSize = 12.sp,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+                        else -> {
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                items(state.folders, key = { it.relativePath }) { entry ->
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = surfaceColor,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .border(0.5.dp, Color(0xFF1E293B), RoundedCornerShape(10.dp))
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable { onNavigateFolder(entry.relativePath) }
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Folder,
+                                                contentDescription = null,
+                                                tint = accent,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(10.dp))
+                                            Text(
+                                                text = entry.name,
+                                                color = Color.White,
+                                                fontWeight = FontWeight.SemiBold,
+                                                fontSize = 13.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Button(
+                                                onClick = { onScanAndAddFolder(entry.relativePath, true) },
+                                                colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = Color.Black),
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                                                modifier = Modifier.height(30.dp)
+                                            ) {
+                                                Text("+ Add", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                            }
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                                contentDescription = "Open",
+                                                tint = Color(0xFF64748B),
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Bottom Status & Primary CTAs
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Selected: /${state.currentPath.ifEmpty { "Root" }} • ${state.audioFileCount} direct audio file(s)",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { onScanAndAddFolder(state.currentPath, true) },
+                        enabled = !state.isLoading,
+                        colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = Color.Black),
+                        modifier = Modifier.weight(1f).height(44.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.AddCircleOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Scan & Add Folder to Library", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    OutlinedButton(
+                        onClick = onPickLocalFolder,
+                        modifier = Modifier.height(44.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Usb, contentDescription = null, tint = accent, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("+ Local / USB", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
                 }
             }
         }

@@ -5,9 +5,11 @@ import androidx.paging.PagingData
 import com.zentryx.music.models.Album
 import com.zentryx.music.models.Artist
 import com.zentryx.music.models.Playlist
+import com.zentryx.music.models.Resource
 import com.zentryx.music.models.ScanProgress
 import com.zentryx.music.models.Song
 import com.zentryx.music.network.webdav.ScanDiagnosticsState
+import com.zentryx.music.network.webdav.WebDavItem
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -26,8 +28,10 @@ interface MusicRepository {
     fun getArtists(): Flow<List<Artist>>
     fun searchSongs(query: String): Flow<List<Song>>
     fun startScan(): Flow<ScanProgress>
+    fun scanSpecificWebDavFolder(folderPath: String, additive: Boolean = true, recursive: Boolean = true): Flow<ScanProgress>
+    suspend fun browseRemoteWebDavFolder(relativePath: String): Resource<List<WebDavItem>>
     suspend fun cancelScan()
-    suspend fun scanLocalLibrary(treeUri: Uri? = null): Int
+    suspend fun scanLocalLibrary(treeUri: Uri? = null, additive: Boolean = false): Int
     fun runScanDiagnostics(startFolderPath: String = ""): Flow<ScanDiagnosticsState>
     suspend fun getSongCount(): Int
     suspend fun getSongById(id: String): Song?
