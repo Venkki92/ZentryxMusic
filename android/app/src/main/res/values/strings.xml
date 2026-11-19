@@ -12,4 +12,5 @@
     <string name="tab_albums">Albums</string>
     <string name="tab_artists">Artists</string>
     <string name="search_hint">Search songs, albums, artists…</string>
+    <string name="widget_description">Zentryx MBUX Cockpit Quick Dock (Prev, Play/Pause, Next, -20dB Duck)</string>
 </resources>

@@ -13,7 +13,9 @@ data class PlaybackState(
     val repeatMode: RepeatMode = RepeatMode.OFF,
     val queue: List<Song> = emptyList(),
     val currentQueueIndex: Int = -1,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val signalPathBadge: String? = null,
+    val replayGainAppliedDb: Float? = null
 )
 
 enum class RepeatMode {

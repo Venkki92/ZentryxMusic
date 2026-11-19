@@ -47,6 +47,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -67,33 +68,40 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zentryx.music.models.ErrorType
-import com.zentryx.music.ui.theme.NextcloudBlue
 import com.zentryx.music.ui.theme.StatusError
 import com.zentryx.music.ui.theme.StatusSuccess
-import com.zentryx.music.viewmodel.LoginUiState
 import com.zentryx.music.viewmodel.LoginViewModel
 
 /**
  * 1024x600 Landscape-optimized Login Screen for AutoChips AC8259P / Mercedes-Benz S203 headunit.
- * Features a split two-column layout with large touch targets (>= 56dp) suitable for driving ergonomics.
+ * Features a split two-column layout with large touch targets (>= 54dp) suitable for driving ergonomics.
  */
 @Composable
 fun LoginScreen(
     viewModel: LoginViewModel,
     onLoginSuccess: () -> Unit,
+    onUseLocalOnly: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     var passwordVisible by remember { mutableStateOf(false) }
+    val accent = MaterialTheme.colorScheme.primary
+
+    // Trigger navigation cleanly when Nextcloud Login Flow v2 polling completes
+    LaunchedEffect(uiState.isLoggedIn) {
+        if (uiState.isLoggedIn) {
+            onLoginSuccess()
+        }
+    }
 
     // Trust-On-First-Use (TOFU) SSL Pinning Alert Dialog
     if (uiState.untrustedCertificateFingerprint != null) {
         val fingerprint = uiState.untrustedCertificateFingerprint!!
         AlertDialog(
             onDismissRequest = { viewModel.dismissUntrustedCertificate() },
-            icon = { Icon(Icons.Default.Security, contentDescription = null, tint = NextcloudBlue) },
+            icon = { Icon(Icons.Default.Security, contentDescription = null, tint = accent) },
             title = { Text("Trust Self-Signed Certificate?", fontWeight = FontWeight.Bold) },
             text = {
                 Column {
@@ -114,7 +122,7 @@ fun LoginScreen(
                             fontFamily = FontFamily.Monospace,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
+                            color = accent,
                             modifier = Modifier.padding(10.dp)
                         )
                     }
@@ -123,14 +131,14 @@ fun LoginScreen(
             confirmButton = {
                 Button(
                     onClick = { viewModel.acceptUntrustedCertificate(fingerprint) },
-                    colors = ButtonDefaults.buttonColors(containerColor = NextcloudBlue)
+                    colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = Color.Black)
                 ) {
-                    Text("Trust Certificate")
+                    Text("Trust Certificate", fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { viewModel.dismissUntrustedCertificate() }) {
-                    Text("Cancel")
+                    Text("Cancel", color = accent)
                 }
             }
         )
@@ -165,11 +173,11 @@ fun LoginScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Surface(
                             shape = RoundedCornerShape(10.dp),
-                            color = NextcloudBlue,
+                            color = accent,
                             modifier = Modifier.size(38.dp)
                         ) {
                             Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.Cloud, contentDescription = null, tint = Color.White)
+                                Icon(Icons.Default.Cloud, contentDescription = null, tint = Color.Black)
                             }
                         }
                         Spacer(modifier = Modifier.width(10.dp))
@@ -225,16 +233,16 @@ fun LoginScreen(
                 } else if (uiState.isPollingLoginFlow) {
                     StatusCard(
                         icon = Icons.Default.Refresh,
-                        iconTint = NextcloudBlue,
+                        iconTint = accent,
                         title = "Waiting for Browser Approval",
                         message = "Authorize Zentryx Music in your browser. Polling Nextcloud server…",
-                        backgroundColor = NextcloudBlue.copy(alpha = 0.12f),
+                        backgroundColor = accent.copy(alpha = 0.12f),
                         showProgress = true
                     )
                 } else {
                     StatusCard(
                         icon = Icons.Default.Security,
-                        iconTint = NextcloudBlue,
+                        iconTint = accent,
                         title = "Hardware Keystore Protected",
                         message = "Passwords and tokens are encrypted with AES-256-GCM in Android KeyStore.",
                         backgroundColor = MaterialTheme.colorScheme.surfaceVariant
@@ -256,17 +264,17 @@ fun LoginScreen(
                             .fillMaxWidth()
                             .height(54.dp), // Ergonomic 54dp automotive touch target
                         shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = NextcloudBlue),
+                        colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = Color.Black),
                         enabled = !uiState.isLoggingIn && !uiState.isPollingLoginFlow
                     ) {
                         if (uiState.isPollingLoginFlow) {
-                            CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.Black, strokeWidth = 2.dp)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("Authorizing in browser…", fontWeight = FontWeight.SemiBold)
                         } else {
                             Icon(Icons.Default.OpenInBrowser, contentDescription = null, modifier = Modifier.size(20.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Log in via Browser (Flow v2)", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                            Text("Log in via Browser (Flow v2)", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         }
                     }
 
@@ -277,6 +285,14 @@ fun LoginScreen(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text("Cancel Browser Login", color = StatusError, fontSize = 12.sp)
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        TextButton(
+                            onClick = onUseLocalOnly,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Use Local USB / Device Audio Only", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
                         }
                     }
                 }
@@ -316,28 +332,28 @@ fun LoginScreen(
                     onValueChange = viewModel::onServerUrlChanged,
                     label = { Text("Nextcloud URL") },
                     placeholder = { Text("https://cloud.example.com") },
-                    leadingIcon = { Icon(Icons.Default.Cloud, contentDescription = null, tint = NextcloudBlue) },
+                    leadingIcon = { Icon(Icons.Default.Cloud, contentDescription = null, tint = accent) },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
                     keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) }),
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp),
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = NextcloudBlue)
+                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = accent)
                 )
 
                 // Username input
                 OutlinedTextField(
                     value = uiState.username,
                     onValueChange = viewModel::onUsernameChanged,
-                    label = { Text("Username") },
-                    placeholder = { Text("alice") },
-                    leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, tint = NextcloudBlue) },
+                    label = { Text("Username or Email") },
+                    placeholder = { Text("alice or alice@example.com") },
+                    leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, tint = accent) },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, imeAction = ImeAction.Next),
                     keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) }),
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp),
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = NextcloudBlue)
+                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = accent)
                 )
 
                 // Password / App-password input
@@ -346,7 +362,7 @@ fun LoginScreen(
                     onValueChange = viewModel::onPasswordChanged,
                     label = { Text("Password or App Password") },
                     placeholder = { Text("••••••••••••") },
-                    leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = NextcloudBlue) },
+                    leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = accent) },
                     trailingIcon = {
                         IconButton(onClick = { passwordVisible = !passwordVisible }) {
                             Icon(
@@ -361,7 +377,7 @@ fun LoginScreen(
                     keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) }),
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp),
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = NextcloudBlue)
+                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = accent)
                 )
 
                 // Music Folder Root input
@@ -370,13 +386,13 @@ fun LoginScreen(
                     onValueChange = viewModel::onMusicFolderChanged,
                     label = { Text("Music Folder Path") },
                     placeholder = { Text("/Music") },
-                    leadingIcon = { Icon(Icons.Default.Folder, contentDescription = null, tint = NextcloudBlue) },
+                    leadingIcon = { Icon(Icons.Default.Folder, contentDescription = null, tint = accent) },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp),
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = NextcloudBlue)
+                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = accent)
                 )
 
                 Spacer(modifier = Modifier.height(4.dp))
@@ -417,13 +433,13 @@ fun LoginScreen(
                             .weight(1f)
                             .height(52.dp),
                         shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = NextcloudBlue),
+                        colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = Color.Black),
                         enabled = !uiState.isTesting && !uiState.isLoggingIn
                     ) {
                         if (uiState.isLoggingIn) {
-                            CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color.Black, strokeWidth = 2.dp)
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Signing In…", fontSize = 13.sp)
+                            Text("Signing In…", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                         } else {
                             Text("Sign In", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                         }

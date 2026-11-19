@@ -188,3 +188,282 @@ export const OfflineIndicator: React.FC = () => {
     </div>
   );
 };
+
+interface ApkVariantStatus {
+  exists: boolean;
+  filename: string;
+  version?: string;
+  versionCode?: number;
+  sizeBytes: number;
+  updatedAt: string | null;
+  url: string;
+}
+
+interface AndroidApkStatusResponse {
+  available: boolean;
+  version: string;
+  versionCode?: number;
+  applicationId: string;
+  stale?: boolean;
+  building?: boolean;
+  buildError?: string | null;
+  release: ApkVariantStatus;
+  debug: ApkVariantStatus;
+}
+
+function formatApkSize(bytes: number): string {
+  if (!bytes || bytes <= 0) return '';
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function downloadVerifiedApk(
+  url: string,
+  filename: string,
+  expectedSizeBytes: number,
+  onProgress: (pct: number | null) => void
+): Promise<void> {
+  const response = await fetch(url, {
+    method: 'GET',
+    credentials: 'include',
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    throw new Error(`Server returned HTTP ${response.status}`);
+  }
+
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
+  if (contentType.includes('text/html')) {
+    throw new Error('Preview proxy returned HTML instead of the APK binary.');
+  }
+
+  const headerLen = Number(response.headers.get('content-length') || 0);
+  const totalBytes = headerLen > 0 ? headerLen : expectedSizeBytes;
+  const chunks: Uint8Array<ArrayBuffer>[] = [];
+  let received = 0;
+
+  if (response.body) {
+    const reader = response.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.byteLength > 0) {
+        const copy = new Uint8Array(new ArrayBuffer(value.byteLength));
+        copy.set(value);
+        chunks.push(copy);
+        received += value.byteLength;
+        if (totalBytes > 0) {
+          onProgress(Math.min(100, Math.round((received / totalBytes) * 100)));
+        } else {
+          onProgress(null);
+        }
+      }
+    }
+  } else {
+    const buf = new Uint8Array(await response.arrayBuffer());
+    chunks.push(buf);
+    received = buf.byteLength;
+    onProgress(100);
+  }
+
+  if (received < 100_000) {
+    throw new Error(`Downloaded payload too small (${received} bytes) — not a valid APK.`);
+  }
+
+  const firstChunk = chunks[0];
+  if (!firstChunk || firstChunk.length < 2 || firstChunk[0] !== 0x50 || firstChunk[1] !== 0x4b) {
+    throw new Error('Downloaded file is missing the APK/ZIP signature (PK).');
+  }
+
+  const blob = new Blob(chunks, { type: 'application/vnd.android.package-archive' });
+  const blobUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = blobUrl;
+  anchor.download = filename;
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+}
+
+export const AndroidApkDownloadButton: React.FC<{
+  accentHex: string;
+  compact?: boolean;
+}> = ({ accentHex, compact = false }) => {
+  const [status, setStatus] = useState<AndroidApkStatusResponse | null>(null);
+  const [downloadingVariant, setDownloadingVariant] = useState<'release' | 'debug' | null>(null);
+  const [progressPct, setProgressPct] = useState<number | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [rebuildRequested, setRebuildRequested] = useState(false);
+
+  const fetchStatus = async (): Promise<AndroidApkStatusResponse | null> => {
+    try {
+      const r = await fetch('/api/android-apk/status', { credentials: 'include', cache: 'no-store' });
+      if (!r.ok) return null;
+      return (await r.json()) as AndroidApkStatusResponse;
+    } catch {
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+    void fetchStatus().then((data) => {
+      if (active && data) setStatus(data);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!status?.building && !rebuildRequested) return;
+    let active = true;
+    const timer = window.setInterval(() => {
+      void fetchStatus().then((data) => {
+        if (!active || !data) return;
+        setStatus(data);
+        if (!data.building) {
+          setRebuildRequested(false);
+        }
+      });
+    }, 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [status?.building, rebuildRequested]);
+
+  if (!status || !status.available) return null;
+
+  const primaryVariant: 'release' | 'debug' = status.release.exists ? 'release' : 'debug';
+  const primary = primaryVariant === 'release' ? status.release : status.debug;
+  const displayVersion = primary.version || status.version;
+  const displayBuild = primary.versionCode ?? status.versionCode ?? 1;
+
+  const handleDownload = async (variant: 'release' | 'debug', item: ApkVariantStatus) => {
+    if (downloadingVariant) return;
+    setDownloadError(null);
+    setDownloadingVariant(variant);
+    setProgressPct(0);
+    try {
+      await downloadVerifiedApk(item.url, item.filename, item.sizeBytes, setProgressPct);
+    } catch (err: any) {
+      setDownloadError(err?.message || 'APK download failed');
+    } finally {
+      setDownloadingVariant(null);
+      setProgressPct(null);
+    }
+  };
+
+  const handleRebuild = async () => {
+    if (status.building || rebuildRequested) return;
+    setDownloadError(null);
+    setRebuildRequested(true);
+    try {
+      const res = await fetch('/api/android-apk/rebuild', {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (!res.ok) {
+        throw new Error(`Rebuild failed (${res.status})`);
+      }
+      const next = await fetchStatus();
+      if (next) setStatus(next);
+    } catch (err: any) {
+      setRebuildRequested(false);
+      setDownloadError(err?.message || 'Failed to trigger APK rebuild');
+    }
+  };
+
+  if (compact) {
+    const isBusy = downloadingVariant !== null;
+    return (
+      <button
+        type="button"
+        disabled={isBusy}
+        onClick={() => void handleDownload(primaryVariant, primary)}
+        className="flex items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-bold text-black transition-transform active:scale-95 shadow-md whitespace-nowrap disabled:opacity-75 cursor-pointer"
+        style={{ backgroundColor: accentHex }}
+        title={
+          downloadError
+            ? downloadError
+            : `Download Native Android APK v${displayVersion} #${displayBuild} (${formatApkSize(primary.sizeBytes)})`
+        }
+      >
+        <Download className={`w-3.5 h-3.5 ${isBusy ? 'animate-bounce' : ''}`} />
+        <span>
+          {isBusy
+            ? progressPct !== null
+              ? `APK ${progressPct}%`
+              : 'APK…'
+            : status.building
+              ? `APK Building…`
+              : `APK v${displayVersion} #${displayBuild}${primary.sizeBytes > 0 ? ` · ${formatApkSize(primary.sizeBytes)}` : ''}`}
+        </span>
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex flex-col items-end gap-1.5 shrink-0">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {(status.stale || status.building) && (
+          <button
+            type="button"
+            disabled={Boolean(status.building || rebuildRequested)}
+            onClick={() => void handleRebuild()}
+            className="flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold border border-amber-500/40 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 transition-colors disabled:opacity-70 cursor-pointer"
+            title="Android source changed — rebuild APK and increment VERSION_CODE"
+          >
+            <span>{status.building || rebuildRequested ? 'Building APK…' : 'Update APK (+build)'}</span>
+          </button>
+        )}
+        {status.release.exists && (
+          <button
+            type="button"
+            disabled={downloadingVariant !== null}
+            onClick={() => void handleDownload('release', status.release)}
+            className="flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-bold text-black transition-transform active:scale-95 shadow-md disabled:opacity-75 cursor-pointer"
+            style={{ backgroundColor: accentHex }}
+          >
+            <Download className={`w-3.5 h-3.5 ${downloadingVariant === 'release' ? 'animate-bounce' : ''}`} />
+            <span>
+              {downloadingVariant === 'release'
+                ? `Downloading… ${progressPct !== null ? `${progressPct}%` : ''}`
+                : `Release v${status.release.version || displayVersion} (#${status.release.versionCode ?? displayBuild}) · ${formatApkSize(status.release.sizeBytes)}`}
+            </span>
+          </button>
+        )}
+        {status.debug.exists && (
+          <button
+            type="button"
+            disabled={downloadingVariant !== null}
+            onClick={() => void handleDownload('debug', status.debug)}
+            className="flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-medium border border-slate-700 bg-slate-900/90 hover:bg-slate-800 text-slate-200 transition-colors disabled:opacity-75 cursor-pointer"
+          >
+            <Download
+              className={`w-3.5 h-3.5 ${downloadingVariant === 'debug' ? 'animate-bounce' : ''}`}
+              style={{ color: accentHex }}
+            />
+            <span>
+              {downloadingVariant === 'debug'
+                ? `Downloading… ${progressPct !== null ? `${progressPct}%` : ''}`
+                : `Debug v${status.debug.version || displayVersion} (#${status.debug.versionCode ?? displayBuild}) · ${formatApkSize(status.debug.sizeBytes)}`}
+            </span>
+          </button>
+        )}
+      </div>
+      {status.buildError && (
+        <span className="text-[11px] text-rose-400">Build error: {status.buildError}</span>
+      )}
+      {downloadError && (
+        <span className="text-[11px] text-rose-400">{downloadError}</span>
+      )}
+    </div>
+  );
+};
+
+
+

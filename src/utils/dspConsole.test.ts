@@ -4,12 +4,19 @@ import {
   DSP_16_FREQUENCIES,
   FACTORY_DSP_PRESETS,
   DEFAULT_DSP_SETTINGS,
+  DEFAULT_DEVICE_PRESET_MAP,
+  SURROUND_MODES,
   interpolate5To16Bands,
   downsample16To5Bands,
   calculateLoudnessContourGains,
+  calculateRoadNoiseContourDb,
+  computeCabinRtaCorrections,
   calculateBalanceGains,
+  calculateCabinStageGains,
   calculateStereoWidthMatrix,
   buildDspResponseCurvePoints,
+  matchPresetForTrack,
+  applyPresetToDsp,
   sanitizeDspSettings,
   sanitizeCustomPresets,
   dbToLinearGain,
@@ -61,20 +68,66 @@ describe('DSP Console Engine Math & Validation', () => {
     assert.deepEqual(highVol, { lowShelfDb: 0, highShelfDb: 0 });
   });
 
-  it('calculates L/R channel balance attenuation cleanly', () => {
+  it('computes speed-sensitive Road-Noise Acoustic Contour smoothly above 50 km/h', () => {
+    assert.deepEqual(calculateRoadNoiseContourDb(120, false), { subBassDb: 0, vocalPresenceDb: 0 });
+    assert.deepEqual(calculateRoadNoiseContourDb(45, true), { subBassDb: 0, vocalPresenceDb: 0 });
+    const cruise = calculateRoadNoiseContourDb(90, true);
+    const highway = calculateRoadNoiseContourDb(130, true);
+    assert.ok(cruise.subBassDb > 1.0 && cruise.subBassDb < highway.subBassDb);
+    assert.ok(cruise.vocalPresenceDb > 0.4 && cruise.vocalPresenceDb < highway.vocalPresenceDb);
+    assert.equal(highway.subBassDb, 4.0);
+    assert.equal(highway.vocalPresenceDb, 1.5);
+  });
+
+  it('computes damped inverse Cabin RTA EQ corrections clamped to [-6, +6] dB', () => {
+    // Simulate a harsh 3.5kHz cabin peak (+10 dB) and weak 64Hz bass (-10 dB) relative to -30 dB mids
+    const measured = [
+      -40, -40, -35, -30, -30, -30, -30, -30, -20, -22, -30, -30, -30, -30, -30, -30,
+    ];
+    const corr = computeCabinRtaCorrections(measured);
+    assert.equal(corr.length, 16);
+    assert.ok(corr[1] > 4, 'Weak 64Hz bass should receive positive boost');
+    assert.ok(corr[8] <= -5, 'Harsh 3.5kHz peak should be attenuated');
+    assert.ok(corr.every((g) => g >= -6 && g <= 6));
+  });
+
+  it('calculates L/R channel balance attenuation and 2D Cabin Stage gains cleanly', () => {
     assert.deepEqual(calculateBalanceGains(0), { leftGain: 1, rightGain: 1 });
     assert.deepEqual(calculateBalanceGains(-100), { leftGain: 1, rightGain: 0 });
     assert.deepEqual(calculateBalanceGains(100), { leftGain: 0, rightGain: 1 });
     assert.deepEqual(calculateBalanceGains(50), { leftGain: 0.5, rightGain: 1 });
+
+    const centerStage = calculateCabinStageGains(0, 0);
+    assert.deepEqual(centerStage, { leftGain: 1, rightGain: 1, faderHighShelfDb: 0 });
+
+    const rearBias = calculateCabinStageGains(0, -100);
+    assert.ok(rearBias.leftGain < 1 && rearBias.rightGain < 1);
+    assert.equal(rearBias.faderHighShelfDb, -2.5);
   });
 
-  it('computes transparent Mid/Side matrix coefficients for stereo width', () => {
+  it('computes transparent Mid/Side matrix coefficients for stereo width & exposes Logic 7 surround modes', () => {
     assert.deepEqual(calculateStereoWidthMatrix(100), { directGain: 1, crossGain: 0 });
     assert.deepEqual(calculateStereoWidthMatrix(0), { directGain: 0.5, crossGain: 0.5 });
     assert.deepEqual(calculateStereoWidthMatrix(150), { directGain: 1.25, crossGain: -0.25 });
+    assert.ok(SURROUND_MODES.logic7_surround.haasLeftMs > 10);
+    assert.ok(SURROUND_MODES.concert_hall.haasLeftMs > SURROUND_MODES.logic7_surround.haasLeftMs);
+    assert.ok(SURROUND_MODES.studio_focused.centerBoostMaxDb > 0);
   });
 
-  it('builds SVG response curve reflecting HPF rolloff and Bass Boost lift', () => {
+  it('matches presets deterministically from track genre, folder path, and title', () => {
+    assert.equal(matchPresetForTrack('Podcast', '/Audio/Shows', 'Episode 1'), 'podcast_clarity');
+    assert.equal(matchPresetForTrack('Heavy Metal', '/Music/Iron', 'Track'), 'rock_metal');
+    assert.equal(matchPresetForTrack(null, '/Music/Techno Sets', 'Live'), 'club_electronic');
+    assert.equal(matchPresetForTrack('Hip-Hop', '/Music/Beats', '808'), 'cabin_bass');
+    assert.equal(matchPresetForTrack('Acoustic Jazz', '/Music/Trio', 'Blue'), 'vocal_jazz');
+    assert.equal(matchPresetForTrack('Pop', '/Music/Hits', 'Song'), null);
+
+    const updated = applyPresetToDsp(DEFAULT_DSP_SETTINGS, FACTORY_DSP_PRESETS[5]);
+    assert.equal(updated.selectedPresetId, FACTORY_DSP_PRESETS[5].id);
+    assert.equal(updated.dspEnabled, true);
+  });
+
+  it('builds SVG response curve reflecting 12 vs 24 dB/oct HPF slope, Road-Noise Contour & Sub Trim', () => {
     const flatPoints = buildDspResponseCurvePoints(
       {
         dspEnabled: true,
@@ -89,18 +142,51 @@ describe('DSP Console Engine Math & Validation', () => {
     assert.equal(flatPoints.length, 48);
     assert.ok(flatPoints.every((p) => p.db === 0));
 
-    const hpfAndBoost = buildDspResponseCurvePoints(
+    const slope12 = buildDspResponseCurvePoints(
       {
         dspEnabled: true,
         bands16: new Array(16).fill(0) as DspBandGains16,
-        bassBoostDb: 6,
+        bassBoostDb: 0,
         bassBoostFreqHz: 80,
         hpfCutoffHz: 100,
+        crossoverSlopeDb: 12,
         loudnessContour: false,
       },
       85
     );
-    assert.ok(hpfAndBoost[0].db < 0);
+    const slope24 = buildDspResponseCurvePoints(
+      {
+        dspEnabled: true,
+        bands16: new Array(16).fill(0) as DspBandGains16,
+        bassBoostDb: 0,
+        bassBoostFreqHz: 80,
+        hpfCutoffHz: 100,
+        crossoverSlopeDb: 24,
+        loudnessContour: false,
+      },
+      85
+    );
+    // At 50 Hz (1 octave below 100 Hz HPF), 24 dB/oct cuts deeper than 12 dB/oct
+    const pt12 = slope12.find((p) => p.freq >= 45 && p.freq <= 55)!;
+    const pt24 = slope24.find((p) => p.freq >= 45 && p.freq <= 55)!;
+    assert.ok(pt24.db < pt12.db, `Expected 24dB/oct (${pt24.db}) < 12dB/oct (${pt12.db})`);
+
+    const highwayContour = buildDspResponseCurvePoints(
+      {
+        dspEnabled: true,
+        bands16: new Array(16).fill(0) as DspBandGains16,
+        bassBoostDb: 0,
+        bassBoostFreqHz: 65,
+        hpfCutoffHz: 0,
+        loudnessContour: false,
+        roadNoiseEqEnabled: true,
+      },
+      85,
+      640,
+      140,
+      120
+    );
+    assert.ok(highwayContour[0].db > 2.5);
 
     const bypassed = buildDspResponseCurvePoints(
       {
@@ -122,16 +208,31 @@ describe('DSP Console Engine Math & Validation', () => {
     assert.ok(Math.abs(dbToLinearGain(-6) - 0.501) < 0.01);
   });
 
-  it('sanitizes persisted DSP settings & custom presets safely', () => {
+  it('sanitizes persisted DSP settings including Logic 7, 24dB/oct slope, sub delay & custom presets', () => {
     const sanitized = sanitizeDspSettings({
       dspEnabled: false,
       eqViewMode: '5band',
       preampDb: 99,
       bassBoostDb: -10,
       hpfCutoffHz: 999,
+      crossoverSlopeDb: 24,
       leftDelayMs: 12,
+      fader: -200,
       stereoWidthPercent: 200,
       compressorProfile: 'invalid',
+      subPhaseInverted: true,
+      subLpfHz: 120,
+      subTrimDb: 20,
+      subDelayMs: 9.4,
+      monoFoldDown: true,
+      peakLimiterCeilingDb: -2.9,
+      autoGenrePresetEnabled: true,
+      autoSwitchDevicePreset: true,
+      devicePresetMap: { bluetooth_a2dp: 'rock_metal' },
+      surroundMode: 'logic7_surround',
+      surroundIntensity: 140,
+      centerCoherence: 73,
+      roadNoiseEqEnabled: true,
       bands16: [25, -25, 3],
     });
 
@@ -140,9 +241,25 @@ describe('DSP Console Engine Math & Validation', () => {
     assert.equal(sanitized.preampDb, 6);
     assert.equal(sanitized.bassBoostDb, 0);
     assert.equal(sanitized.hpfCutoffHz, DEFAULT_DSP_SETTINGS.hpfCutoffHz);
+    assert.equal(sanitized.crossoverSlopeDb, 24);
     assert.equal(sanitized.leftDelayMs, 5);
+    assert.equal(sanitized.fader, -100);
     assert.equal(sanitized.stereoWidthPercent, 150);
     assert.equal(sanitized.compressorProfile, DEFAULT_DSP_SETTINGS.compressorProfile);
+    assert.equal(sanitized.subPhaseInverted, true);
+    assert.equal(sanitized.subLpfHz, 120);
+    assert.equal(sanitized.subTrimDb, 6);
+    assert.equal(sanitized.subDelayMs, 9.5);
+    assert.equal(sanitized.monoFoldDown, true);
+    assert.equal(sanitized.peakLimiterCeilingDb, -3.0);
+    assert.equal(sanitized.autoGenrePresetEnabled, true);
+    assert.equal(sanitized.autoSwitchDevicePreset, true);
+    assert.equal(sanitized.devicePresetMap.bluetooth_a2dp, 'rock_metal');
+    assert.equal(sanitized.devicePresetMap.headunit_speakers, DEFAULT_DEVICE_PRESET_MAP.headunit_speakers);
+    assert.equal(sanitized.surroundMode, 'logic7_surround');
+    assert.equal(sanitized.surroundIntensity, 100);
+    assert.equal(sanitized.centerCoherence, 75);
+    assert.equal(sanitized.roadNoiseEqEnabled, true);
     assert.equal(sanitized.bands16[0], 12);
     assert.equal(sanitized.bands16[1], -12);
     assert.equal(sanitized.bands16[2], 3);
@@ -159,3 +276,4 @@ describe('DSP Console Engine Math & Validation', () => {
     assert.equal(presets[0].preampDb, -3);
   });
 });
+

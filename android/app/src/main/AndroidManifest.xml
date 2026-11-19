@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Networking permissions for Nextcloud WebDAV streaming -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -11,13 +12,24 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Local USB / MicroSD / Device audio library permissions -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
     <!-- API 34+ granular foreground types (ignored safely by Android 9 API 28) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
-    <!-- GNSS speed telemetry for Speed-Dependent Volume Control (GALA / SDVC) -->
+    <!-- GNSS speed telemetry for Speed-Dependent Volume Control (GALA / SDVC) & Solar Night Mode -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- Ignition Boot Auto-Resume, Bluetooth Auto-Play, and Floating PiP Audio Bar over Navigation -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
     <!-- Headunit / Car hardware features (non-required so APK installs cleanly on headunit) -->
     <uses-feature android:name="android.hardware.touchscreen" android:required="true" />
@@ -67,7 +79,26 @@
             </intent-filter>
         </activity>
 
-        <!-- Media3 MediaSessionService: Handles background streaming, lockscreen, and SWC steering controls -->
+        <!-- Android Auto Media + CarAppLibrary Metadata -->
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
+        <meta-data
+            android:name="androidx.car.app.minCarApiLevel"
+            android:value="1" />
+
+        <!-- Jetpack Car App Library Service: Exposes Zentryx Music as a native Android Auto media app -->
+        <service
+            android:name=".auto.ZentryxCarAppService"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="androidx.car.app.CarAppService" />
+                <category android:name="androidx.car.app.category.MEDIA" />
+            </intent-filter>
+        </service>
+
+        <!-- Media3 MediaLibraryService: Handles background streaming, Android Auto MediaBrowser, lockscreen, and SWC -->
         <service
             android:name=".player.ZentryxMediaService"
             android:exported="true"
@@ -88,6 +119,73 @@
                 <action android:name="android.intent.action.MEDIA_BUTTON" />
             </intent-filter>
         </receiver>
+
+        <!-- 4x2 Automotive Home Screen Quick-Dock Widget -->
+        <receiver
+            android:name=".widget.ZentryxWidgetProvider"
+            android:exported="true"
+            android:label="Zentryx Quick Dock">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.zentryx.music.widget.ACTION_PLAY_PAUSE" />
+                <action android:name="com.zentryx.music.widget.ACTION_NEXT" />
+                <action android:name="com.zentryx.music.widget.ACTION_PREV" />
+                <action android:name="com.zentryx.music.widget.ACTION_DUCK" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/zentryx_widget_info" />
+        </receiver>
+
+        <!-- ACC Boot Auto-Resume, Bluetooth A2DP/ACL Auto-Play, and CAN-Bus Reverse-Gear Ducking -->
+        <receiver
+            android:name=".player.BootAndHardwareReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="android.bluetooth.a2dp.profile.action.CONNECTION_STATE_CHANGED" />
+                <action android:name="com.microntek.reverse" />
+                <action android:name="com.tw.reverse" />
+                <action android:name="android.intent.action.REVERSE_GEAR" />
+            </intent-filter>
+        </receiver>
+
+        <!-- USB OTG / MicroSD Automatic Media Mount Watcher -->
+        <receiver
+            android:name=".scanner.UsbStorageWatcher"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_MOUNTED" />
+                <action android:name="android.intent.action.MEDIA_UNMOUNTED" />
+                <action android:name="android.intent.action.MEDIA_EJECT" />
+                <data android:scheme="file" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Floating Translucent PiP Audio Widget over Navigation Apps (Google Maps / Waze) -->
+        <service
+            android:name=".overlay.FloatingAudioOverlayService"
+            android:exported="false" />
+
+        <!-- Required for ZentryxApplication Configuration.Provider (HiltWorkerFactory) -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+        </provider>
+
+        <!-- Required foregroundServiceType for WorkManager LibraryScanWorker on API 34+ -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
 
     </application>
 

@@ -1,6 +1,8 @@
 package com.zentryx.music.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
@@ -25,6 +27,41 @@ fun ZentryxNavHost(
     modifier: Modifier = Modifier,
     navController: NavHostController = rememberNavController()
 ) {
+    val backStack = remember(startDestination) { mutableStateListOf(startDestination) }
+    val forwardStack = remember(startDestination) { mutableStateListOf<String>() }
+
+    fun navigateMenu(route: String) {
+        if (backStack.lastOrNull() == route) return
+        backStack.add(route)
+        forwardStack.clear()
+        navController.navigate(route) {
+            launchSingleTop = true
+        }
+    }
+
+    fun goBack() {
+        if (backStack.size <= 1) return
+        val current = backStack.removeAt(backStack.lastIndex)
+        forwardStack.add(current)
+        val previous = backStack.last()
+        navController.navigate(previous) {
+            popUpTo(previous) { inclusive = false }
+            launchSingleTop = true
+        }
+    }
+
+    fun goForward() {
+        if (forwardStack.isEmpty()) return
+        val next = forwardStack.removeAt(forwardStack.lastIndex)
+        backStack.add(next)
+        navController.navigate(next) {
+            launchSingleTop = true
+        }
+    }
+
+    val canGoBack = backStack.size > 1
+    val canGoForward = forwardStack.isNotEmpty()
+
     NavHost(
         navController = navController,
         startDestination = startDestination,
@@ -35,9 +72,15 @@ fun ZentryxNavHost(
             LoginScreen(
                 viewModel = loginViewModel,
                 onLoginSuccess = {
+                    backStack.clear()
+                    forwardStack.clear()
+                    backStack.add(Screen.Library.route)
                     navController.navigate(Screen.Library.route) {
                         popUpTo(Screen.Login.route) { inclusive = true }
                     }
+                },
+                onUseLocalOnly = {
+                    navigateMenu(Screen.Library.route)
                 }
             )
         }
@@ -46,16 +89,18 @@ fun ZentryxNavHost(
             val libraryViewModel: LibraryViewModel = hiltViewModel()
             LibraryScreen(
                 viewModel = libraryViewModel,
-                onNavigateToPlayer = {
-                    navController.navigate(Screen.Player.route)
-                },
-                onNavigateToSearch = {
-                    navController.navigate(Screen.Search.route)
-                },
-                onNavigateToSettings = {
-                    navController.navigate(Screen.Settings.route)
-                },
+                onNavigateToPlayer = { navigateMenu(Screen.Player.route) },
+                onNavigateToSearch = { navigateMenu(Screen.Search.route) },
+                onNavigateToSettings = { navigateMenu(Screen.Settings.route) },
+                onNavigateToDsp = { navigateMenu(Screen.DspConsole.route) },
+                onNavigateBack = { goBack() },
+                onNavigateForward = { goForward() },
+                canGoBack = canGoBack,
+                canGoForward = canGoForward,
                 onLogout = {
+                    backStack.clear()
+                    forwardStack.clear()
+                    backStack.add(Screen.Login.route)
                     navController.navigate(Screen.Login.route) {
                         popUpTo(0)
                     }
@@ -67,12 +112,11 @@ fun ZentryxNavHost(
             val playerViewModel: PlayerViewModel = hiltViewModel()
             PlayerScreen(
                 viewModel = playerViewModel,
-                onNavigateBack = {
-                    navController.popBackStack()
-                },
-                onNavigateToDsp = {
-                    navController.navigate(Screen.DspConsole.route)
-                }
+                onNavigateBack = { goBack() },
+                onNavigateForward = { goForward() },
+                canGoBack = canGoBack,
+                canGoForward = canGoForward,
+                onNavigateToDsp = { navigateMenu(Screen.DspConsole.route) }
             )
         }
 
@@ -80,12 +124,11 @@ fun ZentryxNavHost(
             val searchViewModel: SearchViewModel = hiltViewModel()
             SearchScreen(
                 viewModel = searchViewModel,
-                onNavigateBack = {
-                    navController.popBackStack()
-                },
-                onNavigateToPlayer = {
-                    navController.navigate(Screen.Player.route)
-                }
+                onNavigateBack = { goBack() },
+                onNavigateForward = { goForward() },
+                canGoBack = canGoBack,
+                canGoForward = canGoForward,
+                onNavigateToPlayer = { navigateMenu(Screen.Player.route) }
             )
         }
 
@@ -93,13 +136,15 @@ fun ZentryxNavHost(
             val settingsViewModel: SettingsViewModel = hiltViewModel()
             SettingsScreen(
                 viewModel = settingsViewModel,
-                onNavigateBack = {
-                    navController.popBackStack()
-                },
-                onNavigateToDsp = {
-                    navController.navigate(Screen.DspConsole.route)
-                },
+                onNavigateBack = { goBack() },
+                onNavigateForward = { goForward() },
+                canGoBack = canGoBack,
+                canGoForward = canGoForward,
+                onNavigateToDsp = { navigateMenu(Screen.DspConsole.route) },
                 onLoggedOut = {
+                    backStack.clear()
+                    forwardStack.clear()
+                    backStack.add(Screen.Login.route)
                     navController.navigate(Screen.Login.route) {
                         popUpTo(0)
                     }
@@ -111,9 +156,10 @@ fun ZentryxNavHost(
             val settingsViewModel: SettingsViewModel = hiltViewModel()
             DspConsoleScreen(
                 viewModel = settingsViewModel,
-                onNavigateBack = {
-                    navController.popBackStack()
-                }
+                onNavigateBack = { goBack() },
+                onNavigateForward = { goForward() },
+                canGoBack = canGoBack,
+                canGoForward = canGoForward
             )
         }
     }

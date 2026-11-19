@@ -1,10 +1,13 @@
 package com.zentryx.music.repository
 
+import android.net.Uri
 import androidx.paging.PagingData
 import com.zentryx.music.models.Album
 import com.zentryx.music.models.Artist
+import com.zentryx.music.models.Playlist
 import com.zentryx.music.models.ScanProgress
 import com.zentryx.music.models.Song
+import com.zentryx.music.network.webdav.ScanDiagnosticsState
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -13,58 +16,36 @@ import kotlinx.coroutines.flow.Flow
  * can be plugged in without changing ViewModels or UI.
  */
 interface MusicRepository {
-    /**
-     * Returns a paginated flow of all songs ordered by title or artist.
-     */
     fun getPagedSongs(): Flow<PagingData<Song>>
-
-    /**
-     * Returns all songs for a specific album ordered by track number.
-     */
+    fun getAllSongs(): Flow<List<Song>>
     fun getSongsByAlbum(albumName: String, artistName: String): Flow<List<Song>>
-
-    /**
-     * Returns all unique albums.
-     */
+    fun getSongsByArtist(artistName: String): Flow<List<Song>>
+    fun getSongsByFolderPrefix(prefix: String): Flow<List<Song>>
+    fun getAllRelativePaths(): Flow<List<String>>
     fun getAlbums(): Flow<List<Album>>
-
-    /**
-     * Returns all unique artists.
-     */
     fun getArtists(): Flow<List<Artist>>
-
-    /**
-     * Performs fast local full-text search (FTS) across songs, albums, and artists.
-     */
     fun searchSongs(query: String): Flow<List<Song>>
-
-    /**
-     * Triggers incremental library scan via WorkManager.
-     */
     fun startScan(): Flow<ScanProgress>
-
-    /**
-     * Cancels an ongoing library scan.
-     */
     suspend fun cancelScan()
-
-    /**
-     * Retrieves a song by its unique identifier.
-     */
+    suspend fun scanLocalLibrary(treeUri: Uri? = null): Int
+    fun runScanDiagnostics(startFolderPath: String = ""): Flow<ScanDiagnosticsState>
+    suspend fun getSongCount(): Int
     suspend fun getSongById(id: String): Song?
-
-    /**
-     * Toggles favorite heart state on a song.
-     */
     suspend fun setFavorite(songId: String, isFavorite: Boolean)
-
-    /**
-     * Returns flow of user favorite songs.
-     */
     fun getFavoriteSongs(): Flow<List<Song>>
-
-    /**
-     * Returns flow of offline downloaded songs.
-     */
     fun getDownloadedSongs(): Flow<List<Song>>
+    fun getRecentlyPlayedSongs(): Flow<List<Song>>
+    fun getMostPlayedSongs(): Flow<List<Song>>
+    fun getResumableSongs(): Flow<List<Song>>
+    suspend fun recordTrackPlay(songId: String)
+    suspend fun updateResumePosition(songId: String, positionMs: Long)
+
+    // Playlists & Nextcloud .m3u8 Sync
+    fun getPlaylists(): Flow<List<Playlist>>
+    fun getPlaylistSongs(playlistId: String): Flow<List<Song>>
+    suspend fun createPlaylist(name: String): Playlist
+    suspend fun deletePlaylist(playlistId: String)
+    suspend fun addSongToPlaylist(playlistId: String, songId: String)
+    suspend fun removeSongFromPlaylist(playlistId: String, songId: String)
+    suspend fun syncPlaylistsWithNextcloud(): Result<Int>
 }

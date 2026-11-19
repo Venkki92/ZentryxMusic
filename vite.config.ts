@@ -5,10 +5,13 @@ import react from '@vitejs/plugin-react';
 import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
 import {
+  handleAndroidApkDownloadRequest,
+  handleAndroidApkRebuildRequest,
+  handleAndroidApkStatusRequest,
   handleAudioStreamRequest,
   handleDiagnosticsClearRequest,
   handleDiagnosticsLogsRequest,
-} from './serverProxy';
+} from './serverProxy.ts';
 
 const diagnosticsApiPlugin = {
   name: 'diagnostics-api-plugin',
@@ -16,11 +19,33 @@ const diagnosticsApiPlugin = {
     server.middlewares.use('/api/audio-stream', handleAudioStreamRequest);
     server.middlewares.use('/api/diagnostics/logs', handleDiagnosticsLogsRequest);
     server.middlewares.use('/api/diagnostics/clear', handleDiagnosticsClearRequest);
+    server.middlewares.use('/api/android-apk/status', handleAndroidApkStatusRequest);
+    server.middlewares.use('/api/android-apk/rebuild', handleAndroidApkRebuildRequest);
+    server.middlewares.use('/api/android-apk/release', (req: any, res: any) =>
+      handleAndroidApkDownloadRequest(req, res, 'release')
+    );
+    server.middlewares.use('/api/android-apk/debug', (req: any, res: any) =>
+      handleAndroidApkDownloadRequest(req, res, 'debug')
+    );
+    server.middlewares.use('/zentryx-music.apk', (req: any, res: any) =>
+      handleAndroidApkDownloadRequest(req, res, 'release')
+    );
   },
   configurePreviewServer(server: any) {
     server.middlewares.use('/api/audio-stream', handleAudioStreamRequest);
     server.middlewares.use('/api/diagnostics/logs', handleDiagnosticsLogsRequest);
     server.middlewares.use('/api/diagnostics/clear', handleDiagnosticsClearRequest);
+    server.middlewares.use('/api/android-apk/status', handleAndroidApkStatusRequest);
+    server.middlewares.use('/api/android-apk/rebuild', handleAndroidApkRebuildRequest);
+    server.middlewares.use('/api/android-apk/release', (req: any, res: any) =>
+      handleAndroidApkDownloadRequest(req, res, 'release')
+    );
+    server.middlewares.use('/api/android-apk/debug', (req: any, res: any) =>
+      handleAndroidApkDownloadRequest(req, res, 'debug')
+    );
+    server.middlewares.use('/zentryx-music.apk', (req: any, res: any) =>
+      handleAndroidApkDownloadRequest(req, res, 'release')
+    );
   },
 };
 
@@ -66,17 +91,17 @@ export default defineConfig(() => {
         },
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-          navigateFallbackDenylist: [/^\/api\//],
+          navigateFallbackDenylist: [/^\/api\//, /\.apk$/i],
         },
         devOptions: {
           enabled: true,
-          type: 'module',
+          type: 'classic',
         },
       }),
     ],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(import.meta.dirname, '.'),
       },
     },
     server: {

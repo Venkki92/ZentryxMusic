@@ -6,8 +6,7 @@ import androidx.room.PrimaryKey
 import com.zentryx.music.models.Song
 
 /**
- * Primary SQLite entity representing an audio track discovered on Nextcloud.
- * Indexed for fast lookups by album, artist, and relative path.
+ * Primary SQLite entity representing an audio track (Nextcloud WebDAV or Local USB/Device storage).
  * Artwork is stored strictly as a cached file path (String), NEVER as an image blob.
  */
 @Entity(
@@ -21,13 +20,13 @@ import com.zentryx.music.models.Song
 )
 data class SongEntity(
     @PrimaryKey
-    val id: String,                    // Hash derived from relative WebDAV path
+    val id: String,                    // Hash derived from relative path or local URI
     val title: String,                 // Track title
     val artist: String,                // Artist name
     val album: String,                 // Album name
     val durationMs: Long,              // Duration in milliseconds
-    val fileUrl: String,               // Absolute WebDAV URL
-    val relativePath: String,          // Relative path under Nextcloud music root
+    val fileUrl: String,               // Absolute WebDAV URL or local file/content URI
+    val relativePath: String,          // Relative path under Nextcloud music root or "Local/<folder>/..."
     val mimeType: String,              // MIME type for Media3
     val trackNumber: Int? = null,      // Track number in album
     val discNumber: Int? = null,       // Disc number
@@ -41,7 +40,15 @@ data class SongEntity(
     val isDownloaded: Boolean = false,
     val localFilePath: String? = null,
     val lyricsText: String? = null,
-    val addedAt: Long = System.currentTimeMillis()
+    val addedAt: Long = System.currentTimeMillis(),
+    val sourceType: String = "WEBDAV",
+    val sampleRateHz: Int? = null,
+    val bitsPerSample: Int? = null,
+    val bitrateKbps: Int? = null,
+    val replayGainDb: Float? = null,
+    val lastPlayedAt: Long = 0L,
+    val playCount: Int = 0,
+    val lastPositionMs: Long = 0L
 )
 
 fun SongEntity.toDomainModel(): Song = Song(
@@ -64,7 +71,15 @@ fun SongEntity.toDomainModel(): Song = Song(
     isFavorite = isFavorite,
     isDownloaded = isDownloaded,
     localFilePath = localFilePath,
-    lyricsText = lyricsText
+    lyricsText = lyricsText,
+    sourceType = sourceType,
+    sampleRateHz = sampleRateHz,
+    bitsPerSample = bitsPerSample,
+    bitrateKbps = bitrateKbps,
+    replayGainDb = replayGainDb,
+    lastPlayedAt = lastPlayedAt,
+    playCount = playCount,
+    lastPositionMs = lastPositionMs
 )
 
 fun Song.toEntity(): SongEntity = SongEntity(
@@ -87,5 +102,13 @@ fun Song.toEntity(): SongEntity = SongEntity(
     isFavorite = isFavorite,
     isDownloaded = isDownloaded,
     localFilePath = localFilePath,
-    lyricsText = lyricsText
+    lyricsText = lyricsText,
+    sourceType = sourceType,
+    sampleRateHz = sampleRateHz,
+    bitsPerSample = bitsPerSample,
+    bitrateKbps = bitrateKbps,
+    replayGainDb = replayGainDb,
+    lastPlayedAt = lastPlayedAt,
+    playCount = playCount,
+    lastPositionMs = lastPositionMs
 )

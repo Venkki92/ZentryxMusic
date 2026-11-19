@@ -8,14 +8,22 @@ import javax.net.ssl.X509TrustManager
 
 /**
  * Custom X509TrustManager implementing Trust-On-First-Use (TOFU).
- * Validates against system CAs first. If unverified, checks whether the leaf
- * certificate matches a pinned SHA-256 fingerprint saved by the user.
- * Avoids any insecure blanket "trust all certificates".
+ * Validates against system CAs first. If unverified, dynamically resolves the current
+ * pinned SHA-256 fingerprint via [pinnedFingerprintProvider] so certs pinned at runtime
+ * take effect immediately without recreating OkHttpClients or restarting ExoPlayer.
  */
 class TofuTrustManager(
-    private val pinnedFingerprint: String?,
+    private val pinnedFingerprintProvider: () -> String?,
     private val onUntrustedCertFound: ((sha256Fingerprint: String) -> Unit)? = null
 ) : X509TrustManager {
+
+    constructor(
+        pinnedFingerprint: String?,
+        onUntrustedCertFound: ((sha256Fingerprint: String) -> Unit)? = null
+    ) : this(
+        pinnedFingerprintProvider = { pinnedFingerprint },
+        onUntrustedCertFound = onUntrustedCertFound
+    )
 
     private val defaultTrustManager: X509TrustManager = run {
         val factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
@@ -33,23 +41,27 @@ class TofuTrustManager(
         }
 
         try {
-            // First check standard system root CAs
+            // First check standard system & user root CAs
             defaultTrustManager.checkServerTrusted(chain, authType)
         } catch (e: CertificateException) {
             val leafCert = chain[0]
             val calculatedFingerprint = calculateSha256Fingerprint(leafCert)
+            val normalizedPinned = pinnedFingerprintProvider()
+                ?.replace(":", "")
+                ?.trim()
 
             // If user previously pinned this exact fingerprint, allow it
-            if (!pinnedFingerprint.isNullOrBlank() &&
-                calculatedFingerprint.equals(pinnedFingerprint.replace(":", "").trim(), ignoreCase = true)
+            if (!normalizedPinned.isNullOrBlank() &&
+                calculatedFingerprint.equals(normalizedPinned, ignoreCase = true)
             ) {
                 return
             }
 
             // Notify listener of the fingerprint so the UI can prompt the user
-            onUntrustedCertFound?.invoke(formatFingerprintWithColons(calculatedFingerprint))
+            val formatted = formatFingerprintWithColons(calculatedFingerprint)
+            onUntrustedCertFound?.invoke(formatted)
             throw TofuCertificateException(
-                "Certificate is untrusted. SHA-256: ${formatFingerprintWithColons(calculatedFingerprint)}",
+                "Certificate is untrusted. SHA-256: $formatted",
                 calculatedFingerprint
             )
         }
@@ -67,7 +79,8 @@ class TofuTrustManager(
         }
 
         fun formatFingerprintWithColons(hex: String): String {
-            return hex.chunked(2).joinToString(":")
+            val clean = hex.replace(":", "").trim()
+            return clean.chunked(2).joinToString(":")
         }
     }
 }

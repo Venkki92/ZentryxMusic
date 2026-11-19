@@ -17,6 +17,13 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
+private enum class PendingTofuAction {
+    NONE,
+    TEST,
+    MANUAL_LOGIN,
+    FLOW_V2
+}
+
 data class LoginUiState(
     val serverUrl: String = "https://cloud.zentryx.bg",
     val username: String = "",
@@ -43,6 +50,9 @@ class LoginViewModel @Inject constructor(
     val uiState: StateFlow<LoginUiState> = _uiState.asStateFlow()
 
     private var pollJob: Job? = null
+    private var pendingAction: PendingTofuAction = PendingTofuAction.NONE
+    private var pendingBrowserLauncher: ((String) -> Unit)? = null
+    private var pendingManualSuccessCallback: (() -> Unit)? = null
 
     init {
         viewModelScope.launch {
@@ -112,15 +122,20 @@ class LoginViewModel @Inject constructor(
             return
         }
 
+        pendingAction = PendingTofuAction.TEST
         viewModelScope.launch {
             _uiState.update { it.copy(isTesting = true, errorMessage = null, testSuccessMessage = null) }
-            val result = authRepository.testConnection(config)
-            when (result) {
+            when (val result = authRepository.resolveAndTestConnection(config)) {
                 is Resource.Success -> {
+                    val resolved = result.data
                     _uiState.update {
                         it.copy(
                             isTesting = false,
-                            testSuccessMessage = "WebDAV connection verified successfully!",
+                            username = resolved.username,
+                            testSuccessMessage = buildString {
+                                append("WebDAV connected (${resolved.username})")
+                                if (resolved.useLegacyWebDav) append(" · Legacy WebDAV")
+                            },
                             errorMessage = null
                         )
                     }
@@ -153,23 +168,39 @@ class LoginViewModel @Inject constructor(
             return
         }
 
+        pendingAction = PendingTofuAction.MANUAL_LOGIN
+        pendingManualSuccessCallback = onSuccess
         viewModelScope.launch {
             _uiState.update { it.copy(isLoggingIn = true, errorMessage = null, testSuccessMessage = null) }
-            val testResult = authRepository.testConnection(config)
-            if (testResult is Resource.Success) {
-                authRepository.saveCredentials(config)
-                _uiState.update { it.copy(isLoggingIn = false, isLoggedIn = true) }
-                onSuccess()
-            } else if (testResult is Resource.Error) {
-                val fingerprint = extractFingerprintFromMessage(testResult.message)
-                _uiState.update {
-                    it.copy(
-                        isLoggingIn = false,
-                        errorMessage = testResult.message,
-                        errorType = testResult.errorType,
-                        untrustedCertificateFingerprint = fingerprint
+            when (val result = authRepository.resolveAndTestConnection(config)) {
+                is Resource.Success -> {
+                    val resolved = result.data.copy(
+                        sslCertificateFingerprint = _uiState.value.pinnedFingerprint,
+                        musicFolderPath = config.musicFolderPath,
+                        isLoggedIn = true
                     )
+                    authRepository.saveCredentials(resolved)
+                    _uiState.update {
+                        it.copy(
+                            isLoggingIn = false,
+                            isLoggedIn = true,
+                            username = resolved.username
+                        )
+                    }
+                    onSuccess()
                 }
+                is Resource.Error -> {
+                    val fingerprint = extractFingerprintFromMessage(result.message)
+                    _uiState.update {
+                        it.copy(
+                            isLoggingIn = false,
+                            errorMessage = result.message,
+                            errorType = result.errorType,
+                            untrustedCertificateFingerprint = fingerprint
+                        )
+                    }
+                }
+                is Resource.Loading -> Unit
             }
         }
     }
@@ -186,10 +217,13 @@ class LoginViewModel @Inject constructor(
             return
         }
         val cleanUrl = sanitizeServerUrl(rawUrl)
+        val pinned = _uiState.value.pinnedFingerprint
+        pendingAction = PendingTofuAction.FLOW_V2
+        pendingBrowserLauncher = onOpenBrowser
 
         viewModelScope.launch {
             _uiState.update { it.copy(isLoggingIn = true, errorMessage = null) }
-            when (val sessionResult = authRepository.startLoginFlowV2(cleanUrl)) {
+            when (val sessionResult = authRepository.startLoginFlowV2(cleanUrl, pinned)) {
                 is Resource.Success -> {
                     val session = sessionResult.data
                     _uiState.update {
@@ -203,11 +237,13 @@ class LoginViewModel @Inject constructor(
                     startPolling(session)
                 }
                 is Resource.Error -> {
+                    val fingerprint = extractFingerprintFromMessage(sessionResult.message)
                     _uiState.update {
                         it.copy(
                             isLoggingIn = false,
                             errorMessage = sessionResult.message,
-                            errorType = sessionResult.errorType
+                            errorType = sessionResult.errorType,
+                            untrustedCertificateFingerprint = fingerprint
                         )
                     }
                 }
@@ -221,26 +257,34 @@ class LoginViewModel @Inject constructor(
         pollJob = viewModelScope.launch {
             while (_uiState.value.isPollingLoginFlow) {
                 delay(2000)
-                when (val pollResult = authRepository.pollLoginFlowV2(session.token, session.pollEndpoint)) {
+                val pinned = _uiState.value.pinnedFingerprint
+                when (val pollResult = authRepository.pollLoginFlowV2(session.token, session.pollEndpoint, pinned)) {
                     is Resource.Success -> {
-                        authRepository.saveCredentials(pollResult.data)
+                        val finalConfig = pollResult.data.copy(
+                            sslCertificateFingerprint = pinned ?: pollResult.data.sslCertificateFingerprint,
+                            musicFolderPath = _uiState.value.musicFolder.trim().ifEmpty { "/Music" }
+                        )
+                        authRepository.saveCredentials(finalConfig)
                         _uiState.update {
                             it.copy(
                                 isPollingLoginFlow = false,
                                 loginFlowSession = null,
                                 isLoggedIn = true,
-                                serverUrl = pollResult.data.serverUrl,
-                                username = pollResult.data.username
+                                serverUrl = finalConfig.serverUrl,
+                                username = finalConfig.username,
+                                pinnedFingerprint = finalConfig.sslCertificateFingerprint
                             )
                         }
                         break
                     }
                     is Resource.Error -> {
+                        val fingerprint = extractFingerprintFromMessage(pollResult.message)
                         _uiState.update {
                             it.copy(
                                 isPollingLoginFlow = false,
                                 errorMessage = pollResult.message,
-                                errorType = pollResult.errorType
+                                errorType = pollResult.errorType,
+                                untrustedCertificateFingerprint = fingerprint
                             )
                         }
                         break
@@ -266,8 +310,15 @@ class LoginViewModel @Inject constructor(
                 errorMessage = null
             )
         }
-        // Retest with pinned fingerprint
-        testConnection()
+        when (pendingAction) {
+            PendingTofuAction.MANUAL_LOGIN -> {
+                pendingManualSuccessCallback?.let { loginManual(it) } ?: testConnection()
+            }
+            PendingTofuAction.FLOW_V2 -> {
+                pendingBrowserLauncher?.let { startLoginFlowV2(it) } ?: testConnection()
+            }
+            else -> testConnection()
+        }
     }
 
     fun dismissUntrustedCertificate() {

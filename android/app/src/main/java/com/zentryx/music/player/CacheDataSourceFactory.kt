@@ -5,17 +5,22 @@ import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
-import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.FileDataSource
 import androidx.media3.datasource.cache.CacheDataSink
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import com.zentryx.music.models.ServerConfig
 import com.zentryx.music.network.TofuTrustManager
 import com.zentryx.music.security.EncryptedDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.Credentials
 import okhttp3.Interceptor
@@ -30,7 +35,8 @@ import javax.net.ssl.SSLContext
 /**
  * Builds Media3 CacheDataSource with disk stream buffering and authenticated OkHttp calls.
  * Never embeds credentials in URLs; attaches HTTP Basic Auth via OkHttp interceptor.
- * Chunks streamed audio into a 250MB SimpleCache on disk, preserving memory (< 150MB RAM).
+ * Dynamically resolves pinned TOFU SSL fingerprints so fresh-device logins work immediately
+ * without app restarts.
  */
 @OptIn(UnstableApi::class)
 @Singleton
@@ -43,6 +49,25 @@ class CacheDataSourceFactory @Inject constructor(
         private const val MAX_CACHE_SIZE_BYTES = 250L * 1024L * 1024L // 250 MB disk stream cache
     }
 
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Volatile
+    private var latestConfig: ServerConfig? = null
+
+    init {
+        scope.launch {
+            encryptedDataStore.serverConfigFlow.collectLatest { cfg ->
+                latestConfig = cfg
+            }
+        }
+    }
+
+    private fun resolveConfig(): ServerConfig? {
+        return latestConfig ?: runBlocking { encryptedDataStore.serverConfigFlow.firstOrNull() }.also {
+            latestConfig = it
+        }
+    }
+
     val simpleCache: SimpleCache by lazy {
         val cacheDir = File(context.cacheDir, "media3_stream_cache").apply {
             if (!exists()) mkdirs()
@@ -53,17 +78,16 @@ class CacheDataSourceFactory @Inject constructor(
     }
 
     /**
-     * Builds an authenticated OkHttpClient for ExoPlayer audio streaming.
+     * Builds an authenticated OkHttpClient for ExoPlayer audio streaming with dynamic TOFU pinning.
      */
     private fun buildStreamOkHttpClient(): OkHttpClient {
         val authInterceptor = Interceptor { chain ->
             val request = chain.request()
-            // Read active Nextcloud credentials synchronously for network request
-            val config = runBlocking { encryptedDataStore.serverConfigFlow.firstOrNull() }
+            val config = resolveConfig()
             val requestBuilder = request.newBuilder()
                 .header("User-Agent", "ZentryxMusic/1.0 (Android Media3; AutoChips AC8259P Headunit)")
 
-            if (config != null && config.isLoggedIn) {
+            if (config != null && config.isLoggedIn && config.username.isNotBlank()) {
                 val credential = Credentials.basic(config.username, config.tokenOrPassword)
                 requestBuilder.header("Authorization", credential)
             }
@@ -71,22 +95,21 @@ class CacheDataSourceFactory @Inject constructor(
             chain.proceed(requestBuilder.build())
         }
 
-        val clientBuilder = baseOkHttpClient.newBuilder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .addInterceptor(authInterceptor)
-
-        // Inject TOFU TrustManager if self-signed cert is pinned
-        val config = runBlocking { encryptedDataStore.serverConfigFlow.firstOrNull() }
-        if (config?.sslCertificateFingerprint != null) {
-            val trustManager = TofuTrustManager(config.sslCertificateFingerprint)
-            val sslContext = SSLContext.getInstance("TLS").apply {
-                init(null, arrayOf(trustManager), SecureRandom())
-            }
-            clientBuilder.sslSocketFactory(sslContext.socketFactory, trustManager)
+        val trustManager = TofuTrustManager(
+            pinnedFingerprintProvider = { resolveConfig()?.sslCertificateFingerprint }
+        )
+        val sslContext = SSLContext.getInstance("TLS").apply {
+            init(null, arrayOf(trustManager), SecureRandom())
         }
 
-        return clientBuilder.build()
+        return baseOkHttpClient.newBuilder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(25, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .addInterceptor(authInterceptor)
+            .sslSocketFactory(sslContext.socketFactory, trustManager)
+            .build()
     }
 
     /**

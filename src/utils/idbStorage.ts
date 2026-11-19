@@ -2,7 +2,7 @@ import { Playlist } from './fuzzySearch';
 import { Track } from '../App';
 
 const DB_NAME = 'zentryx_mbux_cockpit';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export interface OfflineTrackData {
   id: string;
@@ -59,10 +59,52 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('track_metadata')) {
         db.createObjectStore('track_metadata', { keyPath: 'id' });
       }
+      if (!db.objectStoreNames.contains('settings_handles')) {
+        db.createObjectStore('settings_handles', { keyPath: 'key' });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
+}
+
+export async function saveSettingHandle(key: string, value: any): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('settings_handles', 'readwrite');
+    const store = tx.objectStore('settings_handles');
+    const req = store.put({ key, value, updatedAt: Date.now() });
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function getSettingHandle<T = any>(key: string): Promise<T | null> {
+  try {
+    const db = await openDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction('settings_handles', 'readonly');
+      const store = tx.objectStore('settings_handles');
+      const req = store.get(key);
+      req.onsuccess = () => resolve(req.result?.value ?? null);
+      req.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteSettingHandle(key: string): Promise<void> {
+  try {
+    const db = await openDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction('settings_handles', 'readwrite');
+      const store = tx.objectStore('settings_handles');
+      const req = store.delete(key);
+      req.onsuccess = () => resolve();
+      req.onerror = () => resolve();
+    });
+  } catch {}
 }
 
 // Offline Track Operations

@@ -2,6 +2,9 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
+  handleAndroidApkDownloadRequest,
+  handleAndroidApkRebuildRequest,
+  handleAndroidApkStatusRequest,
   handleAudioStreamRequest,
   handleDiagnosticsClearRequest,
   handleDiagnosticsLogsRequest,
@@ -23,6 +26,11 @@ app.use('/api/nextcloud', (req, res) => {
 });
 app.use('/api/diagnostics/logs', (req, res) => handleDiagnosticsLogsRequest(req, res));
 app.use('/api/diagnostics/clear', (req, res) => handleDiagnosticsClearRequest(req, res));
+app.use('/api/android-apk/status', (req, res) => handleAndroidApkStatusRequest(req, res));
+app.use('/api/android-apk/rebuild', (req, res) => handleAndroidApkRebuildRequest(req, res));
+app.use('/api/android-apk/release', (req, res) => handleAndroidApkDownloadRequest(req, res, 'release'));
+app.use('/api/android-apk/debug', (req, res) => handleAndroidApkDownloadRequest(req, res, 'debug'));
+app.use('/zentryx-music.apk', (req, res) => handleAndroidApkDownloadRequest(req, res, 'release'));
 
 app.use(express.static(DIST_DIR, { index: 'index.html' }));
 

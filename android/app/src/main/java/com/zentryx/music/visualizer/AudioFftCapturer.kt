@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.hypot
+import kotlin.math.log10
 import kotlin.math.max
 import kotlin.math.pow
 
@@ -57,6 +58,7 @@ data class VisualizerFrame(
     val mid: Float = 0f,
     val treble: Float = 0f,
     val beatPulse: Float = 0f,
+    val peakLevel: Float = 0f,
     val bands32: FloatArray = FloatArray(32),
     val peaks32: FloatArray = FloatArray(32),
     val waveform64: FloatArray = FloatArray(64),
@@ -64,8 +66,9 @@ data class VisualizerFrame(
 )
 
 /**
- * Captures real-time FFT + Waveform audio frames directly from ExoPlayer's audioSessionId
- * via android.media.audiofx.Visualizer with rolling AGC peak tracking so quiet/mastered tracks stay lively.
+ * High-responsiveness FFT + Waveform audio telemetry capturer directly bound to ExoPlayer's audioSessionId.
+ * Uses calibrated logarithmic dB perception scaling, rolling AGC normalization, fast transient attack (0.72),
+ * and spectral-flux kick detection so needle & bars react crisply on 1024x600 displays at any volume.
  */
 @Singleton
 class AudioFftCapturer @Inject constructor(
@@ -81,13 +84,15 @@ class AudioFftCapturer @Inject constructor(
     private var visualizer: Visualizer? = null
     private var attachedSessionId: Int = 0
 
-    // Rolling AGC & envelope state
-    private var agcPeak = 0.25f
+    // Rolling AGC & transient envelope state
+    private var agcPeak = 0.22f
+    private var rollingBassAvg = 0.15f
     private var smoothBass = 0f
     private var smoothMid = 0f
     private var smoothTreble = 0f
     private var beatEnvelope = 0f
     private var prevBass = 0f
+    private var peakHoldOverall = 0f
     private val smoothBands = FloatArray(32)
     private val holdPeaks = FloatArray(32)
     private val latestWave = FloatArray(64)
@@ -110,8 +115,10 @@ class AudioFftCapturer @Inject constructor(
             try {
                 val vis = Visualizer(sessionId)
                 val range = Visualizer.getCaptureSizeRange()
-                val captureSize = 512.coerceIn(range[0], range[1])
+                val captureSize = 1024.coerceIn(range[0], range[1])
                 vis.captureSize = captureSize
+                vis.measurementMode = Visualizer.MEASUREMENT_MODE_PEAK_RMS
+                vis.scalingMode = Visualizer.SCALING_MODE_NORMALIZED
                 vis.setDataCaptureListener(
                     object : Visualizer.OnDataCaptureListener {
                         override fun onWaveFormDataCapture(v: Visualizer?, waveform: ByteArray?, samplingRate: Int) {
@@ -126,7 +133,7 @@ class AudioFftCapturer @Inject constructor(
                             }
                         }
                     },
-                    (Visualizer.getMaxCaptureRate() / 2).coerceIn(10000, 20000),
+                    Visualizer.getMaxCaptureRate().coerceIn(15000, 30000),
                     true,
                     true
                 )
@@ -149,6 +156,14 @@ class AudioFftCapturer @Inject constructor(
                     it.enabled = active
                 }
             }
+            if (!active) {
+                _frame.value = _frame.value.copy(
+                    subBass = smoothBass * 0.2f,
+                    mid = smoothMid * 0.2f,
+                    treble = smoothTreble * 0.2f,
+                    beatPulse = 0f
+                )
+            }
         } catch (_: Throwable) {}
     }
 
@@ -158,6 +173,13 @@ class AudioFftCapturer @Inject constructor(
             val byteVal = (waveform[(i * step).coerceAtMost(waveform.size - 1)].toInt() and 0xFF) - 128
             latestWave[i] = (byteVal / 128f).coerceIn(-1f, 1f)
         }
+    }
+
+    private fun toPerceptualLevel(rawNorm: Float): Float {
+        if (rawNorm <= 0.002f) return 0f
+        // Map 42 dB dynamic window smoothly to [0..1]
+        val db = 20f * log10(rawNorm.coerceAtLeast(0.004f))
+        return ((db + 42f) / 42f).coerceIn(0f, 1f).pow(1.15f)
     }
 
     private fun processFft(fft: ByteArray) {
@@ -173,20 +195,19 @@ class AudioFftCapturer @Inject constructor(
             if (mag > maxFrameMag) maxFrameMag = mag
         }
 
-        // Rolling AGC normalization
-        agcPeak = max(0.18f, agcPeak * 0.992f)
-        if (maxFrameMag > agcPeak) agcPeak = maxFrameMag
+        // Fast-adapting rolling AGC normalization
+        agcPeak = max(0.14f, agcPeak * 0.990f)
+        if (maxFrameMag > agcPeak) agcPeak = agcPeak * 0.35f + maxFrameMag * 0.65f
         val scale = 1f / agcPeak
 
-        // Extract Sub-Bass, Mid, Treble bands
         var bassSum = 0f
         var midSum = 0f
         var trebleSum = 0f
-        val bassEnd = (numBins * 0.08f).toInt().coerceAtLeast(3)
-        val midEnd = (numBins * 0.36f).toInt().coerceAtLeast(bassEnd + 4)
+        val bassEnd = (numBins * 0.07f).toInt().coerceAtLeast(4)
+        val midEnd = (numBins * 0.34f).toInt().coerceAtLeast(bassEnd + 6)
 
         for (i in 1 until numBins) {
-            val norm = (mags[i] * scale).coerceIn(0f, 1f)
+            val norm = toPerceptualLevel((mags[i] * scale).coerceIn(0f, 1.5f))
             when {
                 i < bassEnd -> bassSum += norm
                 i < midEnd -> midSum += norm
@@ -194,38 +215,52 @@ class AudioFftCapturer @Inject constructor(
             }
         }
 
-        val rawBass = (bassSum / max(1, bassEnd - 1) * 1.4f).coerceIn(0f, 1f)
-        val rawMid = (midSum / max(1, midEnd - bassEnd) * 1.5f).coerceIn(0f, 1f)
-        val rawTreble = (trebleSum / max(1, numBins - midEnd) * 1.8f).coerceIn(0f, 1f)
+        val rawBass = (bassSum / max(1, bassEnd - 1) * 1.25f).coerceIn(0f, 1f)
+        val rawMid = (midSum / max(1, midEnd - bassEnd) * 1.35f).coerceIn(0f, 1f)
+        val rawTreble = (trebleSum / max(1, numBins - midEnd) * 1.65f).coerceIn(0f, 1f)
 
-        smoothBass = envelope(smoothBass, rawBass, 0.45f, 0.16f)
-        smoothMid = envelope(smoothMid, rawMid, 0.40f, 0.18f)
-        smoothTreble = envelope(smoothTreble, rawTreble, 0.42f, 0.22f)
+        // Responsive fast-attack / musical-decay envelopes
+        smoothBass = envelope(smoothBass, rawBass, 0.72f, 0.24f)
+        smoothMid = envelope(smoothMid, rawMid, 0.65f, 0.26f)
+        smoothTreble = envelope(smoothTreble, rawTreble, 0.68f, 0.28f)
 
-        // Beat transient detector
+        // Spectral-flux kick/beat transient detector
+        rollingBassAvg = rollingBassAvg * 0.92f + rawBass * 0.08f
         val delta = rawBass - prevBass
         prevBass = rawBass
-        beatEnvelope = if (delta > 0.12f && rawBass > 0.35f) 1f else (beatEnvelope * 0.86f)
+        beatEnvelope = if (delta > 0.09f && rawBass > rollingBassAvg * 1.18f) {
+            1f
+        } else {
+            (beatEnvelope * 0.80f).coerceAtLeast(0f)
+        }
 
-        // Map 32 logarithmic bars + gravity peaks
+        // Map 32 logarithmic frequency bands + gravity peaks
         for (b in 0 until 32) {
-            val lo = ((b.toFloat() / 32f).pow(1.65f) * (numBins - 1)).toInt().coerceIn(1, numBins - 1)
-            val hi = (((b + 1).toFloat() / 32f).pow(1.65f) * (numBins - 1)).toInt().coerceIn(lo + 1, numBins)
-            var peak = 0f
+            val lo = ((b.toFloat() / 32f).pow(1.75f) * (numBins - 1)).toInt().coerceIn(1, numBins - 1)
+            val hi = (((b + 1).toFloat() / 32f).pow(1.75f) * (numBins - 1)).toInt().coerceIn(lo + 1, numBins)
+            var bandPeak = 0f
             for (k in lo until hi) {
                 val v = mags[k] * scale
-                if (v > peak) peak = v
+                if (v > bandPeak) bandPeak = v
             }
-            val boosted = (peak * (0.95f + b * 0.015f)).coerceIn(0f, 1f)
-            smoothBands[b] = envelope(smoothBands[b], boosted, 0.55f, 0.20f)
-            holdPeaks[b] = if (smoothBands[b] >= holdPeaks[b]) smoothBands[b] else (holdPeaks[b] - 0.018f).coerceAtLeast(0f)
+            val perceived = toPerceptualLevel(bandPeak * (0.95f + b * 0.022f))
+            smoothBands[b] = envelope(smoothBands[b], perceived, 0.74f, 0.25f)
+            holdPeaks[b] = if (smoothBands[b] >= holdPeaks[b]) {
+                smoothBands[b]
+            } else {
+                (holdPeaks[b] - 0.022f).coerceAtLeast(0f)
+            }
         }
+
+        val overall = (smoothBass * 0.55f + smoothMid * 0.30f + smoothTreble * 0.15f).coerceIn(0f, 1f)
+        peakHoldOverall = if (overall >= peakHoldOverall) overall else (peakHoldOverall - 0.014f).coerceAtLeast(0f)
 
         _frame.value = VisualizerFrame(
             subBass = smoothBass,
             mid = smoothMid,
             treble = smoothTreble,
             beatPulse = beatEnvelope,
+            peakLevel = peakHoldOverall,
             bands32 = smoothBands.copyOf(),
             peaks32 = holdPeaks.copyOf(),
             waveform64 = latestWave.copyOf(),

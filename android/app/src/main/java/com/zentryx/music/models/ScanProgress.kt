@@ -11,7 +11,7 @@ data class ScanProgress(
     val percentComplete: Float = 0f,
     val errorMessage: String? = null
 ) {
-    val isScanning: Boolean get() = status == ScanStatus.SCANNING
+    val isScanning: Boolean get() = status == ScanStatus.SCANNING || status == ScanStatus.CONNECTING
 
     companion object {
         val Idle = ScanProgress()

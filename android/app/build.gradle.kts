@@ -1,9 +1,35 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
+}
+
+val versionPropsFile = rootProject.file("version.properties")
+val versionProps = Properties().apply {
+    if (versionPropsFile.exists()) {
+        versionPropsFile.inputStream().use { load(it) }
+    }
+}
+val currentVersionCode = (versionProps.getProperty("VERSION_CODE")?.toIntOrNull() ?: 1).coerceAtLeast(1)
+val appVersionName = versionProps.getProperty("VERSION_NAME")?.trim()?.takeIf { it.isNotEmpty() } ?: "0.0.1"
+
+val isApkBuildRequested = gradle.startParameter.taskNames.any { task ->
+    task.contains("assemble", ignoreCase = true) ||
+        task.contains("bundle", ignoreCase = true) ||
+        task.contains("package", ignoreCase = true) ||
+        task.contains("install", ignoreCase = true)
+}
+
+val appVersionCode = if (isApkBuildRequested) {
+    val nextCode = currentVersionCode + 1
+    versionPropsFile.writeText("VERSION_CODE=$nextCode\nVERSION_NAME=$appVersionName\n")
+    nextCode
+} else {
+    currentVersionCode
 }
 
 android {
@@ -15,8 +41,8 @@ android {
         minSdk = 26       // Android 8.0 Oreo
         targetSdk = 34    // Compatible with modern Android standards while tested against API 28 (Pie)
 
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -108,6 +134,10 @@ dependencies {
     implementation(libs.androidx.media3.session)
     implementation(libs.androidx.media3.datasource.okhttp)
     implementation(libs.androidx.media3.common)
+    implementation(libs.androidx.media)
+
+    // Jetpack Car App Library (Android Auto)
+    implementation(libs.androidx.car.app)
 
     // Room Database & FTS
     implementation(libs.androidx.room.runtime)
@@ -138,4 +168,9 @@ dependencies {
     // Security & DataStore
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.security.crypto)
+    implementation(libs.androidx.documentfile)
+
+    // Unit Tests
+    testImplementation(libs.junit)
+    testImplementation("org.json:json:20240303")
 }

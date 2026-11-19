@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false">
+    <!-- Allow both HTTPS (including self-signed/user CAs) and local LAN HTTP Nextcloud servers -->
+    <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
             <!-- Allow user-installed certificates for self-hosted Nextcloud instances -->

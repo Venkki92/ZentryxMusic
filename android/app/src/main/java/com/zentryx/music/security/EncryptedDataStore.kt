@@ -32,6 +32,7 @@ class EncryptedDataStore @Inject constructor(
         private val KEY_SSL_FINGERPRINT = stringPreferencesKey("ssl_fingerprint")
         private val KEY_MUSIC_FOLDER = stringPreferencesKey("music_folder")
         private val KEY_IS_LOGGED_IN = booleanPreferencesKey("is_logged_in")
+        private val KEY_LEGACY_WEBDAV = booleanPreferencesKey("use_legacy_webdav")
     }
 
     val serverConfigFlow: Flow<ServerConfig?> = context.dataStore.data.map { preferences ->
@@ -54,7 +55,8 @@ class EncryptedDataStore @Inject constructor(
             tokenOrPassword = decryptedToken,
             sslCertificateFingerprint = preferences[KEY_SSL_FINGERPRINT],
             musicFolderPath = preferences[KEY_MUSIC_FOLDER] ?: "/Music",
-            isLoggedIn = true
+            isLoggedIn = true,
+            useLegacyWebDav = preferences[KEY_LEGACY_WEBDAV] ?: false
         )
     }
 
@@ -71,6 +73,7 @@ class EncryptedDataStore @Inject constructor(
             }
             preferences[KEY_MUSIC_FOLDER] = config.musicFolderPath
             preferences[KEY_IS_LOGGED_IN] = config.isLoggedIn
+            preferences[KEY_LEGACY_WEBDAV] = config.useLegacyWebDav
         }
     }
 

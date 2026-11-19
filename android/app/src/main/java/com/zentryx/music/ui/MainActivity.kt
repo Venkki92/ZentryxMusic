@@ -3,6 +3,7 @@ package com.zentryx.music.ui
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
@@ -53,6 +54,9 @@ class MainActivity : ComponentActivity() {
     @Inject
     lateinit var settingsPreferences: SettingsPreferences
 
+    @Inject
+    lateinit var speedVolumeController: com.zentryx.music.player.SpeedVolumeController
+
     private val loginViewModel: LoginViewModel by viewModels()
 
     private val permissionLauncher = registerForActivityResult(
@@ -60,6 +64,11 @@ class MainActivity : ComponentActivity() {
     ) { grants ->
         if (grants[Manifest.permission.RECORD_AUDIO] == true) {
             playerManager.onVisualizerPermissionUpdated()
+        }
+        if (grants[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+            grants[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        ) {
+            speedVolumeController.refreshGps()
         }
     }
 
@@ -74,12 +83,14 @@ class MainActivity : ComponentActivity() {
         setContent {
             val accentColor by settingsPreferences.accentColorFlow.collectAsStateWithLifecycle(initialValue = MbuxAccentColor.LIME)
             val cockpitThemeMode by settingsPreferences.cockpitThemeModeFlow.collectAsStateWithLifecycle(initialValue = CockpitThemeMode.NIGHT)
+            val isSolarDaylight by speedVolumeController.isDaylightBySolar.collectAsStateWithLifecycle()
             val nightBrightness by settingsPreferences.nightBrightnessFlow.collectAsStateWithLifecycle(initialValue = 1.0f)
             val amberFilterEnabled by settingsPreferences.amberFilterEnabledFlow.collectAsStateWithLifecycle(initialValue = false)
 
             ZentryxTheme(
                 accentColor = accentColor,
-                cockpitThemeMode = cockpitThemeMode
+                cockpitThemeMode = cockpitThemeMode,
+                isSolarDaylight = isSolarDaylight
             ) {
                 Box(modifier = Modifier.fillMaxSize()) {
                     Surface(modifier = Modifier.fillMaxSize()) {
@@ -127,6 +138,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestAutomotivePermissionsIfNeeded() {
+        val audioPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
         val needed = buildList {
             if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
                 add(Manifest.permission.ACCESS_FINE_LOCATION)
@@ -134,10 +150,22 @@ class MainActivity : ComponentActivity() {
             if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                 add(Manifest.permission.RECORD_AUDIO)
             }
+            if (ContextCompat.checkSelfPermission(this@MainActivity, audioPermission) != PackageManager.PERMISSION_GRANTED) {
+                add(audioPermission)
+            }
         }
         if (needed.isNotEmpty()) {
             permissionLauncher.launch(needed.toTypedArray())
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        com.zentryx.music.widget.ZentryxWidgetProvider.updateWidgetFromState(
+            this,
+            playerManager.playbackState.value,
+            playerManager.isAttenuated.value
+        )
     }
 
     override fun onNewIntent(intent: Intent) {

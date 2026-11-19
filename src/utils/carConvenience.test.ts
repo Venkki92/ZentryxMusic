@@ -157,3 +157,63 @@ test('id3Parser: parses REPLAYGAIN_TRACK_GAIN from ID3v2 TXXX and FLAC Vorbis co
   const parsedFlac = parseFlacMetadata(flac);
   assert.equal(parsedFlac?.replayGainDb, -3.8);
 });
+
+import {
+  DEFAULT_DRIVER_PROFILES,
+  sanitizeDriverProfiles,
+  buildRoadtripOfflinePlan,
+  DEFAULT_SWC_LONG_PRESS_BINDINGS,
+  sanitizeSteeringLongPressBindings,
+} from './carConvenience';
+
+test('carConvenience: Driver Profiles sanitize cleanly and expose 3 default slots', () => {
+  assert.equal(DEFAULT_DRIVER_PROFILES.length, 3);
+  const sanitized = sanitizeDriverProfiles([
+    {
+      id: 'custom_1',
+      name: '  Autobahn  ',
+      accentKey: 'amber',
+      nightBrightness: 20,
+      surroundMode: 'concert_hall',
+      subTrimDb: 99,
+    },
+  ]);
+  assert.equal(sanitized.length, 1);
+  assert.equal(sanitized[0].name, 'Autobahn');
+  assert.equal(sanitized[0].accentKey, 'AMBER');
+  assert.equal(sanitized[0].nightBrightness, 35);
+  assert.equal(sanitized[0].surroundMode, 'concert_hall');
+  assert.equal(sanitized[0].subTrimDb, 6);
+});
+
+test('carConvenience: Offline Roadtrip Budget Planner sizes tracks to trip hours and counts missing offline songs', () => {
+  const tracks = Array.from({ length: 30 }, (_, idx) => ({
+    id: `t-${idx}`,
+    duration: 240, // 4 min each -> 15 tracks = 60 min (1 hour)
+    size: 8 * 1024 * 1024, // 8 MB each
+    artist: `Artist ${idx % 5}`,
+  }));
+  const favs = new Set(['t-0', 't-1', 't-2']);
+  const offline = new Set(['t-0', 't-1']);
+
+  const plan1h = buildRoadtripOfflinePlan(tracks, 1, 'favorites_unheard', favs, {}, offline);
+  assert.equal(plan1h.tracks.length, 15);
+  assert.equal(plan1h.totalMinutes, 60);
+  assert.equal(plan1h.alreadyOfflineCount, 2);
+  assert.equal(plan1h.toDownloadCount, 13);
+  assert.equal(plan1h.totalBytes, 15 * 8 * 1024 * 1024);
+
+  const favOnly = buildRoadtripOfflinePlan(tracks, 2, 'favorites', favs, {}, offline);
+  assert.equal(favOnly.tracks.length, 3);
+  assert.equal(favOnly.toDownloadCount, 1);
+});
+
+test('carConvenience: SWC Long-Press bindings resolve cruising_mix and cycle_surround actions', () => {
+  const sanitized = sanitizeSteeringLongPressBindings({
+    cruising_mix: 'KeyR',
+    cycle_surround: 'F9',
+  });
+  assert.equal(resolveSteeringAction('r', 'KeyR', sanitized), 'cruising_mix');
+  assert.equal(resolveSteeringAction('F9', 'F9', sanitized), 'cycle_surround');
+  assert.equal(DEFAULT_SWC_LONG_PRESS_BINDINGS.duck, 'Space');
+});

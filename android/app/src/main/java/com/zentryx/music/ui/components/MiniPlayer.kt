@@ -26,14 +26,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.zentryx.music.models.PlaybackState
-import com.zentryx.music.ui.theme.MbuxAmbientBorder
-import com.zentryx.music.ui.theme.MbuxSurface
-import com.zentryx.music.ui.theme.ZentryxLime
 import java.io.File
 
 /**
  * MBUX-styled docked MiniPlayer for 1024x600 8-inch landscape headunit.
- * Deep obsidian glass surface with subtle neon ambient border and high-contrast electric lime controls.
+ * Deep obsidian glass surface with dynamic MBUX ambient border and high-contrast accent controls.
  */
 @Composable
 fun MiniPlayer(
@@ -44,6 +41,8 @@ fun MiniPlayer(
     modifier: Modifier = Modifier
 ) {
     val currentSong = playbackState.currentSong
+    val accent = MaterialTheme.colorScheme.primary
+    val borderCol = MaterialTheme.colorScheme.outline
 
     AnimatedVisibility(
         visible = currentSong != null,
@@ -58,21 +57,21 @@ fun MiniPlayer(
         } else 0f
 
         Surface(
-            color = MbuxSurface,
+            color = MaterialTheme.colorScheme.surface,
             modifier = Modifier
                 .fillMaxWidth()
-                .border(width = 1.dp, color = MbuxAmbientBorder)
+                .border(width = 1.dp, color = borderCol)
                 .clickable { onOpenPlayer() }
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
-                // MBUX neon lime micro-progress line
+                // MBUX dynamic accent micro-progress line
                 LinearProgressIndicator(
                     progress = { progress },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(2.5.dp),
-                    color = ZentryxLime,
-                    trackColor = Color(0xFF1E293B)
+                    color = accent,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant
                 )
 
                 Row(
@@ -95,7 +94,7 @@ fun MiniPlayer(
                                 modifier = Modifier
                                     .size(40.dp)
                                     .clip(RoundedCornerShape(8.dp))
-                                    .border(1.dp, MbuxAmbientBorder, RoundedCornerShape(8.dp)),
+                                    .border(1.dp, borderCol, RoundedCornerShape(8.dp)),
                                 contentScale = ContentScale.Crop
                             )
                         } else {
@@ -103,14 +102,14 @@ fun MiniPlayer(
                                 modifier = Modifier
                                     .size(40.dp)
                                     .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0xFF1E293B))
-                                    .border(1.dp, MbuxAmbientBorder, RoundedCornerShape(8.dp)),
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    .border(1.dp, borderCol, RoundedCornerShape(8.dp)),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.MusicNote,
                                     contentDescription = null,
-                                    tint = ZentryxLime,
+                                    tint = accent,
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
@@ -132,7 +131,7 @@ fun MiniPlayer(
                             Text(
                                 text = "${currentSong.artist} • ${currentSong.album}",
                                 style = MaterialTheme.typography.bodySmall.copy(
-                                    color = Color(0xFF94A3B8),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     fontSize = 12.sp
                                 ),
                                 maxLines = 1,
@@ -141,7 +140,7 @@ fun MiniPlayer(
                         }
                     }
 
-                    // Right: MBUX Transport Controls (56dp touch targets with high-contrast electric lime)
+                    // Right: MBUX Transport Controls (48dp touch targets with high-contrast accent)
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -151,14 +150,22 @@ fun MiniPlayer(
                             modifier = Modifier
                                 .size(48.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(ZentryxLime)
+                                .background(accent)
                         ) {
-                            Icon(
-                                imageVector = if (playbackState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                contentDescription = if (playbackState.isPlaying) "Pause" else "Play",
-                                tint = Color.Black,
-                                modifier = Modifier.size(26.dp)
-                            )
+                            if (playbackState.isBuffering) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(22.dp),
+                                    color = Color.Black,
+                                    strokeWidth = 2.5.dp
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = if (playbackState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                    contentDescription = if (playbackState.isPlaying) "Pause" else "Play",
+                                    tint = Color.Black,
+                                    modifier = Modifier.size(26.dp)
+                                )
+                            }
                         }
 
                         IconButton(

@@ -1,11 +1,5 @@
 package com.zentryx.music.ui.components
 
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -17,7 +11,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
@@ -46,13 +39,14 @@ import com.zentryx.music.visualizer.VisualizerColorway
 import com.zentryx.music.visualizer.VisualizerFrame
 import com.zentryx.music.visualizer.VisualizerMode
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * Hardware-accelerated Compose Canvas rendering 6 interactive Mercedes-Benz / MBUX / AMG visualizers
- * driven by live ExoPlayer FFT + beat transient audio telemetry.
+ * Hardware-accelerated 60fps Compose Canvas rendering 6 interactive Mercedes-Benz / MBUX / AMG visualizers
+ * with true spring-damped analog needle physics, interpolated 60fps FFT bars, and dynamic beat bloom.
  */
 @Composable
 fun MercedesVisualizerCanvas(
@@ -64,32 +58,83 @@ fun MercedesVisualizerCanvas(
     trackArtist: String,
     modifier: Modifier = Modifier
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "S203VisPhase")
-    val phase by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = (2f * PI).toFloat(),
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 4800, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "phase"
-    )
-
     val primary = Color(colorway.primaryHex)
     val secondary = Color(colorway.secondaryHex)
-    val needle = Color(colorway.needleHex)
+    val needleColor = Color(colorway.needleHex)
     val dialBg = Color(colorway.dialBgHex)
 
-    // If hardware Visualizer capture has no permission or paused, modulate lightly during playback or stay idle
-    val energyBass = if (frame.isLiveAudio) frame.subBass else if (isPlaying) 0.35f + 0.25f * sin(phase * 2f) else 0.08f
-    val energyMid = if (frame.isLiveAudio) frame.mid else if (isPlaying) 0.28f + 0.20f * cos(phase * 3f) else 0.06f
-    val energyTreble = if (frame.isLiveAudio) frame.treble else if (isPlaying) 0.22f + 0.18f * sin(phase * 5f) else 0.04f
-    val beat = if (frame.isLiveAudio) frame.beatPulse else if (isPlaying) ((sin(phase * 4f) + 1f) * 0.25f) else 0f
+    // 60fps display-synced physics clock + spring needle + smoothed interpolated bands
+    var phase by remember { mutableFloatStateOf(0f) }
+    var springNeedlePos by remember { mutableFloatStateOf(0f) }
+    var springNeedleVel by remember { mutableFloatStateOf(0f) }
+    var springBeatGlow by remember { mutableFloatStateOf(0f) }
+    val displayBands = remember { FloatArray(32) }
+    val displayPeaks = remember { FloatArray(32) }
+
+    val latestFrame by rememberUpdatedState(frame)
+    val latestPlaying by rememberUpdatedState(isPlaying)
+
+    LaunchedEffect(Unit) {
+        var lastNs = withFrameNanos { it }
+        while (true) {
+            withFrameNanos { nowNs ->
+                val dt = ((nowNs - lastNs) / 1_000_000_000f).coerceIn(0.001f, 0.05f)
+                lastNs = nowNs
+
+                val f = latestFrame
+                val playing = latestPlaying
+
+                phase = (phase + dt * if (playing) (1.6f + f.subBass * 2.2f) else 0.35f) % (200f * PI.toFloat())
+
+                val targetBass = if (f.isLiveAudio) f.subBass else if (playing) 0.38f + 0.30f * abs(sin(phase * 1.8f)) else 0.04f
+                val targetMid = if (f.isLiveAudio) f.mid else if (playing) 0.32f + 0.25f * abs(cos(phase * 2.4f)) else 0.03f
+                val targetBeat = if (f.isLiveAudio) f.beatPulse else if (playing) ((sin(phase * 3.8f) + 1f) * 0.28f) else 0f
+
+                val targetNeedle = (targetBass * 0.65f + targetMid * 0.25f + targetBeat * 0.20f).coerceIn(0f, 1f)
+
+                // Critically-responsive automotive VDO needle spring dynamics
+                val stiffness = 240f
+                val damping = 20f
+                val force = (targetNeedle - springNeedlePos) * stiffness - springNeedleVel * damping
+                springNeedleVel += force * dt
+                springNeedlePos = (springNeedlePos + springNeedleVel * dt).coerceIn(0f, 1f)
+
+                springBeatGlow = springBeatGlow * 0.84f + targetBeat * 0.35f
+                if (targetBeat > springBeatGlow) springBeatGlow = targetBeat
+
+                // Interpolate 32 FFT bars smoothly at display refresh rate (60fps)
+                for (i in 0 until 32) {
+                    val target = if (f.isLiveAudio) {
+                        f.bands32[i]
+                    } else if (playing) {
+                        0.18f + 0.56f * abs(sin(phase * 2.2f + i * 0.32f))
+                    } else {
+                        0.03f
+                    }
+                    val coeff = if (target > displayBands[i]) (dt * 28f).coerceAtMost(0.9f) else (dt * 10f).coerceAtMost(0.45f)
+                    displayBands[i] += (target - displayBands[i]) * coeff
+
+                    val pkTarget = if (f.isLiveAudio) f.peaks32[i] else (displayBands[i] + 0.06f).coerceAtMost(1f)
+                    displayPeaks[i] = if (displayBands[i] >= displayPeaks[i]) {
+                        displayBands[i]
+                    } else {
+                        (displayPeaks[i] - dt * 0.45f).coerceAtLeast(pkTarget.coerceAtMost(displayPeaks[i]))
+                    }
+                }
+            }
+        }
+    }
+
+    // Trigger Canvas invalidation cleanly every physics frame
+    val animTick = phase
+    val currentNeedle = springNeedlePos
+    val currentBeat = springBeatGlow.coerceIn(0f, 1f)
+    val energyBass = if (frame.isLiveAudio) frame.subBass else if (isPlaying) 0.38f + 0.28f * sin(animTick * 2f) else 0.06f
 
     Box(
         modifier = modifier
             .background(dialBg)
-            .border(1.dp, primary.copy(alpha = 0.28f), RoundedCornerShape(14.dp))
+            .border(1.dp, primary.copy(alpha = 0.28f + currentBeat * 0.32f), RoundedCornerShape(14.dp))
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
             val w = size.width
@@ -100,14 +145,14 @@ fun MercedesVisualizerCanvas(
 
             when (mode) {
                 VisualizerMode.GAUGE -> {
-                    // W203 VDO Twin/Single Analog Gauge
+                    // W203 VDO Cluster Dial with spring needle + beat halo
                     drawCircle(
                         brush = Brush.radialGradient(
-                            colors = listOf(primary.copy(alpha = 0.12f + beat * 0.16f), dialBg),
+                            colors = listOf(primary.copy(alpha = 0.14f + currentBeat * 0.26f), dialBg),
                             center = Offset(cx, cy),
-                            radius = radius * 1.15f
+                            radius = radius * 1.18f
                         ),
-                        radius = radius * 1.05f,
+                        radius = radius * 1.08f,
                         center = Offset(cx, cy)
                     )
                     drawCircle(
@@ -118,20 +163,23 @@ fun MercedesVisualizerCanvas(
                     )
                     val startAngleDeg = 135f
                     val sweepDeg = 270f
-                    val ticks = 24
+                    val ticks = 28
                     for (i in 0..ticks) {
                         val frac = i / ticks.toFloat()
                         val deg = startAngleDeg + frac * sweepDeg
                         val rad = (deg * PI / 180.0).toFloat()
                         val isMajor = i % 4 == 0
-                        val isRedline = i >= 19
-                        val innerR = radius * if (isMajor) 0.76f else 0.84f
+                        val isRedline = i >= 22
+                        val innerR = radius * if (isMajor) 0.75f else 0.84f
                         val outerR = radius * 0.94f
+                        val isLit = frac <= currentNeedle
                         drawLine(
                             color = when {
-                                isRedline -> Color(0xFFEF4444)
-                                isMajor -> primary
-                                else -> Color(0xFF64748B)
+                                isRedline && isLit -> Color(0xFFEF4444)
+                                isRedline -> Color(0xFF7F1D1D)
+                                isLit -> primary
+                                isMajor -> Color(0xFF94A3B8)
+                                else -> Color(0xFF475569)
                             },
                             start = Offset(cx + cos(rad) * innerR, cy + sin(rad) * innerR),
                             end = Offset(cx + cos(rad) * outerR, cy + sin(rad) * outerR),
@@ -139,109 +187,124 @@ fun MercedesVisualizerCanvas(
                             cap = StrokeCap.Round
                         )
                     }
-                    // Needle driven by bass + mid transient
-                    val needleEnergy = (energyBass * 0.65f + energyMid * 0.35f).coerceIn(0f, 1f)
-                    val needleDeg = startAngleDeg + needleEnergy * sweepDeg
+                    // Inner peak arc ring
+                    drawArc(
+                        brush = Brush.sweepGradient(listOf(primary, secondary, Color(0xFFEF4444)), Offset(cx, cy)),
+                        startAngle = startAngleDeg,
+                        sweepAngle = currentNeedle * sweepDeg,
+                        useCenter = false,
+                        topLeft = Offset(cx - radius * 0.65f, cy - radius * 0.65f),
+                        size = Size(radius * 1.3f, radius * 1.3f),
+                        style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round),
+                        alpha = 0.72f
+                    )
+                    // Spring-damped needle
+                    val needleDeg = startAngleDeg + currentNeedle * sweepDeg
                     val needleRad = (needleDeg * PI / 180.0).toFloat()
                     drawLine(
-                        color = needle,
+                        color = needleColor.copy(alpha = 0.25f),
                         start = Offset(cx, cy),
-                        end = Offset(cx + cos(needleRad) * radius * 0.82f, cy + sin(needleRad) * radius * 0.82f),
-                        strokeWidth = 4.dp.toPx(),
+                        end = Offset(cx + cos(needleRad) * radius * 0.86f, cy + sin(needleRad) * radius * 0.86f),
+                        strokeWidth = 8.dp.toPx(),
                         cap = StrokeCap.Round
                     )
-                    drawCircle(color = primary, radius = 8.dp.toPx(), center = Offset(cx, cy))
+                    drawLine(
+                        color = needleColor,
+                        start = Offset(cx, cy),
+                        end = Offset(cx + cos(needleRad) * radius * 0.84f, cy + sin(needleRad) * radius * 0.84f),
+                        strokeWidth = 3.5.dp.toPx(),
+                        cap = StrokeCap.Round
+                    )
+                    drawCircle(color = primary, radius = 9.dp.toPx(), center = Offset(cx, cy))
+                    drawCircle(color = Color.Black, radius = 4.dp.toPx(), center = Offset(cx, cy))
                 }
 
                 VisualizerMode.STAR_PULSE -> {
-                    // Mercedes 3-Pointed Emblem + 48 Harmonic Rays
                     val rays = 48
+                    val innerRing = radius * (0.52f + currentBeat * 0.08f)
                     for (r in 0 until rays) {
-                        val bandVal = if (frame.isLiveAudio) frame.bands32[r % 32] else (0.25f + 0.35f * absSin(phase * 2f + r * 0.35f))
-                        val angle = ((r / rays.toFloat()) * 2f * PI).toFloat() + phase * 0.25f
-                        val rayLen = radius * (0.62f + bandVal * 0.45f)
+                        val bandVal = displayBands[(r * 31) / rays]
+                        val angle = ((r / rays.toFloat()) * 2f * PI).toFloat() + animTick * 0.12f
+                        val rayLen = innerRing + radius * (0.10f + bandVal * 0.44f)
                         drawLine(
-                            color = if (r % 2 == 0) primary.copy(alpha = 0.85f) else secondary.copy(alpha = 0.65f),
-                            start = Offset(cx + cos(angle) * radius * 0.56f, cy + sin(angle) * radius * 0.56f),
+                            color = if (r % 2 == 0) primary.copy(alpha = 0.9f) else secondary.copy(alpha = 0.75f),
+                            start = Offset(cx + cos(angle) * innerRing, cy + sin(angle) * innerRing),
                             end = Offset(cx + cos(angle) * rayLen, cy + sin(angle) * rayLen),
-                            strokeWidth = 2.5.dp.toPx(),
+                            strokeWidth = 2.6.dp.toPx(),
                             cap = StrokeCap.Round
                         )
                     }
-                    val ringR = radius * (0.56f + beat * 0.08f)
-                    drawCircle(color = primary, radius = ringR, center = Offset(cx, cy), style = Stroke(width = 3.dp.toPx()))
-                    // 3-pointed star vertices rotated slowly
-                    val starRot = -PI.toFloat() / 2f + phase * 0.15f
+                    drawCircle(color = primary.copy(alpha = 0.25f + currentBeat * 0.45f), radius = innerRing * 1.06f, center = Offset(cx, cy), style = Stroke(width = 6.dp.toPx()))
+                    drawCircle(color = primary, radius = innerRing, center = Offset(cx, cy), style = Stroke(width = 2.5.dp.toPx()))
+                    val starRot = -PI.toFloat() / 2f + animTick * 0.08f
                     val starPath = Path().apply {
                         for (k in 0 until 6) {
                             val theta = starRot + (k * PI.toFloat() / 3f)
-                            val r = if (k % 2 == 0) ringR * 0.92f else ringR * 0.22f
+                            val r = if (k % 2 == 0) innerRing * 0.90f else innerRing * 0.20f
                             val px = cx + cos(theta) * r
                             val py = cy + sin(theta) * r
                             if (k == 0) moveTo(px, py) else lineTo(px, py)
                         }
                         close()
                     }
-                    drawPath(path = starPath, color = Color.White.copy(alpha = 0.92f))
+                    drawPath(path = starPath, color = Color.White.copy(alpha = 0.95f))
                 }
 
                 VisualizerMode.AMG_TELEMETRY -> {
-                    // Motorsport Redline Bars + Live Scrolling Torque Waveform
-                    val barCount = 18
-                    val slotW = (w * 0.84f) / barCount
-                    val startX = w * 0.08f
+                    val barCount = 20
+                    val slotW = (w * 0.86f) / barCount
+                    val startX = w * 0.07f
+                    val midY = h * 0.56f
                     for (i in 0 until barCount) {
-                        val frac = if (frame.isLiveAudio) frame.bands32[(i * 31) / barCount] else (0.2f + 0.55f * absSin(phase * 3f + i * 0.4f))
-                        val barH = (h * 0.42f * frac).coerceAtLeast(4f)
-                        val barColor = if (frac > 0.78f) Color(0xFFEF4444) else if (frac > 0.5f) secondary else primary
+                        val frac = displayBands[(i * 31) / barCount]
+                        val barH = (h * 0.40f * frac).coerceAtLeast(4f)
+                        val barColor = if (frac > 0.78f) Color(0xFFEF4444) else if (frac > 0.48f) secondary else primary
                         drawRoundRect(
-                            color = barColor.copy(alpha = 0.9f),
-                            topLeft = Offset(startX + i * slotW, h * 0.55f - barH),
-                            size = Size(slotW * 0.65f, barH),
+                            color = barColor.copy(alpha = 0.92f),
+                            topLeft = Offset(startX + i * slotW, midY - barH),
+                            size = Size(slotW * 0.68f, barH),
                             cornerRadius = CornerRadius(3f, 3f)
                         )
                     }
-                    // Oscilloscope trace at bottom
+                    // Oscilloscope trace
                     val wavePath = Path()
                     for (i in 0 until 64) {
                         val px = w * 0.06f + (i / 63f) * (w * 0.88f)
-                        val sample = if (frame.isLiveAudio) frame.waveform64[i] else sin(phase * 4f + i * 0.35f) * 0.45f
-                        val py = h * 0.78f + sample * (h * 0.13f)
+                        val sample = if (frame.isLiveAudio) frame.waveform64[i] else sin(animTick * 3.5f + i * 0.35f) * 0.45f
+                        val py = h * 0.77f + sample * (h * 0.14f)
                         if (i == 0) wavePath.moveTo(px, py) else wavePath.lineTo(px, py)
                     }
+                    drawPath(path = wavePath, color = primary.copy(alpha = 0.28f), style = Stroke(width = 6.dp.toPx(), cap = StrokeCap.Round))
                     drawPath(path = wavePath, color = Color.White, style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round))
                 }
 
                 VisualizerMode.BURMESTER_WAVE -> {
-                    // Perforated aluminum grille background dots
-                    val cols = 12
+                    val cols = 14
                     val rows = 6
                     for (r in 1..rows) {
                         for (c in 1..cols) {
                             drawCircle(
-                                color = Color(0xFF334155).copy(alpha = 0.45f),
+                                color = Color(0xFF334155).copy(alpha = 0.35f + currentBeat * 0.25f),
                                 radius = 2.dp.toPx(),
                                 center = Offset((c / (cols + 1f)) * w, (r / (rows + 1f)) * h)
                             )
                         }
                     }
-                    // Dual acoustic silk ribbons
-                    listOf(primary to 1.0f, secondary to 0.7f).forEachIndexed { layerIdx, (col, ampScale) ->
+                    listOf(primary to 1.0f, secondary to 0.72f, Color.White.copy(alpha = 0.6f) to 0.44f).forEachIndexed { layerIdx, (col, ampScale) ->
                         val p = Path()
                         for (i in 0 until 64) {
                             val px = (i / 63f) * w
-                            val waveSample = if (frame.isLiveAudio) frame.waveform64[i] else sin(phase * 3f + i * 0.25f + layerIdx) * 0.4f
-                            val py = cy + waveSample * (h * 0.28f * ampScale) + sin(phase * 2f + i * 0.14f + layerIdx * 1.5f) * (10f + energyBass * 28f)
+                            val waveSample = if (frame.isLiveAudio) frame.waveform64[i] else sin(animTick * 2.8f + i * 0.25f + layerIdx) * 0.42f
+                            val py = cy + waveSample * (h * 0.30f * ampScale) + sin(animTick * 1.8f + i * 0.15f + layerIdx * 1.4f) * (8f + energyBass * 30f)
                             if (i == 0) p.moveTo(px, py) else p.lineTo(px, py)
                         }
-                        drawPath(path = p, color = col, style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round))
+                        drawPath(path = p, color = col, style = Stroke(width = if (layerIdx == 0) 3.2.dp.toPx() else 2.dp.toPx(), cap = StrokeCap.Round))
                     }
                 }
 
                 VisualizerMode.COMAND -> {
-                    // 32-Band Harman/Kardon COMAND Spectrum Analyzer + Gravity Peak Hold
-                    val bars = 24
-                    val gap = 4.dp.toPx()
+                    val bars = 28
+                    val gap = 3.5.dp.toPx()
                     val usableW = w * 0.88f
                     val barW = (usableW - gap * (bars - 1)) / bars
                     val baseX = w * 0.06f
@@ -249,9 +312,9 @@ fun MercedesVisualizerCanvas(
                     val maxBarH = h * 0.68f
                     for (i in 0 until bars) {
                         val bIdx = (i * 31) / bars
-                        val level = if (frame.isLiveAudio) frame.bands32[bIdx] else (0.18f + 0.5f * absSin(phase * 2.5f + i * 0.3f))
-                        val peak = if (frame.isLiveAudio) frame.peaks32[bIdx] else (level + 0.08f).coerceAtMost(1f)
-                        val bh = (level * maxBarH).coerceAtLeast(6f)
+                        val level = displayBands[bIdx]
+                        val peak = displayPeaks[bIdx]
+                        val bh = (level * maxBarH).coerceAtLeast(5f)
                         drawRoundRect(
                             brush = Brush.verticalGradient(listOf(secondary, primary)),
                             topLeft = Offset(baseX + i * (barW + gap), baseY - bh),
@@ -260,7 +323,7 @@ fun MercedesVisualizerCanvas(
                         )
                         val peakY = baseY - (peak * maxBarH)
                         drawLine(
-                            color = Color.White.copy(alpha = 0.9f),
+                            color = Color.White.copy(alpha = 0.92f),
                             start = Offset(baseX + i * (barW + gap), peakY),
                             end = Offset(baseX + i * (barW + gap) + barW, peakY),
                             strokeWidth = 2.dp.toPx()
@@ -269,20 +332,19 @@ fun MercedesVisualizerCanvas(
                 }
 
                 VisualizerMode.MFD_AMBER -> {
-                    // W203 Center MFD 16-column segmented LED bar readout
-                    val segments = 10
-                    val cols = 14
-                    val cellW = (w * 0.82f) / cols
-                    val cellH = (h * 0.56f) / segments
-                    val startX = w * 0.09f
-                    val bottomY = h * 0.82f
+                    val segments = 11
+                    val cols = 16
+                    val cellW = (w * 0.84f) / cols
+                    val cellH = (h * 0.58f) / segments
+                    val startX = w * 0.08f
+                    val bottomY = h * 0.83f
                     for (c in 0 until cols) {
-                        val v = if (frame.isLiveAudio) frame.bands32[(c * 31) / cols] else (0.15f + 0.55f * absSin(phase * 3.2f + c * 0.45f))
-                        val litCount = (v * segments).toInt().coerceIn(1, segments)
+                        val v = displayBands[(c * 31) / cols]
+                        val litCount = (v * segments).toInt().coerceIn(if (isPlaying) 1 else 0, segments)
                         for (s in 0 until segments) {
                             val isLit = s < litCount
                             val segCol = when {
-                                !isLit -> Color(0xFF1E293B).copy(alpha = 0.35f)
+                                !isLit -> Color(0xFF1E293B).copy(alpha = 0.30f)
                                 s >= segments - 2 -> Color(0xFFEF4444)
                                 else -> primary
                             }
@@ -298,7 +360,7 @@ fun MercedesVisualizerCanvas(
             }
         }
 
-        // Subtle VDO cluster track overlay at top
+        // Top VDO HUD Header
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -327,7 +389,7 @@ fun MercedesVisualizerCanvas(
             text = "$trackArtist — $trackTitle",
             fontSize = 10.sp,
             fontFamily = FontFamily.Monospace,
-            color = Color.White.copy(alpha = 0.78f),
+            color = Color.White.copy(alpha = 0.82f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
@@ -336,8 +398,6 @@ fun MercedesVisualizerCanvas(
         )
     }
 }
-
-private fun absSin(v: Float): Float = kotlin.math.abs(sin(v))
 
 @Composable
 fun FullscreenVisualizerDialog(
@@ -369,7 +429,6 @@ fun FullscreenVisualizerDialog(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Top Mode + Colorway Switcher Strip
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -416,7 +475,6 @@ fun FullscreenVisualizerDialog(
                     }
                 }
 
-                // Expanded Visualizer Canvas
                 MercedesVisualizerCanvas(
                     mode = mode,
                     colorway = colorway,
@@ -430,7 +488,6 @@ fun FullscreenVisualizerDialog(
                         .clip(RoundedCornerShape(16.dp))
                 )
 
-                // Compact Driving Transport Bar
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()

@@ -11,6 +11,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -28,12 +31,11 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.zentryx.music.models.RepeatMode
+import com.zentryx.music.ui.components.DriveModeHudDialog
 import com.zentryx.music.ui.components.FullscreenVisualizerDialog
 import com.zentryx.music.ui.components.MercedesVisualizerCanvas
-import com.zentryx.music.ui.theme.MbuxAmbientBorder
-import com.zentryx.music.ui.theme.MbuxObsidian
-import com.zentryx.music.ui.theme.MbuxSurface
-import com.zentryx.music.ui.theme.MbuxSurfaceVariant
+import com.zentryx.music.ui.components.StreamCodecInspectorDialog
+import com.zentryx.music.ui.components.rememberVoiceSearchLauncher
 import com.zentryx.music.viewmodel.PlayerViewModel
 import com.zentryx.music.visualizer.VisualizerColorway
 import com.zentryx.music.visualizer.VisualizerMode
@@ -43,7 +45,7 @@ import java.util.Locale
 
 /**
  * MBUX-style cockpit player optimized for 8-inch 1024x600 landscape automotive displays.
- * Supports 6 interactive Mercedes visualizers + fullscreen mode, Pro 16-Band DSP link,
+ * Supports 6 interactive Mercedes visualizers + colorway presets + fullscreen mode, Pro 16-Band DSP link,
  * swipe-to-skip gestures, GPS speed readout, podcast playback rate, sleep timer, and -20dB talk ducking.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -51,6 +53,9 @@ import java.util.Locale
 fun PlayerScreen(
     viewModel: PlayerViewModel,
     onNavigateBack: () -> Unit,
+    onNavigateForward: () -> Unit = {},
+    canGoBack: Boolean = true,
+    canGoForward: Boolean = false,
     onNavigateToDsp: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -63,6 +68,8 @@ fun PlayerScreen(
     val sleepMinutes by viewModel.sleepTimerMinutes.collectAsStateWithLifecycle()
     val sleepRemainingSec by viewModel.sleepTimerRemainingSec.collectAsStateWithLifecycle()
     val dspSettings by viewModel.dspSettings.collectAsStateWithLifecycle()
+    val activeOutputRoute by viewModel.activeOutputRoute.collectAsStateWithLifecycle()
+    val driveModeAutoSpeedKmH by viewModel.driveModeAutoSpeedKmH.collectAsStateWithLifecycle()
     val visualizerFrame by viewModel.visualizerFrame.collectAsStateWithLifecycle()
     val visualizerMode by viewModel.visualizerMode.collectAsStateWithLifecycle()
     val visualizerColorway by viewModel.visualizerColorway.collectAsStateWithLifecycle()
@@ -70,19 +77,48 @@ fun PlayerScreen(
     val playbackRate by viewModel.playbackRate.collectAsStateWithLifecycle()
     val swipeEnabled by viewModel.swipeGesturesEnabled.collectAsStateWithLifecycle()
     val idleScreensaverSec by viewModel.idleScreensaverSeconds.collectAsStateWithLifecycle()
+    val playlists by viewModel.playlists.collectAsStateWithLifecycle()
 
     val accentColor = Color(accent.hexColor)
+    val bgColor = MaterialTheme.colorScheme.background
+    val surfaceColor = MaterialTheme.colorScheme.surface
+    val surfaceVariantColor = MaterialTheme.colorScheme.surfaceVariant
+    val borderColor = MaterialTheme.colorScheme.outline
 
     var showQueueDrawer by remember { mutableStateOf(false) }
     var showVisualizerTile by remember { mutableStateOf(true) }
     var showFullscreenVisualizer by remember { mutableStateOf(false) }
+    var showDriveModeHud by remember { mutableStateOf(false) }
+    var driveModeDismissedThisTrip by remember { mutableStateOf(false) }
+    var showCodecInspector by remember { mutableStateOf(false) }
+    var showAddToPlaylistDialog by remember { mutableStateOf(false) }
+    var newPlaylistName by remember { mutableStateOf("") }
     var isSeeking by remember { mutableStateOf(false) }
     var seekPositionSlider by remember { mutableFloatStateOf(0f) }
     var lastInteractionMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var swipeHudText by remember { mutableStateOf<String?>(null) }
+
+    val launchVoiceInDriveHud = rememberVoiceSearchLauncher(
+        onResult = { spoken -> swipeHudText = "VOICE: $spoken" },
+        onUnavailable = { swipeHudText = "Voice recognizer unavailable" }
+    )
+
+    LaunchedEffect(speedKmH, driveModeAutoSpeedKmH, currentSong) {
+        if (driveModeAutoSpeedKmH > 0 && speedKmH >= driveModeAutoSpeedKmH && !driveModeDismissedThisTrip && currentSong != null) {
+            showDriveModeHud = true
+        }
+    }
 
     LaunchedEffect(playbackState.currentPositionMs) {
         if (!isSeeking) {
             seekPositionSlider = playbackState.currentPositionMs.toFloat()
+        }
+    }
+
+    LaunchedEffect(swipeHudText) {
+        if (swipeHudText != null) {
+            delay(900L)
+            swipeHudText = null
         }
     }
 
@@ -143,19 +179,43 @@ fun PlayerScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(
-                        onClick = onNavigateBack,
-                        modifier = Modifier.size(48.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
-                            tint = Color.White,
-                            modifier = Modifier.size(24.dp)
-                        )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = onNavigateBack,
+                            enabled = canGoBack,
+                            modifier = Modifier.size(44.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                                tint = if (canGoBack) Color.White else Color(0xFF475569),
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = onNavigateForward,
+                            enabled = canGoForward,
+                            modifier = Modifier.size(44.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                contentDescription = "Forward",
+                                tint = if (canGoForward) Color.White else Color(0xFF475569),
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
                     }
                 },
                 actions = {
+                    // Drive Mode Large-Target HUD shortcut
+                    IconButton(onClick = { showDriveModeHud = true }, modifier = Modifier.size(42.dp)) {
+                        Icon(
+                            imageVector = Icons.Default.DirectionsCar,
+                            contentDescription = "Drive Mode HUD",
+                            tint = if (showDriveModeHud) accentColor else Color.White,
+                            modifier = Modifier.size(21.dp)
+                        )
+                    }
                     // Quick 16-Band DSP Console shortcut
                     IconButton(onClick = onNavigateToDsp, modifier = Modifier.size(42.dp)) {
                         Icon(
@@ -198,20 +258,28 @@ fun PlayerScreen(
                             modifier = Modifier.size(21.dp)
                         )
                     }
+                    IconButton(onClick = { showAddToPlaylistDialog = true }, modifier = Modifier.size(42.dp)) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.PlaylistAdd,
+                            contentDescription = "Add to Playlist",
+                            tint = Color.White,
+                            modifier = Modifier.size(21.dp)
+                        )
+                    }
                     IconButton(onClick = { showQueueDrawer = !showQueueDrawer }, modifier = Modifier.size(42.dp)) {
                         Icon(
-                            imageVector = Icons.Default.QueueMusic,
+                            imageVector = Icons.AutoMirrored.Filled.QueueMusic,
                             contentDescription = "Queue",
                             tint = if (showQueueDrawer) accentColor else Color.White,
                             modifier = Modifier.size(21.dp)
                         )
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MbuxObsidian),
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = bgColor),
                 modifier = Modifier.height(48.dp)
             )
         },
-        containerColor = MbuxObsidian,
+        containerColor = bgColor,
         modifier = modifier
     ) { paddingValues ->
         if (currentSong == null) {
@@ -230,10 +298,41 @@ fun PlayerScreen(
             return@Scaffold
         }
 
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
+        ) {
+            val errorMsg = playbackState.errorMessage
+            if (!errorMsg.isNullOrBlank()) {
+                Surface(
+                    color = Color(0xFF78350F),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = errorMsg,
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = { viewModel.clearError() }, modifier = Modifier.size(28.dp)) {
+                            Icon(imageVector = Icons.Default.Close, contentDescription = "Dismiss", tint = Color.White, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+            }
+
+        Box(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
                 .padding(horizontal = 18.dp, vertical = 6.dp)
                 .pointerInput(swipeEnabled) {
                     if (swipeEnabled) {
@@ -246,8 +345,13 @@ fun PlayerScreen(
                                 dragAccum += dragAmount
                             },
                             onDragEnd = {
-                                if (dragAccum < -95f) viewModel.skipToNext()
-                                else if (dragAccum > 95f) viewModel.skipToPrevious()
+                                if (dragAccum < -95f) {
+                                    viewModel.skipToNext()
+                                    swipeHudText = "NEXT TRACK >>"
+                                } else if (dragAccum > 95f) {
+                                    viewModel.skipToPrevious()
+                                    swipeHudText = "<< PREV TRACK"
+                                }
                                 dragAccum = 0f
                             }
                         )
@@ -295,8 +399,8 @@ fun PlayerScreen(
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .background(MbuxSurfaceVariant)
-                                    .border(1.dp, MbuxAmbientBorder, RoundedCornerShape(14.dp)),
+                                    .background(surfaceVariantColor)
+                                    .border(1.dp, borderColor, RoundedCornerShape(14.dp)),
                                 contentAlignment = Alignment.Center
                             ) {
                                 if (currentSong.artworkPath != null && File(currentSong.artworkPath).exists()) {
@@ -317,7 +421,7 @@ fun PlayerScreen(
                             }
                         }
 
-                        // Codec Badge
+                        // Tap-to-inspect Codec Badge
                         Surface(
                             shape = RoundedCornerShape(4.dp),
                             color = Color.Black.copy(alpha = 0.8f),
@@ -325,7 +429,8 @@ fun PlayerScreen(
                             modifier = Modifier
                                 .align(Alignment.BottomEnd)
                                 .padding(8.dp)
-                                .border(0.5.dp, MbuxAmbientBorder, RoundedCornerShape(4.dp))
+                                .border(0.5.dp, borderColor, RoundedCornerShape(4.dp))
+                                .clickable { showCodecInspector = true }
                         ) {
                             Text(
                                 text = currentSong.format.name,
@@ -338,7 +443,7 @@ fun PlayerScreen(
 
                     Spacer(modifier = Modifier.height(6.dp))
 
-                    // Compact Visualizer / Artwork / Mode Controls
+                    // Compact Visualizer / Artwork / Mode + Colorway Controls
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -365,11 +470,26 @@ fun PlayerScreen(
                                     val next = modes[(modes.indexOf(visualizerMode) + 1) % modes.size]
                                     viewModel.setVisualizerMode(next)
                                 },
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                                 modifier = Modifier.height(30.dp),
                                 shape = RoundedCornerShape(8.dp)
                             ) {
-                                Text("Next Style", fontSize = 10.sp, color = Color.White)
+                                Text("Style", fontSize = 10.sp, color = Color.White)
+                            }
+                            VisualizerColorway.entries.forEach { cw ->
+                                val activeCw = cw == visualizerColorway
+                                Box(
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(cw.primaryHex))
+                                        .border(
+                                            width = if (activeCw) 2.dp else 1.dp,
+                                            color = if (activeCw) Color.White else Color.Transparent,
+                                            shape = CircleShape
+                                        )
+                                        .clickable { viewModel.setVisualizerColorway(cw) }
+                                )
                             }
                         }
                     }
@@ -389,29 +509,65 @@ fun PlayerScreen(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    val signalBadge = playbackState.signalPathBadge ?: currentSong.signalPathSummary
+                    if (signalBadge.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = accentColor.copy(alpha = 0.12f),
+                            modifier = Modifier
+                                .border(0.5.dp, accentColor.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
+                                .clickable { showCodecInspector = true }
+                        ) {
+                            Text(
+                                text = "$signalBadge · Inspect",
+                                fontSize = 9.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                color = accentColor,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
                 }
             }
 
-            // Right Pane (60%): Queue OR Seekbar + Transport + Quick QOL Controls
+            // Right Pane (60%): Queue Reorder Drawer OR Seekbar + Transport + Quick QOL Controls
             if (showQueueDrawer) {
                 Column(
                     modifier = Modifier
                         .weight(0.60f)
                         .fillMaxHeight()
                         .clip(RoundedCornerShape(14.dp))
-                        .background(MbuxSurface)
-                        .border(1.dp, MbuxAmbientBorder, RoundedCornerShape(14.dp))
+                        .background(surfaceColor)
+                        .border(1.dp, borderColor, RoundedCornerShape(14.dp))
                         .padding(12.dp)
                 ) {
-                    Text(
-                        text = "PLAYLIST QUEUE",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.Black,
-                            letterSpacing = 1.5.sp,
-                            color = accentColor
-                        ),
-                        modifier = Modifier.padding(bottom = 6.dp)
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "UP-NEXT QUEUE (${playbackState.queue.size})",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = 1.5.sp,
+                                color = accentColor
+                            )
+                        )
+                        if (playbackState.queue.size > 1) {
+                            TextButton(
+                                onClick = { viewModel.clearQueue() },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                modifier = Modifier.height(26.dp)
+                            ) {
+                                Text("Clear Upcoming", fontSize = 10.sp, color = Color(0xFF94A3B8), fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -431,7 +587,7 @@ fun PlayerScreen(
                                     )
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
@@ -440,7 +596,7 @@ fun PlayerScreen(
                                         fontSize = 12.sp,
                                         color = if (isItemActive) accentColor else Color(0xFF64748B)
                                     )
-                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
                                             text = item.title,
@@ -450,7 +606,42 @@ fun PlayerScreen(
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis
                                         )
-                                        Text(text = item.artist, fontSize = 11.sp, color = Color(0xFF94A3B8))
+                                        Text(text = item.artist, fontSize = 11.sp, color = Color(0xFF94A3B8), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                    IconButton(
+                                        onClick = { viewModel.moveQueueItem(index, index - 1) },
+                                        enabled = index > 0,
+                                        modifier = Modifier.size(30.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.ArrowUpward,
+                                            contentDescription = "Move Up",
+                                            tint = if (index > 0) Color.White else Color(0xFF334155),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { viewModel.moveQueueItem(index, index + 1) },
+                                        enabled = index < playbackState.queue.lastIndex,
+                                        modifier = Modifier.size(30.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.ArrowDownward,
+                                            contentDescription = "Move Down",
+                                            tint = if (index < playbackState.queue.lastIndex) Color.White else Color(0xFF334155),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { viewModel.removeQueueItem(index) },
+                                        modifier = Modifier.size(30.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.DeleteOutline,
+                                            contentDescription = "Remove",
+                                            tint = Color(0xFF94A3B8),
+                                            modifier = Modifier.size(16.dp)
+                                        )
                                     }
                                 }
                             }
@@ -524,8 +715,8 @@ fun PlayerScreen(
                             modifier = Modifier
                                 .size(56.dp)
                                 .clip(CircleShape)
-                                .background(MbuxSurfaceVariant)
-                                .border(1.dp, MbuxAmbientBorder, CircleShape)
+                                .background(surfaceVariantColor)
+                                .border(1.dp, borderColor, CircleShape)
                         ) {
                             Icon(imageVector = Icons.Default.SkipPrevious, contentDescription = "Previous", tint = Color.White, modifier = Modifier.size(30.dp))
                         }
@@ -554,8 +745,8 @@ fun PlayerScreen(
                             modifier = Modifier
                                 .size(56.dp)
                                 .clip(CircleShape)
-                                .background(MbuxSurfaceVariant)
-                                .border(1.dp, MbuxAmbientBorder, CircleShape)
+                                .background(surfaceVariantColor)
+                                .border(1.dp, borderColor, CircleShape)
                         ) {
                             Icon(imageVector = Icons.Default.SkipNext, contentDescription = "Next", tint = Color.White, modifier = Modifier.size(30.dp))
                         }
@@ -639,6 +830,92 @@ fun PlayerScreen(
                 }
             }
         }
+
+        // Transient Swipe-Skip HUD Feedback Pill
+        val hud = swipeHudText
+        if (hud != null) {
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = Color.Black.copy(alpha = 0.88f),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 12.dp)
+                    .border(1.dp, accentColor, RoundedCornerShape(20.dp))
+            ) {
+                Text(
+                    text = hud,
+                    color = accentColor,
+                    fontWeight = FontWeight.Black,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                )
+            }
+        }
+        }
+        }
+    }
+
+    if (showAddToPlaylistDialog && currentSong != null) {
+        AlertDialog(
+            onDismissRequest = { showAddToPlaylistDialog = false },
+            title = { Text("Add \"${currentSong.title}\" to Playlist", color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            containerColor = surfaceColor,
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = newPlaylistName,
+                            onValueChange = { newPlaylistName = it },
+                            placeholder = { Text("New playlist name…", fontSize = 12.sp) },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Button(
+                            onClick = {
+                                if (newPlaylistName.isNotBlank()) {
+                                    viewModel.createPlaylistAndAddCurrent(newPlaylistName)
+                                    newPlaylistName = ""
+                                    showAddToPlaylistDialog = false
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = accentColor, contentColor = Color.Black)
+                        ) {
+                            Text("Create")
+                        }
+                    }
+                    if (playlists.isNotEmpty()) {
+                        HorizontalDivider(color = Color(0xFF1E293B))
+                        playlists.forEach { pl ->
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = Color(0xFF0F172A),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        viewModel.addCurrentSongToPlaylist(pl.id)
+                                        showAddToPlaylistDialog = false
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(pl.name, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                    Text("${pl.songCount} tracks", color = accentColor, fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAddToPlaylistDialog = false }) {
+                    Text("Close", color = accentColor)
+                }
+            }
+        )
     }
 
     if (showFullscreenVisualizer && currentSong != null) {
@@ -659,6 +936,38 @@ fun PlayerScreen(
                 lastInteractionMillis = System.currentTimeMillis()
                 showFullscreenVisualizer = false
             }
+        )
+    }
+
+    if (showDriveModeHud) {
+        DriveModeHudDialog(
+            playbackState = playbackState,
+            speedKmH = speedKmH,
+            isAttenuated = isAttenuated,
+            accentColor = accentColor,
+            onTogglePlayPause = { viewModel.togglePlayPause() },
+            onPrevious = { viewModel.skipToPrevious() },
+            onNext = { viewModel.skipToNext() },
+            onSeekBack15 = { viewModel.seekBy(-15_000L) },
+            onSeekForward15 = { viewModel.seekBy(15_000L) },
+            onToggleFavorite = { viewModel.toggleFavorite() },
+            onToggleAttenuation = { viewModel.toggleAttenuation() },
+            onVoiceSearch = launchVoiceInDriveHud,
+            onDismiss = {
+                driveModeDismissedThisTrip = true
+                showDriveModeHud = false
+            }
+        )
+    }
+
+    if (showCodecInspector && currentSong != null) {
+        StreamCodecInspectorDialog(
+            song = currentSong,
+            dspSettings = dspSettings,
+            activeOutputRoute = activeOutputRoute,
+            replayGainAppliedDb = playbackState.replayGainAppliedDb,
+            accentColor = accentColor,
+            onDismiss = { showCodecInspector = false }
         )
     }
 }

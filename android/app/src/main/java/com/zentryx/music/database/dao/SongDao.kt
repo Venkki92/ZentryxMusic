@@ -12,19 +12,19 @@ import com.zentryx.music.database.entities.SongEntity
 import kotlinx.coroutines.flow.Flow
 
 /**
- * Data Access Object for audio tracks, FTS full-text search, and Paging 3 queries.
+ * Data Access Object for audio tracks, FTS full-text search, Paging 3 queries, and local/folder queries.
  */
 @Dao
 interface SongDao {
 
-    /**
-     * Paging 3 source for virtualized scrolling over large libraries on low-RAM headunits.
-     */
     @Query("SELECT * FROM songs ORDER BY title COLLATE NOCASE ASC")
     fun getPagingSongs(): PagingSource<Int, SongEntity>
 
     @Query("SELECT * FROM songs ORDER BY title COLLATE NOCASE ASC")
     fun getAllSongsFlow(): Flow<List<SongEntity>>
+
+    @Query("SELECT * FROM songs ORDER BY title COLLATE NOCASE ASC")
+    suspend fun getAllSongsOnce(): List<SongEntity>
 
     @Query("SELECT * FROM songs WHERE album = :album AND artist = :artist ORDER BY trackNumber ASC, title ASC")
     fun getSongsByAlbum(album: String, artist: String): Flow<List<SongEntity>>
@@ -35,6 +35,15 @@ interface SongDao {
     @Query("SELECT * FROM songs WHERE id = :id LIMIT 1")
     suspend fun getSongById(id: String): SongEntity?
 
+    @Query("SELECT * FROM songs WHERE relativePath = :relativePath LIMIT 1")
+    suspend fun getSongByRelativePath(relativePath: String): SongEntity?
+
+    @Query("SELECT relativePath FROM songs")
+    fun getAllRelativePathsFlow(): Flow<List<String>>
+
+    @Query("SELECT * FROM songs WHERE relativePath LIKE :prefix || '%' ORDER BY relativePath COLLATE NOCASE ASC")
+    fun getSongsByFolderPrefix(prefix: String): Flow<List<SongEntity>>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSongs(songs: List<SongEntity>)
 
@@ -44,19 +53,24 @@ interface SongDao {
     @Query("DELETE FROM songs WHERE id IN (:ids)")
     suspend fun deleteSongs(ids: List<String>)
 
-    /**
-     * Deletes tracks in a specific folder that no longer exist on the remote WebDAV server.
-     */
-    @Query("DELETE FROM songs WHERE relativePath LIKE :folderPrefix || '%' AND id NOT IN (:keepIds)")
+    @Query("DELETE FROM songs WHERE sourceType = 'WEBDAV' AND relativePath LIKE :folderPrefix || '%' AND id NOT IN (:keepIds)")
     suspend fun deleteRemovedSongsInFolder(folderPrefix: String, keepIds: List<String>)
+
+    @Query("DELETE FROM songs WHERE sourceType = 'WEBDAV' AND id NOT IN (:keepIds)")
+    suspend fun deleteWebDavSongsNotIn(keepIds: List<String>)
+
+    @Query("DELETE FROM songs WHERE sourceType = 'WEBDAV'")
+    suspend fun deleteAllWebDavSongs()
+
+    @Query("DELETE FROM songs WHERE sourceType = 'LOCAL' AND id NOT IN (:keepIds)")
+    suspend fun deleteLocalSongsNotIn(keepIds: List<String>)
+
+    @Query("DELETE FROM songs WHERE sourceType = 'LOCAL'")
+    suspend fun deleteAllLocalSongs()
 
     @Query("DELETE FROM songs")
     suspend fun clearAll()
 
-    /**
-     * Fast full-text search (FTS4) matching title, artist, album, and genre.
-     * Uses prefix query pattern ':query*' for real-time keystroke searches.
-     */
     @Transaction
     @Query("""
         SELECT s.* FROM songs s
@@ -67,9 +81,6 @@ interface SongDao {
     """)
     fun searchSongsFts(query: String): Flow<List<SongEntity>>
 
-    /**
-     * Distinct albums aggregation for the Library screen.
-     */
     @Query("""
         SELECT album, artist, COUNT(*) as songCount, SUM(durationMs) as totalDurationMs,
                MAX(year) as year, MAX(artworkPath) as artworkPath
@@ -79,9 +90,6 @@ interface SongDao {
     """)
     fun getDistinctAlbums(): Flow<List<AlbumSummary>>
 
-    /**
-     * Distinct artists aggregation for the Library screen.
-     */
     @Query("""
         SELECT artist, COUNT(DISTINCT album) as albumCount, COUNT(*) as songCount
         FROM songs
@@ -105,6 +113,24 @@ interface SongDao {
     @Query("SELECT * FROM songs WHERE isDownloaded = 1 ORDER BY title COLLATE NOCASE ASC")
     fun getDownloadedSongs(): Flow<List<SongEntity>>
 
+    @Query("UPDATE songs SET lastPlayedAt = :timestampMs, playCount = playCount + 1 WHERE id = :id")
+    suspend fun recordTrackPlay(id: String, timestampMs: Long)
+
+    @Query("UPDATE songs SET lastPositionMs = :positionMs WHERE id = :id")
+    suspend fun updateResumePosition(id: String, positionMs: Long)
+
+    @Query("SELECT * FROM songs WHERE lastPlayedAt > 0 ORDER BY lastPlayedAt DESC LIMIT 50")
+    fun getRecentlyPlayedSongs(): Flow<List<SongEntity>>
+
+    @Query("SELECT * FROM songs WHERE playCount > 0 ORDER BY playCount DESC, lastPlayedAt DESC LIMIT 50")
+    fun getMostPlayedSongs(): Flow<List<SongEntity>>
+
+    @Query("SELECT * FROM songs WHERE lastPositionMs > 10000 AND (durationMs = 0 OR lastPositionMs < (durationMs - 10000)) ORDER BY lastPlayedAt DESC, title COLLATE NOCASE ASC LIMIT 50")
+    fun getResumableSongs(): Flow<List<SongEntity>>
+
     @Query("SELECT COUNT(*) FROM songs")
     fun getTotalSongCountFlow(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM songs")
+    suspend fun getTotalSongCountOnce(): Int
 }

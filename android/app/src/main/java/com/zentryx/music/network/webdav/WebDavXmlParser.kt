@@ -15,9 +15,19 @@ import javax.inject.Singleton
  * ensuring strict compliance with the < 150MB RAM budget on AutoChips AC8259P headunits.
  */
 @Singleton
-class WebDavXmlParser @Inject constructor(
-    private val urlHelper: WebDavUrlHelper
+class WebDavXmlParser internal constructor(
+    private val urlHelper: WebDavUrlHelper,
+    private val parserFactory: () -> XmlPullParser
 ) {
+    @Inject
+    constructor(urlHelper: WebDavUrlHelper) : this(
+        urlHelper = urlHelper,
+        parserFactory = {
+            Xml.newPullParser().apply {
+                setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
+            }
+        }
+    )
 
     private val httpDateFormat = SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US).apply {
         timeZone = TimeZone.getTimeZone("GMT")
@@ -32,8 +42,7 @@ class WebDavXmlParser @Inject constructor(
         requestedPath: String? = null
     ): List<WebDavItem> {
         val items = mutableListOf<WebDavItem>()
-        val parser = Xml.newPullParser()
-        parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
+        val parser = parserFactory()
         parser.setInput(inputStream, "UTF-8")
 
         var eventType = parser.eventType
@@ -43,13 +52,15 @@ class WebDavXmlParser @Inject constructor(
         var contentType: String? = null
         var eTag: String? = null
         var lastModified: Long = 0L
+        var permissions: String? = null
 
         // Track XML hierarchy
         var inResponse = false
         var inProp = false
         var inResourceType = false
 
-        val normalizedRequestedPath = requestedPath?.trimEnd('/')
+        val normalizedRequestedPath = requestedPath
+            ?.let { urlHelper.decodePath(extractPathOnly(it)).trimEnd('/') }
 
         while (eventType != XmlPullParser.END_DOCUMENT) {
             val tagName = parser.name?.lowercase()?.substringAfterLast(':') ?: ""
@@ -65,10 +76,11 @@ class WebDavXmlParser @Inject constructor(
                             contentType = null
                             eTag = null
                             lastModified = 0L
+                            permissions = null
                         }
                         "href" -> {
                             if (inResponse) {
-                                currentHref = parser.nextText().trim()
+                                currentHref = safeNextText(parser)
                             }
                         }
                         "prop" -> {
@@ -84,24 +96,33 @@ class WebDavXmlParser @Inject constructor(
                         }
                         "getcontentlength" -> {
                             if (inProp) {
-                                val text = parser.nextText().trim()
-                                contentLength = text.toLongOrNull() ?: 0L
+                                val text = safeNextText(parser)
+                                text.toLongOrNull()?.takeIf { it > 0L }?.let { contentLength = it }
                             }
                         }
                         "getcontenttype" -> {
                             if (inProp) {
-                                contentType = parser.nextText().trim()
+                                val text = safeNextText(parser)
+                                if (text.isNotEmpty()) contentType = text
                             }
                         }
                         "getetag" -> {
                             if (inProp) {
-                                eTag = parser.nextText().trim().removeSurrounding("\"")
+                                val text = safeNextText(parser).removeSurrounding("\"")
+                                if (text.isNotEmpty()) eTag = text
                             }
                         }
                         "getlastmodified" -> {
                             if (inProp) {
-                                val text = parser.nextText().trim()
-                                lastModified = parseHttpDate(text)
+                                val text = safeNextText(parser)
+                                val parsed = parseHttpDate(text)
+                                if (parsed > 0L) lastModified = parsed
+                            }
+                        }
+                        "permissions" -> {
+                            if (inProp) {
+                                val text = safeNextText(parser)
+                                if (text.isNotEmpty()) permissions = text
                             }
                         }
                     }
@@ -112,9 +133,9 @@ class WebDavXmlParser @Inject constructor(
                         "response" -> {
                             inResponse = false
                             if (currentHref.isNotEmpty()) {
-                                val cleanHref = currentHref.trimEnd('/')
+                                val decodedHrefPath = urlHelper.decodePath(extractPathOnly(currentHref)).trimEnd('/')
                                 val isSelfFolder = normalizedRequestedPath != null &&
-                                        cleanHref.equals(normalizedRequestedPath, ignoreCase = true)
+                                    decodedHrefPath.equals(normalizedRequestedPath, ignoreCase = true)
 
                                 if (!isSelfFolder) {
                                     val displayName = urlHelper.extractNameFromHref(currentHref)
@@ -127,7 +148,8 @@ class WebDavXmlParser @Inject constructor(
                                                 contentLength = contentLength,
                                                 contentType = contentType,
                                                 eTag = eTag,
-                                                lastModified = lastModified
+                                                lastModified = lastModified,
+                                                permissions = permissions
                                             )
                                         )
                                     }
@@ -147,6 +169,26 @@ class WebDavXmlParser @Inject constructor(
         }
 
         return items
+    }
+
+    private fun extractPathOnly(hrefOrUrl: String): String {
+        return try {
+            if (hrefOrUrl.startsWith("http://") || hrefOrUrl.startsWith("https://")) {
+                java.net.URI(hrefOrUrl).rawPath ?: hrefOrUrl
+            } else {
+                hrefOrUrl
+            }
+        } catch (_: Exception) {
+            hrefOrUrl
+        }
+    }
+
+    private fun safeNextText(parser: XmlPullParser): String {
+        return try {
+            parser.nextText().trim()
+        } catch (_: Exception) {
+            ""
+        }
     }
 
     private fun parseHttpDate(dateString: String): Long {

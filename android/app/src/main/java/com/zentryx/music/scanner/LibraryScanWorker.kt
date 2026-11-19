@@ -7,7 +7,6 @@ import android.content.Context
 import android.content.pm.ServiceInfo
 import android.os.Build
 import androidx.core.app.NotificationCompat
-import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
@@ -19,14 +18,17 @@ import com.zentryx.music.database.entities.FolderSyncEntity
 import com.zentryx.music.database.entities.SongEntity
 import com.zentryx.music.di.IoDispatcher
 import com.zentryx.music.models.AudioFormat
+import com.zentryx.music.models.ErrorType
 import com.zentryx.music.models.Resource
 import com.zentryx.music.models.ServerConfig
+import com.zentryx.music.network.metadata.ParsedMetadata
 import com.zentryx.music.network.metadata.RangeMetadataReader
 import com.zentryx.music.network.webdav.WebDavClient
 import com.zentryx.music.network.webdav.WebDavItem
 import com.zentryx.music.network.webdav.WebDavUrlHelper
 import com.zentryx.music.security.EncryptedDataStore
 import dagger.assisted.Assisted
+import dagger.assisted.AssistedFactory
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.firstOrNull
@@ -35,11 +37,11 @@ import java.security.MessageDigest
 import java.util.ArrayDeque
 
 /**
- * Foreground WorkManager worker responsible for scanning Nextcloud WebDAV music libraries.
- * Operates in foreground mode to survive aggressive task termination on AutoChips AC8259P headunits.
- * Implements manual Depth: 1 folder recursion, incremental sync via ETags, and Range metadata reads.
+ * WorkManager worker responsible for scanning Nextcloud WebDAV music libraries.
+ * Uses Dagger @AssistedFactory (via ZentryxWorkerFactory), non-fatal foreground promotion,
+ * automatic Nextcloud root fallback if configured folder does not exist or is empty,
+ * and safe stale-song cleanup after full traversal.
  */
-@HiltWorker
 class LibraryScanWorker @AssistedInject constructor(
     @Assisted private val appContext: Context,
     @Assisted private val workerParams: WorkerParameters,
@@ -53,6 +55,11 @@ class LibraryScanWorker @AssistedInject constructor(
     @IoDispatcher private val ioDispatcher: CoroutineDispatcher
 ) : CoroutineWorker(appContext, workerParams) {
 
+    @AssistedFactory
+    interface Factory {
+        fun create(appContext: Context, workerParams: WorkerParameters): LibraryScanWorker
+    }
+
     companion object {
         const val UNIQUE_WORK_NAME = "zentryx_library_scan_work"
         const val NOTIFICATION_CHANNEL_ID = "zentryx_library_sync_channel"
@@ -65,184 +72,229 @@ class LibraryScanWorker @AssistedInject constructor(
         const val KEY_ERROR_MESSAGE = "key_error_message"
     }
 
-    private val notificationManager =
-        appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    private val notificationManager: NotificationManager?
+        get() = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
 
     override suspend fun doWork(): Result = withContext(ioDispatcher) {
-        val config = encryptedDataStore.serverConfigFlow.firstOrNull()
-            ?: return@withContext Result.failure(workDataOf(KEY_ERROR_MESSAGE to "Not logged in to Nextcloud"))
-
-        createNotificationChannel()
-        setForeground(createForegroundInfo("Connecting to Nextcloud WebDAV…", 0, 0))
-
-        val rootUrl = config.musicWebDavUrl
-        val folderQueue = ArrayDeque<String>()
-        folderQueue.add(rootUrl)
-
-        var totalFilesDiscovered = 0
-        var totalFilesProcessed = 0
-
         try {
-            while (folderQueue.isNotEmpty()) {
-                if (isStopped) {
-                    return@withContext Result.retry()
-                }
-
-                val currentFolderUrl = folderQueue.poll() ?: break
-                val relativeFolderPath = currentFolderUrl
-                    .removePrefix(config.webDavBaseUrl)
-                    .trim('/')
-                    .ifEmpty { "Music" }
-
-                updateNotification("Scanning: /$relativeFolderPath", totalFilesDiscovered, totalFilesProcessed)
-                setProgress(
-                    workDataOf(
-                        KEY_CURRENT_FOLDER to relativeFolderPath,
-                        KEY_FILES_DISCOVERED to totalFilesDiscovered,
-                        KEY_FILES_PROCESSED to totalFilesProcessed,
-                        KEY_STATUS to "SCANNING"
-                    )
+            val rawConfig = encryptedDataStore.serverConfigFlow.firstOrNull()
+                ?: return@withContext Result.failure(
+                    workDataOf(KEY_ERROR_MESSAGE to "Not logged in to Nextcloud")
                 )
 
-                // 1. Fetch directory listing with Depth: 1
-                val listResult = webDavClient.listFolder(currentFolderUrl, config)
-                if (listResult is Resource.Error) {
-                    // Continue to next folder on non-fatal folder read errors
-                    continue
-                }
-
-                val items = (listResult as Resource.Success).data
-                val cachedSync = folderSyncDao.getFolderSync(relativeFolderPath)
-
-                val subfolders = mutableListOf<WebDavItem>()
-                val audioFiles = mutableListOf<WebDavItem>()
-
-                for (item in items) {
-                    if (item.isDirectory) {
-                        subfolders.add(item)
-                    } else if (AudioFormat.isSupported(item.name)) {
-                        audioFiles.add(item)
-                    }
-                }
-
-                totalFilesDiscovered += audioFiles.size
-
-                // 2. Enqueue child subfolders for manual Depth: 1 recursion
-                for (subfolder in subfolders) {
-                    val childUrl = if (subfolder.href.startsWith("http")) {
-                        subfolder.href
-                    } else {
-                        urlHelper.combineUrl(config.serverUrl, subfolder.href)
-                    }
-                    folderQueue.add(childUrl)
-                }
-
-                // 3. Process audio files with incremental sync
-                val songsToUpsert = mutableListOf<SongEntity>()
-                val validSongIdsInFolder = mutableListOf<String>()
-
-                for (audioFile in audioFiles) {
-                    if (isStopped) return@withContext Result.retry()
-
-                    val fileUrl = if (audioFile.href.startsWith("http")) {
-                        audioFile.href
-                    } else {
-                        urlHelper.combineUrl(config.serverUrl, audioFile.href)
-                    }
-
-                    val relativeFilePath = audioFile.href
-                        .removePrefix(config.webDavBaseUrl)
-                        .trimStart('/')
-
-                    val songId = generateSongId(relativeFilePath)
-                    validSongIdsInFolder.add(songId)
-
-                    // Check if file already exists in database with matching ETag and size
-                    val existingSong = songDao.getSongById(songId)
-                    if (existingSong != null &&
-                        existingSong.eTag != null &&
-                        existingSong.eTag == audioFile.eTag &&
-                        existingSong.fileSize == audioFile.contentLength
-                    ) {
-                        // File unmodified - reuse cached metadata
-                        songsToUpsert.add(existingSong)
-                        totalFilesProcessed++
-                        continue
-                    }
-
-                    // New or modified file: extract metadata remotely using HTTP Range (first 64KB)
-                    val metadata = rangeMetadataReader.extractMetadata(
-                        fileUrl = fileUrl,
-                        relativePath = relativeFilePath,
-                        fileSize = audioFile.contentLength,
-                        config = config
-                    )
-
-                    // Save extracted embedded album artwork to disk cache if present
-                    val existingArt = artworkDiskCacheManager.getExistingArtworkPath(
-                        metadata.artist ?: "Unknown Artist",
-                        metadata.album ?: "Unknown Album"
-                    )
-                    val artworkPath = existingArt ?: if (metadata.rawArtworkBytes != null) {
-                        artworkDiskCacheManager.saveArtwork(
-                            artist = metadata.artist ?: "Unknown Artist",
-                            album = metadata.album ?: "Unknown Album",
-                            rawBytes = metadata.rawArtworkBytes
-                        )
-                    } else null
-
-                    val format = AudioFormat.fromExtension(audioFile.extension)
-                    val mimeType = audioFile.contentType ?: format?.mimeType ?: "audio/mpeg"
-
-                    val songEntity = SongEntity(
-                        id = songId,
-                        title = metadata.title ?: audioFile.name.substringBeforeLast('.'),
-                        artist = metadata.artist ?: "Unknown Artist",
-                        album = metadata.album ?: "Unknown Album",
-                        durationMs = metadata.durationMs,
-                        fileUrl = fileUrl,
-                        relativePath = relativeFilePath,
-                        mimeType = mimeType,
-                        trackNumber = metadata.trackNumber,
-                        year = metadata.year,
-                        genre = metadata.genre,
-                        fileSize = audioFile.contentLength,
-                        eTag = audioFile.eTag,
-                        lastModified = audioFile.lastModified,
-                        artworkPath = artworkPath
-                    )
-
-                    songsToUpsert.add(songEntity)
-                    totalFilesProcessed++
-
-                    if (songsToUpsert.size >= 25) {
-                        songDao.insertSongs(songsToUpsert)
-                        songsToUpsert.clear()
-                    }
-                }
-
-                if (songsToUpsert.isNotEmpty()) {
-                    songDao.insertSongs(songsToUpsert)
-                    songsToUpsert.clear()
-                }
-
-                // 4. Remove stale tracks in this folder that were deleted from Nextcloud
-                songDao.deleteRemovedSongsInFolder(relativeFolderPath, validSongIdsInFolder)
-
-                // 5. Update FolderSyncEntity
-                val folderMetadata = webDavClient.getFolderMetadata(currentFolderUrl, config)
-                val folderEtag = (folderMetadata as? Resource.Success)?.data?.eTag
-                folderSyncDao.upsertFolderSync(
-                    FolderSyncEntity(
-                        folderPath = relativeFolderPath,
-                        eTag = folderEtag,
-                        lastModified = System.currentTimeMillis(),
-                        fileCount = audioFiles.size
-                    )
+            if (rawConfig.serverUrl.isBlank() || rawConfig.username.isBlank() || rawConfig.tokenOrPassword.isBlank()) {
+                return@withContext Result.failure(
+                    workDataOf(KEY_ERROR_MESSAGE to "Incomplete Nextcloud credentials — please sign in again")
                 )
             }
 
-            updateNotification("Library scan complete ($totalFilesProcessed tracks)", totalFilesDiscovered, totalFilesProcessed)
+            runCatching { createNotificationChannel() }
+            runCatching { setForeground(createForegroundInfo("Connecting to Nextcloud WebDAV…", 0, 0)) }
+
+            val candidates = buildCandidateRoots(rawConfig)
+            var lastErrorMessage: String? = null
+            var anyRootSucceeded = false
+            var totalFilesDiscovered = 0
+            var totalFilesProcessed = 0
+            val validWebDavSongIds = mutableListOf<String>()
+            val visitedFolders = mutableSetOf<String>()
+
+            for ((activeConfig, rootUrl, isFallbackCandidate) in candidates) {
+                if (isStopped) return@withContext Result.retry()
+
+                // Skip fallback root if the configured folder already found tracks
+                if (isFallbackCandidate && totalFilesProcessed > 0) {
+                    break
+                }
+
+                val folderQueue = ArrayDeque<String>()
+                folderQueue.add(rootUrl)
+                var isFirstFolderForCandidate = true
+
+                while (folderQueue.isNotEmpty()) {
+                    if (isStopped) {
+                        return@withContext Result.retry()
+                    }
+
+                    val currentFolderUrl = folderQueue.poll() ?: break
+                    val normalizedFolderKey = currentFolderUrl.trimEnd('/')
+                    if (!visitedFolders.add(normalizedFolderKey)) {
+                        continue
+                    }
+
+                    val relativeFolderPath = urlHelper.extractRelativePath(currentFolderUrl, activeConfig.username)
+                        .ifEmpty { if (isFallbackCandidate) "Root" else activeConfig.musicFolderPath.trim('/').ifEmpty { "Root" } }
+
+                    runCatching {
+                        updateNotification("Scanning: /$relativeFolderPath", totalFilesDiscovered, totalFilesProcessed)
+                    }
+                    setProgress(
+                        workDataOf(
+                            KEY_CURRENT_FOLDER to "/$relativeFolderPath",
+                            KEY_FILES_DISCOVERED to totalFilesDiscovered,
+                            KEY_FILES_PROCESSED to totalFilesProcessed,
+                            KEY_STATUS to "SCANNING"
+                        )
+                    )
+
+                    val listResult = webDavClient.listFolder(currentFolderUrl, activeConfig)
+                    if (listResult is Resource.Error) {
+                        if (isFirstFolderForCandidate) {
+                            lastErrorMessage = listResult.message
+                            // Auth / SSL / Network errors shouldn't silently keep probing legacy paths
+                            if (listResult.errorType == ErrorType.UNAUTHORIZED ||
+                                listResult.errorType == ErrorType.SSL_ERROR ||
+                                listResult.errorType == ErrorType.NO_NETWORK ||
+                                listResult.errorType == ErrorType.BAD_URL
+                            ) {
+                                return@withContext Result.failure(
+                                    workDataOf(KEY_ERROR_MESSAGE to listResult.message)
+                                )
+                            }
+                            break
+                        }
+                        continue
+                    }
+
+                    isFirstFolderForCandidate = false
+                    anyRootSucceeded = true
+
+                    val items = (listResult as Resource.Success).data
+                    val subfolders = mutableListOf<WebDavItem>()
+                    val audioFiles = mutableListOf<WebDavItem>()
+
+                    for (item in items) {
+                        if (item.name.startsWith(".")) continue
+                        if (item.isDirectory) {
+                            subfolders.add(item)
+                        } else if (AudioFormat.isSupported(item.name)) {
+                            audioFiles.add(item)
+                        }
+                    }
+
+                    totalFilesDiscovered += audioFiles.size
+
+                    for (subfolder in subfolders) {
+                        val childUrl = urlHelper.resolveHrefUrl(activeConfig.serverUrl, subfolder.href)
+                        if (!visitedFolders.contains(childUrl.trimEnd('/'))) {
+                            folderQueue.add(childUrl)
+                        }
+                    }
+
+                    val songsToUpsert = mutableListOf<SongEntity>()
+
+                    for (audioFile in audioFiles) {
+                        if (isStopped) return@withContext Result.retry()
+
+                        val fileUrl = urlHelper.resolveHrefUrl(activeConfig.serverUrl, audioFile.href)
+                        val relativeFilePath = urlHelper.extractRelativePath(audioFile.href, activeConfig.username)
+                        val songId = generateSongId(relativeFilePath)
+                        validWebDavSongIds.add(songId)
+
+                        val existingSong = songDao.getSongById(songId)
+                        if (existingSong != null &&
+                            existingSong.eTag != null &&
+                            existingSong.eTag == audioFile.eTag &&
+                            existingSong.fileSize == audioFile.contentLength
+                        ) {
+                            songsToUpsert.add(
+                                if (existingSong.fileUrl != fileUrl) existingSong.copy(fileUrl = fileUrl) else existingSong
+                            )
+                            totalFilesProcessed++
+                            continue
+                        }
+
+                        val metadata = try {
+                            rangeMetadataReader.extractMetadata(
+                                fileUrl = fileUrl,
+                                relativePath = relativeFilePath,
+                                fileSize = audioFile.contentLength,
+                                config = activeConfig
+                            )
+                        } catch (_: Throwable) {
+                            rangeMetadataReader.parseFromPath(relativeFilePath)
+                        }
+
+                        val artistName = metadata.artist?.ifBlank { null } ?: "Unknown Artist"
+                        val albumName = metadata.album?.ifBlank { null } ?: "Unknown Album"
+                        val artworkPath = runCatching {
+                            val existingArt = artworkDiskCacheManager.getExistingArtworkPath(artistName, albumName)
+                            existingArt ?: if (metadata.rawArtworkBytes != null) {
+                                artworkDiskCacheManager.saveArtwork(artistName, albumName, metadata.rawArtworkBytes)
+                            } else null
+                        }.getOrNull()
+
+                        val format = AudioFormat.fromExtension(audioFile.extension)
+                        val mimeType = audioFile.contentType?.ifBlank { null } ?: format?.mimeType ?: "audio/mpeg"
+
+                        songsToUpsert.add(
+                            SongEntity(
+                                id = songId,
+                                title = metadata.title?.ifBlank { null } ?: audioFile.name.substringBeforeLast('.'),
+                                artist = artistName,
+                                album = albumName,
+                                durationMs = metadata.durationMs,
+                                fileUrl = fileUrl,
+                                relativePath = relativeFilePath,
+                                mimeType = mimeType,
+                                trackNumber = metadata.trackNumber,
+                                year = metadata.year,
+                                genre = metadata.genre,
+                                fileSize = audioFile.contentLength,
+                                eTag = audioFile.eTag,
+                                lastModified = audioFile.lastModified,
+                                artworkPath = artworkPath,
+                                isFavorite = existingSong?.isFavorite ?: false,
+                                isDownloaded = existingSong?.isDownloaded ?: false,
+                                localFilePath = existingSong?.localFilePath,
+                                lyricsText = existingSong?.lyricsText,
+                                sourceType = "WEBDAV",
+                                sampleRateHz = metadata.sampleRateHz,
+                                bitsPerSample = metadata.bitsPerSample,
+                                bitrateKbps = metadata.bitrateKbps,
+                                replayGainDb = metadata.replayGainDb
+                            )
+                        )
+                        totalFilesProcessed++
+
+                        if (songsToUpsert.size >= 25) {
+                            songDao.insertSongs(songsToUpsert)
+                            songsToUpsert.clear()
+                        }
+                    }
+
+                    if (songsToUpsert.isNotEmpty()) {
+                        songDao.insertSongs(songsToUpsert)
+                        songsToUpsert.clear()
+                    }
+
+                    runCatching {
+                        val folderMetadata = webDavClient.getFolderMetadata(currentFolderUrl, activeConfig)
+                        val folderEtag = (folderMetadata as? Resource.Success)?.data?.eTag
+                        folderSyncDao.upsertFolderSync(
+                            FolderSyncEntity(
+                                folderPath = relativeFolderPath,
+                                eTag = folderEtag,
+                                lastModified = System.currentTimeMillis(),
+                                fileCount = audioFiles.size
+                            )
+                        )
+                    }
+                }
+            }
+
+            if (!anyRootSucceeded) {
+                val msg = lastErrorMessage ?: "Could not reach Nextcloud WebDAV folder"
+                runCatching { updateNotification("Sync error: $msg", 0, 0) }
+                return@withContext Result.failure(workDataOf(KEY_ERROR_MESSAGE to msg))
+            }
+
+            // Prune deleted WebDAV tracks safely only after the full traversal succeeds
+            pruneRemovedWebDavSongs(validWebDavSongIds)
+
+            runCatching {
+                updateNotification("Library scan complete ($totalFilesProcessed tracks)", totalFilesDiscovered, totalFilesProcessed)
+            }
             Result.success(
                 workDataOf(
                     KEY_FILES_DISCOVERED to totalFilesDiscovered,
@@ -250,9 +302,54 @@ class LibraryScanWorker @AssistedInject constructor(
                     KEY_STATUS to "COMPLETED"
                 )
             )
-        } catch (e: Exception) {
-            Result.failure(workDataOf(KEY_ERROR_MESSAGE to (e.localizedMessage ?: "Unknown scanning error")))
+        } catch (t: Throwable) {
+            val message = t.localizedMessage?.takeIf { it.isNotBlank() }
+                ?: "${t::class.simpleName ?: "ScanError"} during WebDAV scan"
+            Result.failure(workDataOf(KEY_ERROR_MESSAGE to message))
         }
+    }
+
+    private suspend fun pruneRemovedWebDavSongs(validIds: List<String>) {
+        if (validIds.isEmpty()) {
+            songDao.deleteAllWebDavSongs()
+            return
+        }
+        if (validIds.size <= 900) {
+            songDao.deleteWebDavSongsNotIn(validIds)
+            return
+        }
+        val keepSet = validIds.toHashSet()
+        val staleIds = songDao.getAllSongsOnce()
+            .filter { it.sourceType == "WEBDAV" && !keepSet.contains(it.id) }
+            .map { it.id }
+        staleIds.chunked(500).forEach { chunk ->
+            songDao.deleteSongs(chunk)
+        }
+    }
+
+    internal data class RootCandidate(
+        val config: ServerConfig,
+        val url: String,
+        val isFallback: Boolean
+    )
+
+    internal fun buildCandidateRoots(config: ServerConfig): List<RootCandidate> {
+        val list = mutableListOf<RootCandidate>()
+        val configuredUrl = config.musicWebDavUrl.trimEnd('/')
+        val baseRootUrl = config.webDavBaseUrl.trimEnd('/')
+
+        list.add(RootCandidate(config, configuredUrl, isFallback = false))
+        if (!configuredUrl.equals(baseRootUrl, ignoreCase = true)) {
+            list.add(RootCandidate(config.copy(musicFolderPath = "/"), baseRootUrl, isFallback = true))
+        }
+        if (!config.useLegacyWebDav) {
+            val legacyConfig = config.copy(useLegacyWebDav = true, musicFolderPath = "/")
+            val legacyUrl = legacyConfig.webDavBaseUrl.trimEnd('/')
+            if (!legacyUrl.equals(baseRootUrl, ignoreCase = true)) {
+                list.add(RootCandidate(legacyConfig, legacyUrl, isFallback = true))
+            }
+        }
+        return list
     }
 
     private fun generateSongId(relativePath: String): String {
@@ -271,7 +368,7 @@ class LibraryScanWorker @AssistedInject constructor(
                 description = "Shows progress during Nextcloud WebDAV music scanning"
                 setShowBadge(false)
             }
-            notificationManager.createNotificationChannel(channel)
+            notificationManager?.createNotificationChannel(channel)
         }
     }
 
@@ -290,7 +387,7 @@ class LibraryScanWorker @AssistedInject constructor(
 
     private fun updateNotification(message: String, discovered: Int, processed: Int) {
         val notification = buildNotification(message, discovered, processed)
-        notificationManager.notify(NOTIFICATION_ID, notification)
+        notificationManager?.notify(NOTIFICATION_ID, notification)
     }
 
     private fun buildNotification(message: String, discovered: Int, processed: Int): Notification {

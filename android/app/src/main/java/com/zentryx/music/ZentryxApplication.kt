@@ -1,7 +1,6 @@
 package com.zentryx.music
 
 import android.app.Application
-import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
 import coil.ImageLoader
 import coil.ImageLoaderFactory
@@ -16,7 +15,7 @@ import javax.inject.Inject
  * Main Application class for Zentryx Music.
  * Annotated with @HiltAndroidApp to trigger Hilt's code generation.
  * Implements ImageLoaderFactory to provide a custom Coil ImageLoader.
- * Implements Configuration.Provider to configure WorkManager with HiltWorkerFactory.
+ * Implements Configuration.Provider to configure WorkManager with ZentryxWorkerFactory.
  */
 @HiltAndroidApp
 class ZentryxApplication : Application(), ImageLoaderFactory, Configuration.Provider {
@@ -25,11 +24,11 @@ class ZentryxApplication : Application(), ImageLoaderFactory, Configuration.Prov
     lateinit var okHttpClient: OkHttpClient
 
     @Inject
-    lateinit var workerFactory: HiltWorkerFactory
+    lateinit var zentryxWorkerFactory: ZentryxWorkerFactory
 
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder()
-            .setWorkerFactory(workerFactory)
+            .setWorkerFactory(zentryxWorkerFactory)
             .build()
 
     override fun newImageLoader(): ImageLoader {

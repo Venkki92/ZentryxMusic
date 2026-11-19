@@ -37,16 +37,28 @@ import {
   Flame,
   Smartphone,
   SlidersHorizontal,
+  HardDrive,
+  Upload,
+  Save,
+  UserCheck,
+  Bluetooth,
+  Layers,
+  MapPin,
+  Cpu,
 } from 'lucide-react';
-import { DspPreset16, DspSettings } from '../utils/dspConsole';
+import { AudioOutputRouteId, DspPreset16, DspSettings, SURROUND_MODES } from '../utils/dspConsole';
 import { DspConsolePanel } from './DspConsolePanel';
 import {
+  DriverProfile,
+  RoadtripPool,
+  RoadtripPlanResult,
   SteeringAction,
   SteeringKeyBindings,
+  SteeringLongPressBindings,
   STEERING_ACTION_LABELS,
   formatSteeringKeyLabel,
 } from '../utils/carConvenience';
-import { PWAInstallButton } from './PWAComponents';
+import { PWAInstallButton, AndroidApkDownloadButton } from './PWAComponents';
 import { DiagnosticLogEntry } from '../App';
 
 export interface SettingsPanelProps {
@@ -62,6 +74,13 @@ export interface SettingsPanelProps {
   onSaveCustomDspPreset: (name: string) => void;
   onDeleteCustomDspPreset: (presetId: string) => void;
   masterVolume: number;
+  activeCompareSlot?: 'A' | 'B';
+  slotBPresetName?: string | null;
+  onToggleCompareSlot?: () => void;
+  onSnapshotSlotB?: () => void;
+  onHoldBypassChange?: (bypassed: boolean) => void;
+  activeOutputRoute?: AudioOutputRouteId;
+  onSelectOutputRoute?: (route: AudioOutputRouteId) => void;
 
   // Attenuation
   isAttenuated: boolean;
@@ -126,6 +145,13 @@ export interface SettingsPanelProps {
   onClearOfflineStorage: () => void;
   storageQuota: { usageBytes: number; quotaBytes: number; persisted: boolean } | null;
   onRequestPersistentStorage: () => void;
+  offlineFolderName: string | null;
+  offlineFolderHasHandle: boolean;
+  offlineFolderPermission: 'granted' | 'prompt' | 'denied';
+  isFolderPickerSupported: boolean;
+  onPickOfflineFolder: () => void;
+  onAuthorizeOfflineFolder: () => void;
+  onClearOfflineFolder: () => void;
 
   // Category 1: Startup & App
   autoResumeOnBoot: boolean;
@@ -142,10 +168,37 @@ export interface SettingsPanelProps {
   onToggleWarmAmberFilter: (enabled: boolean) => void;
   driverSafeMode: boolean;
   onToggleDriverSafeMode: (enabled: boolean) => void;
+  dualPaneCockpit: boolean;
+  onToggleDualPaneCockpit: (enabled: boolean) => void;
+  driveModeAutoSpeedKmH: number;
+  onChangeDriveModeAutoSpeedKmH: (speedKmH: number) => void;
   swcBindings: SteeringKeyBindings;
   onUpdateSwcBinding: (action: SteeringAction, keyBinding: string) => void;
+  swcLongPressBindings: SteeringLongPressBindings;
+  onUpdateSwcLongPressBinding: (action: SteeringAction, keyBinding: string) => void;
   onResetSwcBindings: () => void;
   onListeningSwcChange?: (listening: boolean) => void;
+
+  // Multi-Profile Driver Slots
+  driverProfiles: DriverProfile[];
+  activeDriverProfileId: string;
+  onSelectDriverProfile: (profileId: string) => void;
+  onSaveCurrentToDriverProfile: (profileId: string) => void;
+
+  // Headunit Hardware, Android Automation & Floating PiP Bar
+  autoPlayOnBluetooth: boolean;
+  onToggleAutoPlayOnBluetooth: (enabled: boolean) => void;
+  duckOnReverseGear: boolean;
+  onToggleDuckOnReverseGear: (enabled: boolean) => void;
+  globalAudioSessionAttach: boolean;
+  onToggleGlobalAudioSessionAttach: (enabled: boolean) => void;
+  floatingMiniBarOpen: boolean;
+  onToggleFloatingMiniBar: (open: boolean) => void;
+  getAudioContext?: () => AudioContext | null;
+
+  // Offline Roadtrip Budget Planner
+  onBuildRoadtripPlan: (hours: number, pool: RoadtripPool) => RoadtripPlanResult<{ id: string }>;
+  onPinRoadtripOffline: (hours: number, pool: RoadtripPool) => void;
 
   // Category 3: Audio Polish & Smart Rolling Cache
   replayGainEnabled: boolean;
@@ -156,6 +209,16 @@ export interface SettingsPanelProps {
   onToggleSmartRollingCache: (enabled: boolean) => void;
   offlineCacheCapMb: number;
   onChangeOfflineCacheCapMb: (mb: number) => void;
+
+  // Category 4: Local USB/Device Folder Scanner & Portable Tune JSON/Cloud Backup
+  localTrackCount: number;
+  onScanLocalFolder: () => void;
+  onScanLocalInputFiles: (files: FileList | null) => void;
+  onExportBackupJson: () => void;
+  onImportBackupJson: (file: File) => void;
+  onPushBackupCloud: () => void;
+  onPullBackupCloud: () => void;
+  isSyncingBackup?: boolean;
 
   // Diagnostics & Wire Logs
   diagnosticLogs: DiagnosticLogEntry[];
@@ -181,6 +244,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onSaveCustomDspPreset,
   onDeleteCustomDspPreset,
   masterVolume,
+  activeCompareSlot,
+  slotBPresetName,
+  onToggleCompareSlot,
+  onSnapshotSlotB,
+  onHoldBypassChange,
+  activeOutputRoute,
+  onSelectOutputRoute,
 
   isAttenuated,
   onToggleAttenuation,
@@ -234,6 +304,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onClearOfflineStorage,
   storageQuota,
   onRequestPersistentStorage,
+  offlineFolderName,
+  offlineFolderHasHandle,
+  offlineFolderPermission,
+  isFolderPickerSupported,
+  onPickOfflineFolder,
+  onAuthorizeOfflineFolder,
+  onClearOfflineFolder,
 
   autoResumeOnBoot,
   onToggleAutoResumeOnBoot,
@@ -248,10 +325,34 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onToggleWarmAmberFilter,
   driverSafeMode,
   onToggleDriverSafeMode,
+  dualPaneCockpit,
+  onToggleDualPaneCockpit,
+  driveModeAutoSpeedKmH,
+  onChangeDriveModeAutoSpeedKmH,
   swcBindings,
   onUpdateSwcBinding,
+  swcLongPressBindings,
+  onUpdateSwcLongPressBinding,
   onResetSwcBindings,
   onListeningSwcChange,
+
+  driverProfiles,
+  activeDriverProfileId,
+  onSelectDriverProfile,
+  onSaveCurrentToDriverProfile,
+
+  autoPlayOnBluetooth,
+  onToggleAutoPlayOnBluetooth,
+  duckOnReverseGear,
+  onToggleDuckOnReverseGear,
+  globalAudioSessionAttach,
+  onToggleGlobalAudioSessionAttach,
+  floatingMiniBarOpen,
+  onToggleFloatingMiniBar,
+  getAudioContext,
+
+  onBuildRoadtripPlan,
+  onPinRoadtripOffline,
 
   replayGainEnabled,
   onToggleReplayGain,
@@ -261,6 +362,15 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onToggleSmartRollingCache,
   offlineCacheCapMb,
   onChangeOfflineCacheCapMb,
+
+  localTrackCount,
+  onScanLocalFolder,
+  onScanLocalInputFiles,
+  onExportBackupJson,
+  onImportBackupJson,
+  onPushBackupCloud,
+  onPullBackupCloud,
+  isSyncingBackup = false,
 
   diagnosticLogs,
   onRunDiagnostics,
@@ -272,6 +382,8 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onCopyDiagnosticReport,
   copiedReport,
 }) => {
+  const backupFileInputRef = React.useRef<HTMLInputElement | null>(null);
+  const localUsbInputRef = React.useRef<HTMLInputElement | null>(null);
   const [activeCategory, setActiveCategory] = useState<
     'acoustics' | 'vehicle' | 'podcasts' | 'cloud' | 'offline' | 'diagnostics'
   >('acoustics');
@@ -279,7 +391,15 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const [diagTab, setDiagTab] = useState<'client' | 'server'>('client');
   const [diagFilter, setDiagFilter] = useState<'all' | 'errors' | 'success'>('all');
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
+  const [swcEditMode, setSwcEditMode] = useState<'short' | 'long'>('short');
   const [listeningAction, setListeningAction] = useState<SteeringAction | null>(null);
+  const [roadtripHours, setRoadtripHours] = useState<number>(3);
+  const [roadtripPool, setRoadtripPool] = useState<RoadtripPool>('favorites_unheard');
+
+  const roadtripPlan = React.useMemo(
+    () => onBuildRoadtripPlan(roadtripHours, roadtripPool),
+    [onBuildRoadtripPlan, roadtripHours, roadtripPool]
+  );
 
   React.useEffect(() => {
     onListeningSwcChange?.(listeningAction !== null);
@@ -294,7 +414,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       }
       const captured = e.code && e.code !== 'Unidentified' ? e.code : e.key;
       if (captured) {
-        onUpdateSwcBinding(listeningAction, captured);
+        if (swcEditMode === 'long') {
+          onUpdateSwcLongPressBinding(listeningAction, captured);
+        } else {
+          onUpdateSwcBinding(listeningAction, captured);
+        }
       }
       setListeningAction(null);
     };
@@ -304,7 +428,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       window.removeEventListener('keydown', handleCaptureKey, true);
       onListeningSwcChange?.(false);
     };
-  }, [listeningAction, onUpdateSwcBinding, onListeningSwcChange]);
+  }, [listeningAction, swcEditMode, onUpdateSwcBinding, onUpdateSwcLongPressBinding, onListeningSwcChange]);
 
   const formatBytes = (bytes: number) => {
     if (bytes === 0) return '0 B';
@@ -350,6 +474,51 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         })}
       </div>
 
+      {/* Multi-Profile Driver Slot Bar (1-Tap Atomic Cockpit Switch) */}
+      <div className="bg-[#0b1120] border border-slate-800/80 rounded-2xl p-3.5 sm:p-4 shadow-xl space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-300">
+            <UserCheck className="w-4 h-4" style={{ color: accentHex }} />
+            <span>Driver Cockpit Profiles</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => onSaveCurrentToDriverProfile(activeDriverProfileId)}
+            className="min-h-[34px] px-3 py-1 rounded-lg text-[11px] font-bold bg-black/60 border border-slate-700 text-slate-200 hover:text-white active:scale-95 transition-transform"
+          >
+            Save Current Tune to Active Slot
+          </button>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          {driverProfiles.map((profile) => {
+            const isSel = profile.id === activeDriverProfileId;
+            return (
+              <button
+                key={profile.id}
+                type="button"
+                onClick={() => onSelectDriverProfile(profile.id)}
+                className={`min-h-[56px] p-3 rounded-xl border text-left transition-transform active:scale-95 ${
+                  isSel
+                    ? 'bg-slate-800/90 text-white shadow'
+                    : 'bg-black/40 border-slate-800 text-slate-400 hover:text-white hover:border-slate-700'
+                }`}
+                style={isSel ? { borderColor: accentHex } : {}}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold" style={isSel ? { color: accentHex } : {}}>
+                    {profile.name}
+                  </span>
+                  <span className="text-[10px] font-mono text-slate-400">
+                    {SURROUND_MODES[profile.surroundMode]?.shortLabel || 'Direct'}
+                  </span>
+                </div>
+                <div className="text-[10px] text-slate-400 mt-0.5 truncate">{profile.subtitle}</div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* ============================================================== */}
       {/* CATEGORY 1: PRO HEADUNIT ESP/DSP CONSOLE & PLAYBACK POLISH     */}
       {/* ============================================================== */}
@@ -363,6 +532,15 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             onSaveCustomPreset={onSaveCustomDspPreset}
             onDeleteCustomPreset={onDeleteCustomDspPreset}
             masterVolume={masterVolume}
+            currentSpeedKmH={currentGpsSpeed}
+            activeCompareSlot={activeCompareSlot}
+            slotBPresetName={slotBPresetName}
+            onToggleCompareSlot={onToggleCompareSlot}
+            onSnapshotSlotB={onSnapshotSlotB}
+            onHoldBypassChange={onHoldBypassChange}
+            activeOutputRoute={activeOutputRoute}
+            onSelectOutputRoute={onSelectOutputRoute}
+            getAudioContext={getAudioContext}
           />
 
           {/* Quick Talk Attenuation, ReplayGain & Crossfade */}
@@ -418,16 +596,16 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               </button>
             </div>
 
-            {/* Optional Track Crossfade (0s = Off / Gapless up to 6s) */}
-            <div className="p-4 sm:p-5 space-y-2.5">
+            {/* Optional Track Crossfade (0s = Off / Gapless up to 8s) */}
+            <div className="p-4 sm:p-5 space-y-3">
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-sm font-bold text-white flex items-center gap-2">
                     <SlidersHorizontal className="w-4 h-4" style={{ color: accentHex }} />
-                    <span>Smooth Track Crossfade</span>
+                    <span>Smooth Track Crossfade (DJ Overlap)</span>
                   </div>
                   <p className="text-xs text-slate-400">
-                    Equal-power fade across track changes (0s = instant gapless playback).
+                    Equal-power fade across track changes (0s = instant gapless playback, up to 8s).
                   </p>
                 </div>
                 <span className="text-xs font-mono font-bold px-2.5 py-1 rounded-lg bg-black/60 border border-slate-800 text-white">
@@ -438,13 +616,31 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 type="range"
                 aria-label="Crossfade Duration Seconds"
                 min={0}
-                max={6}
+                max={8}
                 step={1}
                 value={crossfadeSeconds}
                 onChange={(e) => onChangeCrossfadeSeconds(Number(e.target.value))}
                 className="w-full h-2 bg-slate-800 rounded-lg cursor-pointer"
                 style={{ accentColor: accentHex }}
               />
+              <div className="flex flex-wrap gap-1.5">
+                {[0, 2, 4, 6, 8].map((sec) => {
+                  const isSel = crossfadeSeconds === sec;
+                  return (
+                    <button
+                      key={sec}
+                      type="button"
+                      onClick={() => onChangeCrossfadeSeconds(sec)}
+                      className={`px-3 py-1 rounded-lg text-xs font-mono font-bold transition-all ${
+                        isSel ? 'text-black shadow' : 'bg-black/40 text-slate-400 border border-slate-800 hover:text-white'
+                      }`}
+                      style={isSel ? { backgroundColor: accentHex } : {}}
+                    >
+                      {sec === 0 ? 'Off' : `${sec}s`}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>
@@ -738,6 +934,20 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               </div>
             )}
 
+            {/* Native Android Headunit APK Download */}
+            <div className="p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-0.5">
+                <div className="text-sm font-bold text-white flex items-center gap-2">
+                  <Download className="w-4 h-4" style={{ color: accentHex }} />
+                  <span>Native Android Headunit APK (Media3 + Hardware DSP)</span>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Compiled ARMv7/ARM64 APK for AutoChips AC8259P / Android 8–14 headunits (v0.0.1, auto-incrementing build code).
+                </p>
+              </div>
+              <AndroidApkDownloadButton accentHex={accentHex} />
+            </div>
+
             {/* Standalone Headunit PWA Launcher Mode */}
             <div className="p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="space-y-0.5">
@@ -864,7 +1074,68 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 </button>
               </div>
 
-              {/* Live Hardware GPS Sensor Telemetry */}
+            {/* Dual-Pane Widescreen Cockpit & Drive Mode Auto-Engage */}
+            <div className="p-4 sm:p-5 flex items-center justify-between gap-4">
+              <div className="space-y-0.5">
+                <div className="text-sm font-bold text-white flex items-center gap-2">
+                  <span>Dual-Pane Widescreen Cockpit</span>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">
+                    Wide Screens
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Pins Now Playing artwork &amp; transport controls alongside your Library on wide landscape displays.
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Toggle Dual-Pane Widescreen Cockpit"
+                onClick={() => onToggleDualPaneCockpit(!dualPaneCockpit)}
+                className={`w-12 h-6 rounded-full p-1 transition-colors shrink-0 ${
+                  dualPaneCockpit ? 'bg-lime-400' : 'bg-slate-700'
+                }`}
+                style={dualPaneCockpit ? { backgroundColor: accentHex } : {}}
+              >
+                <div
+                  className={`w-4 h-4 rounded-full bg-black transition-transform ${
+                    dualPaneCockpit ? 'translate-x-6' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-bold text-white">Drive Mode Auto-Engage Speed</div>
+                <p className="text-xs text-slate-400">
+                  Automatically opens large-target Drive HUD above a GPS speed threshold.
+                </p>
+              </div>
+              <div className="flex bg-black/60 p-1 rounded-xl border border-slate-800 text-xs shrink-0">
+                {[
+                  { val: 0, label: 'Manual' },
+                  { val: 15, label: '15 km/h' },
+                  { val: 30, label: '30 km/h' },
+                ].map((opt) => {
+                  const isSel = driveModeAutoSpeedKmH === opt.val;
+                  return (
+                    <button
+                      key={opt.val}
+                      type="button"
+                      onClick={() => onChangeDriveModeAutoSpeedKmH(opt.val)}
+                      className={`px-3 py-1.5 rounded-lg font-bold transition-all ${
+                        isSel ? 'text-black shadow' : 'text-slate-400 hover:text-white'
+                      }`}
+                      style={isSel ? { backgroundColor: accentHex } : {}}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Live Hardware GPS Sensor Telemetry */}
               <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/50 text-xs">
                 <span className="text-slate-400">
                   Live Vehicle GPS Telemetry:{' '}
@@ -891,9 +1162,120 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             </div>
           </div>
 
-          {/* Steering Wheel CANBUS Key Learner */}
+          {/* Android Headunit Hardware Automation & Floating Cockpit Bar */}
+          <div className="bg-[#0b1120] border border-slate-800/80 rounded-2xl divide-y divide-slate-800/60 overflow-hidden shadow-xl">
+            <div className="p-4 sm:p-5 flex items-center justify-between gap-4">
+              <div className="space-y-0.5">
+                <div className="text-sm font-bold text-white flex items-center gap-2">
+                  <Bluetooth className="w-4 h-4" style={{ color: accentHex }} />
+                  <span>Auto-Play on Bluetooth Headunit Connect</span>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Automatically resumes playback when your Android headunit pairs with your car Bluetooth A2DP sink.
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Toggle Auto-Play on Bluetooth Connect"
+                onClick={() => onToggleAutoPlayOnBluetooth(!autoPlayOnBluetooth)}
+                className={`w-12 h-6 rounded-full p-1 transition-colors shrink-0 ${
+                  autoPlayOnBluetooth ? '' : 'bg-slate-700'
+                }`}
+                style={autoPlayOnBluetooth ? { backgroundColor: accentHex } : {}}
+              >
+                <div
+                  className={`w-4 h-4 rounded-full bg-black transition-transform ${
+                    autoPlayOnBluetooth ? 'translate-x-6' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="p-4 sm:p-5 flex items-center justify-between gap-4">
+              <div className="space-y-0.5">
+                <div className="text-sm font-bold text-white flex items-center gap-2">
+                  <Car className="w-4 h-4" style={{ color: accentHex }} />
+                  <span>Auto-Duck Volume on Reverse Gear (-20 dB)</span>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Listens for Android headunit CANBUS reverse camera intents so parking sensors are always audible.
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Toggle Duck on Reverse Gear"
+                onClick={() => onToggleDuckOnReverseGear(!duckOnReverseGear)}
+                className={`w-12 h-6 rounded-full p-1 transition-colors shrink-0 ${
+                  duckOnReverseGear ? '' : 'bg-slate-700'
+                }`}
+                style={duckOnReverseGear ? { backgroundColor: accentHex } : {}}
+              >
+                <div
+                  className={`w-4 h-4 rounded-full bg-black transition-transform ${
+                    duckOnReverseGear ? 'translate-x-6' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="p-4 sm:p-5 flex items-center justify-between gap-4">
+              <div className="space-y-0.5">
+                <div className="text-sm font-bold text-white flex items-center gap-2">
+                  <Cpu className="w-4 h-4" style={{ color: accentHex }} />
+                  <span>Global System-Wide Equalizer (Android Session 0)</span>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Attaches Android hardware EQ &amp; BassBoost to global output mix so Navigation, Spotify &amp; YouTube inherit your speaker tune.
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Toggle Global System EQ Session 0"
+                onClick={() => onToggleGlobalAudioSessionAttach(!globalAudioSessionAttach)}
+                className={`w-12 h-6 rounded-full p-1 transition-colors shrink-0 ${
+                  globalAudioSessionAttach ? '' : 'bg-slate-700'
+                }`}
+                style={globalAudioSessionAttach ? { backgroundColor: accentHex } : {}}
+              >
+                <div
+                  className={`w-4 h-4 rounded-full bg-black transition-transform ${
+                    globalAudioSessionAttach ? 'translate-x-6' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="p-4 sm:p-5 flex items-center justify-between gap-4">
+              <div className="space-y-0.5">
+                <div className="text-sm font-bold text-white flex items-center gap-2">
+                  <Layers className="w-4 h-4" style={{ color: accentHex }} />
+                  <span>Floating Translucent Cockpit PiP Bar</span>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Shows a compact draggable mini transport widget (Android APK draws directly over Google Maps &amp; Waze).
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Toggle Floating Cockpit PiP Bar"
+                onClick={() => onToggleFloatingMiniBar(!floatingMiniBarOpen)}
+                className={`w-12 h-6 rounded-full p-1 transition-colors shrink-0 ${
+                  floatingMiniBarOpen ? '' : 'bg-slate-700'
+                }`}
+                style={floatingMiniBarOpen ? { backgroundColor: accentHex } : {}}
+              >
+                <div
+                  className={`w-4 h-4 rounded-full bg-black transition-transform ${
+                    floatingMiniBarOpen ? 'translate-x-6' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
+
+          {/* Steering Wheel CANBUS Key Learner (Short-Press & Long-Press Combos) */}
           <div className="bg-[#0b1120] border border-slate-800/80 rounded-2xl p-5 sm:p-6 shadow-xl space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800/60">
+            <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800/60">
               <div className="flex items-center gap-3">
                 <div
                   className="w-10 h-10 rounded-xl flex items-center justify-center border"
@@ -902,25 +1284,58 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   <Keyboard className="w-5 h-5" style={{ color: accentHex }} />
                 </div>
                 <div>
-                  <h3 className="text-sm font-bold text-white">Steering Wheel Key Learner (CANBUS Remapper)</h3>
+                  <h3 className="text-sm font-bold text-white">Steering Wheel Key Learner (Short &amp; Long-Press)</h3>
                   <p className="text-xs text-slate-400">
-                    Tap Bind, then press any steering wheel or Android headunit media button to remap it.
+                    Assign both tap and hold (&ge; 600 ms) actions for CANBUS steering wheel buttons.
                   </p>
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={onResetSwcBindings}
-                className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors"
-              >
-                Reset Defaults
-              </button>
+              <div className="flex items-center gap-2">
+                <div className="inline-flex rounded-xl bg-black/60 border border-slate-800 p-1 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSwcEditMode('short');
+                      setListeningAction(null);
+                    }}
+                    className={`px-3 py-1 rounded-lg font-bold transition-colors ${
+                      swcEditMode === 'short' ? 'text-black' : 'text-slate-400 hover:text-white'
+                    }`}
+                    style={swcEditMode === 'short' ? { backgroundColor: accentHex } : {}}
+                  >
+                    Short Press
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSwcEditMode('long');
+                      setListeningAction(null);
+                    }}
+                    className={`px-3 py-1 rounded-lg font-bold transition-colors ${
+                      swcEditMode === 'long' ? 'text-black' : 'text-slate-400 hover:text-white'
+                    }`}
+                    style={swcEditMode === 'long' ? { backgroundColor: accentHex } : {}}
+                  >
+                    Long Press
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={onResetSwcBindings}
+                  className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors"
+                >
+                  Reset
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               {(Object.keys(STEERING_ACTION_LABELS) as SteeringAction[]).map((action) => {
                 const isListening = listeningAction === action;
+                const currentKey =
+                  swcEditMode === 'long' ? swcLongPressBindings[action] : swcBindings[action];
                 return (
                   <div
                     key={action}
@@ -931,20 +1346,21 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                         {STEERING_ACTION_LABELS[action]}
                       </div>
                       <div className="text-[11px] font-mono text-slate-400 mt-0.5">
-                        Key: <span className="text-slate-200">{formatSteeringKeyLabel(swcBindings[action])}</span>
+                        {swcEditMode === 'long' ? 'Hold: ' : 'Tap: '}
+                        <span className="text-slate-200">{formatSteeringKeyLabel(currentKey)}</span>
                       </div>
                     </div>
 
                     <button
                       type="button"
                       onClick={() => setListeningAction(isListening ? null : action)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all shrink-0 ${
+                      className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-bold transition-all shrink-0 ${
                         isListening
                           ? 'bg-amber-400 text-black animate-pulse'
                           : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
                       }`}
                     >
-                      {isListening ? 'Press Button...' : 'Bind'}
+                      {isListening ? 'Press Key...' : 'Bind'}
                     </button>
                   </div>
                 );
@@ -1066,6 +1482,229 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       {/* ============================================================== */}
       {activeCategory === 'offline' && (
         <div className="space-y-6 animate-in fade-in duration-150">
+          {/* Offline Roadtrip Budget Planner */}
+          <div className="bg-[#0b1120] border border-slate-800/80 rounded-2xl p-5 sm:p-6 shadow-xl space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800/60">
+              <div className="flex items-center gap-3">
+                <div
+                  className="w-10 h-10 rounded-xl flex items-center justify-center border shrink-0"
+                  style={{ backgroundColor: `${accentHex}18`, borderColor: `${accentHex}44` }}
+                >
+                  <MapPin className="w-5 h-5" style={{ color: accentHex }} />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Offline Roadtrip Budget Planner</h3>
+                  <p className="text-xs text-slate-400">
+                    Pick your trip duration &amp; mix pool — pins tracks, tags, and cover art offline in one tap.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={isBatchSyncing || roadtripPlan.tracks.length === 0}
+                onClick={() => onPinRoadtripOffline(roadtripHours, roadtripPool)}
+                className="min-h-[44px] px-4 py-2 rounded-xl text-xs font-bold text-black flex items-center gap-2 transition-transform active:scale-95 disabled:opacity-40"
+                style={{ backgroundColor: accentHex }}
+              >
+                <Download className="w-4 h-4" />
+                <span>
+                  Pin {roadtripHours}h Roadtrip ({roadtripPlan.toDownloadCount} new)
+                </span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <div className="text-xs font-bold text-slate-300">Trip Duration</div>
+                <div className="grid grid-cols-5 gap-1.5">
+                  {[1, 2, 3, 5, 8].map((hrs) => {
+                    const isSel = roadtripHours === hrs;
+                    return (
+                      <button
+                        key={hrs}
+                        type="button"
+                        onClick={() => setRoadtripHours(hrs)}
+                        className={`min-h-[40px] rounded-xl text-xs font-mono font-bold border transition-colors ${
+                          isSel
+                            ? 'text-black border-transparent shadow'
+                            : 'bg-black/40 border-slate-800 text-slate-300 hover:text-white'
+                        }`}
+                        style={isSel ? { backgroundColor: accentHex } : {}}
+                      >
+                        {hrs}h
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <div className="text-xs font-bold text-slate-300">Selection Pool</div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {(
+                    [
+                      { id: 'favorites_unheard', label: 'Favorites + Unheard' },
+                      { id: 'favorites', label: 'Favorites Only' },
+                      { id: 'most_played', label: 'Most Played' },
+                      { id: 'all', label: 'Full Library' },
+                    ] as const
+                  ).map((opt) => {
+                    const isSel = roadtripPool === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setRoadtripPool(opt.id)}
+                        className={`min-h-[38px] px-2.5 py-1.5 rounded-xl text-[11px] font-bold border transition-colors truncate ${
+                          isSel
+                            ? 'bg-slate-800 text-white'
+                            : 'bg-black/40 border-slate-800 text-slate-400 hover:text-white'
+                        }`}
+                        style={isSel ? { borderColor: accentHex, color: accentHex } : {}}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2.5 p-3 rounded-xl bg-black/40 border border-slate-800 text-center">
+              <div>
+                <div className="text-[10px] font-mono uppercase text-slate-500">Planned Tracks</div>
+                <div className="text-sm font-mono font-bold text-white tabular-nums mt-0.5">
+                  {roadtripPlan.tracks.length} ({roadtripPlan.totalMinutes} min)
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] font-mono uppercase text-slate-500">Est. Storage</div>
+                <div className="text-sm font-mono font-bold tabular-nums mt-0.5" style={{ color: accentHex }}>
+                  {formatBytes(roadtripPlan.totalBytes)}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] font-mono uppercase text-slate-500">Already Offline</div>
+                <div className="text-sm font-mono font-bold text-slate-200 tabular-nums mt-0.5">
+                  {roadtripPlan.alreadyOfflineCount} / {roadtripPlan.tracks.length}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Custom Local Folder Target for Offline Track Downloads */}
+          <div className="bg-[#0b1120] border border-slate-800/80 rounded-2xl p-5 sm:p-6 shadow-xl space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="space-y-1 min-w-0">
+                <div className="text-sm font-bold text-white flex items-center gap-2">
+                  <FolderCheck className="w-4 h-4 shrink-0" style={{ color: accentHex }} />
+                  <span>Offline Track Download Folder</span>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Choose a folder on your device, USB drive, or SD card where downloaded offline tracks are also written.
+                </p>
+                <div className="text-xs font-mono text-slate-300 pt-1 truncate">
+                  Active Target:{' '}
+                  <strong style={{ color: offlineFolderName ? accentHex : '#e2e8f0' }}>
+                    {offlineFolderName
+                      ? `${offlineFolderName} (${offlineFolderPermission === 'granted' ? 'Writable' : 'Permission Needed'})`
+                      : 'Browser IndexedDB Cache (Default)'}
+                  </strong>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap shrink-0">
+                <button
+                  type="button"
+                  onClick={onPickOfflineFolder}
+                  disabled={!isFolderPickerSupported}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-black flex items-center gap-2 transition-all shadow active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
+                  style={{ backgroundColor: accentHex }}
+                >
+                  <FolderSearch className="w-4 h-4" />
+                  Select Folder
+                </button>
+
+                {offlineFolderHasHandle && offlineFolderPermission !== 'granted' && (
+                  <button
+                    type="button"
+                    onClick={onAuthorizeOfflineFolder}
+                    className="px-3.5 py-2 rounded-xl text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30 transition-colors"
+                  >
+                    Re-authorize Folder
+                  </button>
+                )}
+
+                {offlineFolderName && (
+                  <button
+                    type="button"
+                    onClick={onClearOfflineFolder}
+                    className="px-3.5 py-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors"
+                  >
+                    Use Default Cache
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {!isFolderPickerSupported && (
+              <div className="text-[11px] text-amber-300/90 bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-2">
+                Direct local directory picking requires Chrome/Edge on HTTPS (top-level tab) or the Native Android Headunit APK (Storage Access Framework). Tracks remain safely cached in IndexedDB.
+              </div>
+            )}
+          </div>
+
+          {/* Local USB / MicroSD / Device Folder Audio Scanner */}
+          <div className="bg-[#0b1120] border border-slate-800/80 rounded-2xl p-5 sm:p-6 shadow-xl space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="space-y-1 min-w-0">
+                <div className="text-sm font-bold text-white flex items-center gap-2">
+                  <HardDrive className="w-4 h-4 shrink-0" style={{ color: accentHex }} />
+                  <span>Local USB / MicroSD &amp; Device Audio Scanner</span>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-300">
+                    {localTrackCount} local tracks
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Play MP3, FLAC, WAV, M4A, or Opus directly from USB thumb drives or SD storage with instant ID3/Vorbis/ReplayGain extraction.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap shrink-0">
+                <input
+                  ref={localUsbInputRef}
+                  type="file"
+                  className="hidden"
+                  multiple
+                  // @ts-expect-error webkitdirectory is supported across Chromium/Android WebView
+                  webkitdirectory=""
+                  accept="audio/*"
+                  onChange={(e) => {
+                    onScanLocalInputFiles(e.target.files);
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={onScanLocalFolder}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-black flex items-center gap-2 transition-all shadow active:scale-95"
+                  style={{ backgroundColor: accentHex }}
+                >
+                  <FolderOpen className="w-4 h-4" />
+                  Scan USB / Device Folder
+                </button>
+                <button
+                  type="button"
+                  onClick={() => localUsbInputRef.current?.click()}
+                  className="px-3.5 py-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors"
+                >
+                  Select Files
+                </button>
+              </div>
+            </div>
+          </div>
+
           <div className="bg-[#0b1120] border border-slate-800/80 rounded-2xl p-5 sm:p-6 shadow-xl space-y-5">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800/60">
               <div>
@@ -1327,6 +1966,74 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                     autoFetchMetadata ? 'translate-x-6' : 'translate-x-0'
                   }`}
                 />
+              </button>
+            </div>
+          </div>
+
+          {/* Portable DSP Curve & Headunit Tune Backup (.json & Nextcloud /ZentryxBackup) */}
+          <div className="bg-[#0b1120] border border-slate-800/80 rounded-2xl p-5 sm:p-6 shadow-xl space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800/60">
+              <div className="space-y-0.5">
+                <div className="text-sm font-bold text-white flex items-center gap-2">
+                  <Save className="w-4 h-4" style={{ color: accentHex }} />
+                  <span>Portable DSP &amp; Tune Backup (.json)</span>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Export or restore your 16-band EQ, cross-overs, custom presets, SWC keys, and ReplayGain settings between car &amp; Android APK.
+                </p>
+              </div>
+            </div>
+
+            <input
+              ref={backupFileInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) onImportBackupJson(file);
+                e.target.value = '';
+              }}
+            />
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              <button
+                type="button"
+                onClick={onExportBackupJson}
+                className="px-3 py-2.5 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 flex items-center justify-center gap-1.5 transition-colors active:scale-95"
+              >
+                <Download className="w-3.5 h-3.5" style={{ color: accentHex }} />
+                Export .json
+              </button>
+
+              <button
+                type="button"
+                onClick={() => backupFileInputRef.current?.click()}
+                className="px-3 py-2.5 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 flex items-center justify-center gap-1.5 transition-colors active:scale-95"
+              >
+                <Upload className="w-3.5 h-3.5" style={{ color: accentHex }} />
+                Import .json
+              </button>
+
+              <button
+                type="button"
+                disabled={!isLoggedIn || isSyncingBackup}
+                onClick={onPushBackupCloud}
+                className="px-3 py-2.5 rounded-xl text-xs font-bold text-black flex items-center justify-center gap-1.5 transition-all active:scale-95 disabled:opacity-40"
+                style={{ backgroundColor: accentHex }}
+              >
+                <Cloud className="w-3.5 h-3.5" />
+                Cloud Save
+              </button>
+
+              <button
+                type="button"
+                disabled={!isLoggedIn || isSyncingBackup}
+                onClick={onPullBackupCloud}
+                className="px-3 py-2.5 rounded-xl text-xs font-bold bg-black/60 hover:bg-slate-800 text-slate-200 border border-slate-700 flex items-center justify-center gap-1.5 transition-colors active:scale-95 disabled:opacity-40"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isSyncingBackup ? 'animate-spin' : ''}`} />
+                Cloud Restore
               </button>
             </div>
           </div>

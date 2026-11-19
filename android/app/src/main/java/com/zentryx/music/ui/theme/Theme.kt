@@ -3,7 +3,6 @@ package com.zentryx.music.ui.theme
 import android.app.Activity
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
@@ -12,12 +11,13 @@ import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 import com.zentryx.music.player.CockpitThemeMode
 import com.zentryx.music.player.MbuxAccentColor
-import java.util.Calendar
+import com.zentryx.music.player.SolarCalculator
 
 @Composable
 fun ZentryxTheme(
     accentColor: MbuxAccentColor = MbuxAccentColor.LIME,
     cockpitThemeMode: CockpitThemeMode = CockpitThemeMode.NIGHT,
+    isSolarDaylight: Boolean? = null,
     content: @Composable () -> Unit
 ) {
     val activeAccent = Color(accentColor.hexColor)
@@ -25,10 +25,7 @@ fun ZentryxTheme(
     val useDayMode = when (cockpitThemeMode) {
         CockpitThemeMode.DAY -> true
         CockpitThemeMode.NIGHT -> false
-        CockpitThemeMode.AUTO -> {
-            val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
-            hour in 7..17
-        }
+        CockpitThemeMode.AUTO -> isSolarDaylight ?: SolarCalculator.isDaylight(null, null)
     }
 
     val darkScheme = darkColorScheme(
@@ -52,18 +49,18 @@ fun ZentryxTheme(
     val daylightCockpitScheme = darkColorScheme(
         primary = activeAccent,
         onPrimary = Color.Black,
-        primaryContainer = activeAccent.copy(alpha = 0.28f),
+        primaryContainer = activeAccent.copy(alpha = 0.30f),
         onPrimaryContainer = Color.White,
         secondary = activeAccent,
         onSecondary = Color.Black,
-        background = Color(0xFF0D1427),
+        background = Color(0xFF10182C),
         onBackground = Color.White,
-        surface = Color(0xFF162038),
+        surface = Color(0xFF17223B),
         onSurface = Color.White,
-        surfaceVariant = Color(0xFF1E293B),
-        onSurfaceVariant = Color(0xFFCBD5E1),
-        outline = activeAccent.copy(alpha = 0.45f),
-        outlineVariant = Color(0xFF334155),
+        surfaceVariant = Color(0xFF21304F),
+        onSurfaceVariant = Color(0xFFE2E8F0),
+        outline = activeAccent.copy(alpha = 0.55f),
+        outlineVariant = Color(0xFF3B4D70),
         error = StatusError
     )
 
@@ -73,8 +70,11 @@ fun ZentryxTheme(
     if (!view.isInEditMode) {
         SideEffect {
             val window = (view.context as? Activity)?.window ?: return@SideEffect
-            window.statusBarColor = colorScheme.background.toArgb()
-            window.navigationBarColor = colorScheme.background.toArgb()
+            @Suppress("DEPRECATION")
+            run {
+                window.statusBarColor = colorScheme.background.toArgb()
+                window.navigationBarColor = colorScheme.background.toArgb()
+            }
             WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
         }
     }

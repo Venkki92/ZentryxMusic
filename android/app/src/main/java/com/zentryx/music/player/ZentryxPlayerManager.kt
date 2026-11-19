@@ -2,6 +2,7 @@ package com.zentryx.music.player
 
 import android.content.Context
 import android.net.Uri
+import android.os.Handler
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -10,15 +11,26 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.cache.CacheWriter
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.audio.AudioRendererEventListener
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.zentryx.music.dsp.AndroidDspAudioEngine
+import com.zentryx.music.dsp.AudioOutputRoute
+import com.zentryx.music.dsp.CarDspAudioProcessor
+import com.zentryx.music.dsp.matchPresetForTrack
 import com.zentryx.music.models.PlaybackState
 import com.zentryx.music.models.RepeatMode
 import com.zentryx.music.models.Song
 import com.zentryx.music.repository.MusicRepository
 import com.zentryx.music.visualizer.AudioFftCapturer
+import com.zentryx.music.widget.ZentryxWidgetProvider
+import dagger.Lazy
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -33,14 +45,19 @@ import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
+import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.math.min
+import kotlin.math.log10
+import kotlin.math.pow
+import kotlin.math.sqrt
 
 /**
  * Core Media3 ExoPlayer playback engine for Zentryx Music.
- * Manages audio focus ducking, gapless transitions, hardware DSP + FFT visualizer session binding,
- * GPS SDVC gain scaling, -20dB talk attenuation, playback speed, sleep timer fade-out, and soft-start resume.
+ * Routes PCM through CarDspAudioProcessor (real Butterworth HPF, L/R ms Time Alignment, Mid/Side Stereo Width),
+ * attaches hardware 16-Band DynamicsProcessing + GALA SDVC boost dB stage + FFT visualizer,
+ * enforces Offline Mode, supports Tunnel Guard predictive pre-caching, and handles CAN-Bus SWC commands.
  */
 @OptIn(UnstableApi::class)
 @Singleton
@@ -52,12 +69,50 @@ class ZentryxPlayerManager @Inject constructor(
     private val speedVolumeController: SpeedVolumeController,
     private val engineStandbyController: EngineStandbyController,
     private val dspAudioEngine: AndroidDspAudioEngine,
-    private val fftCapturer: AudioFftCapturer
+    private val carDspAudioProcessor: CarDspAudioProcessor,
+    private val fftCapturer: AudioFftCapturer,
+    private val musicRepositoryLazy: Lazy<MusicRepository>
 ) {
+    companion object {
+        fun replayGainDbToLinear(db: Float?): Float {
+            if (db == null || !db.isFinite()) return 1.0f
+            val clamped = db.coerceIn(-15f, 6f)
+            return 10f.pow(clamped / 20f).coerceIn(0.18f, 2.0f)
+        }
+
+        fun buildSignalPathBadge(
+            song: Song?,
+            activeSampleRateHz: Int,
+            replayGainAppliedDb: Float?
+        ): String? {
+            if (song == null) return null
+            val parts = mutableListOf(song.format.name)
+            val effectiveRate = song.sampleRateHz ?: activeSampleRateHz.takeIf { it > 0 }
+            val khz = effectiveRate?.let { hz ->
+                if (hz % 1000 == 0) "${hz / 1000} kHz" else String.format(Locale.US, "%.1f kHz", hz / 1000f)
+            }
+            when {
+                song.bitsPerSample != null && khz != null -> parts.add("${song.bitsPerSample}-bit/$khz")
+                khz != null -> parts.add(khz)
+            }
+            song.bitrateKbps?.takeIf { it > 0 }?.let { parts.add("$it kbps") }
+            if (song.sourceType == "LOCAL") {
+                parts.add("USB/LOCAL")
+            }
+            if (replayGainAppliedDb != null) {
+                parts.add(String.format(Locale.US, "RG %+.1fdB", replayGainAppliedDb))
+            }
+            return parts.joinToString(" · ")
+        }
+    }
+
     private val playerScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var positionUpdateJob: Job? = null
     private var sleepTimerJob: Job? = null
     private var softStartJob: Job? = null
+    private var crossfadeInJob: Job? = null
+    private var gapPauseJob: Job? = null
+    private var prefetchJob: Job? = null
 
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
@@ -65,17 +120,34 @@ class ZentryxPlayerManager @Inject constructor(
     private val _isAttenuated = MutableStateFlow(false)
     val isAttenuated: StateFlow<Boolean> = _isAttenuated.asStateFlow()
 
+    private val _isReverseDucked = MutableStateFlow(false)
+    val isReverseDucked: StateFlow<Boolean> = _isReverseDucked.asStateFlow()
+
+    private val _isMuted = MutableStateFlow(false)
+    val isMuted: StateFlow<Boolean> = _isMuted.asStateFlow()
+
     private val _sleepTimerMinutes = MutableStateFlow(0)
     val sleepTimerMinutes: StateFlow<Int> = _sleepTimerMinutes.asStateFlow()
 
     private val _sleepTimerRemainingSec = MutableStateFlow<Int?>(null)
     val sleepTimerRemainingSec: StateFlow<Int?> = _sleepTimerRemainingSec.asStateFlow()
 
+    val activeOutputRoute: StateFlow<AudioOutputRoute> = dspAudioEngine.activeOutputRoute
+    val currentSpeedKmH: StateFlow<Float> = speedVolumeController.currentSpeedKmH
+
     private var activeQueue = mutableListOf<Song>()
+    private var manualPresetOverrideSongId: String? = null
     private var currentSpeedMultiplier = 1.0f
     private var currentSoftStartGain = 1.0f
     private var currentSleepFadeGain = 1.0f
+    private var currentTransitionDipGain = 1.0f
+    private var currentCrossfadeGain = 1.0f
     private var currentPlaybackRate = 1.0f
+    private var isGaplessEnabled = true
+    private var isReplayGainEnabled = true
+    private var crossfadeSeconds = 0
+    private var isOfflineOnly = false
+    private var bufferMode = "RAM_SAVER"
 
     private val audioAttributes = AudioAttributes.Builder()
         .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
@@ -92,7 +164,21 @@ class ZentryxPlayerManager @Inject constructor(
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
             .setDataSourceFactory(cacheDataSourceFactory.createDataSourceFactory())
 
-        ExoPlayer.Builder(context)
+        val renderersFactory = object : DefaultRenderersFactory(context) {
+            override fun buildAudioSink(
+                context: Context,
+                enableFloatOutput: Boolean,
+                enableAudioTrackPlaybackParams: Boolean
+            ): AudioSink {
+                return DefaultAudioSink.Builder(context)
+                    .setEnableFloatOutput(false)
+                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                    .setAudioProcessors(arrayOf(carDspAudioProcessor))
+                    .build()
+            }
+        }
+
+        ExoPlayer.Builder(context, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(audioAttributes, true)
             .setLoadControl(loadControl)
@@ -112,8 +198,14 @@ class ZentryxPlayerManager @Inject constructor(
 
         playerScope.launch {
             speedVolumeController.volumeMultiplier.collectLatest { multiplier ->
-                currentSpeedMultiplier = multiplier.coerceIn(0f, 1.5f)
+                currentSpeedMultiplier = multiplier.coerceIn(0.5f, 1.8f)
                 syncOutputGain()
+            }
+        }
+
+        playerScope.launch {
+            speedVolumeController.currentSpeedKmH.collectLatest { speedKmH ->
+                dspAudioEngine.updateVehicleSpeedKmH(speedKmH)
             }
         }
 
@@ -129,40 +221,316 @@ class ZentryxPlayerManager @Inject constructor(
                 exoPlayer.setAudioAttributes(audioAttributes, duckEnabled)
             }
         }
+
+        playerScope.launch {
+            settingsPreferences.gaplessEnabledFlow.collectLatest { gapless ->
+                isGaplessEnabled = gapless
+            }
+        }
+
+        playerScope.launch {
+            settingsPreferences.offlineOnlyFlow.collectLatest { offline ->
+                isOfflineOnly = offline
+            }
+        }
+
+        playerScope.launch {
+            settingsPreferences.bufferModeFlow.collectLatest { mode ->
+                bufferMode = mode
+            }
+        }
+
+        playerScope.launch {
+            settingsPreferences.replayGainEnabledFlow.collectLatest { rgEnabled ->
+                isReplayGainEnabled = rgEnabled
+                applyTrackDspAndSignalPath(_playbackState.value.currentSong)
+            }
+        }
+
+        playerScope.launch {
+            settingsPreferences.crossfadeSecondsFlow.collectLatest { sec ->
+                crossfadeSeconds = sec.coerceIn(0, 8)
+                if (crossfadeSeconds == 0) {
+                    crossfadeInJob?.cancel()
+                    currentCrossfadeGain = 1.0f
+                    syncOutputGain()
+                }
+            }
+        }
+    }
+
+    fun markManualPresetOverrideForCurrentTrack() {
+        manualPresetOverrideSongId = _playbackState.value.currentSong?.id
+    }
+
+    private fun applyAutoGenreAndRecordPlay(song: Song?) {
+        if (song == null) return
+        playerScope.launch {
+            runCatching { musicRepositoryLazy.get().recordTrackPlay(song.id) }
+        }
+        val dsp = dspAudioEngine.dspSettings.value
+        if (dsp.autoGenrePresetEnabled && song.id != manualPresetOverrideSongId) {
+            val matchedPresetId = matchPresetForTrack(song.genre, song.relativePath, song.title)
+            if (matchedPresetId != null && matchedPresetId != dsp.selectedPresetId) {
+                dspAudioEngine.applyPresetById(matchedPresetId)
+            }
+        }
+    }
+
+    private fun applyTrackDspAndSignalPath(song: Song?) {
+        val appliedDb = if (isReplayGainEnabled) song?.replayGainDb else null
+        carDspAudioProcessor.setReplayGainLinear(replayGainDbToLinear(appliedDb))
+        val badge = buildSignalPathBadge(song, carDspAudioProcessor.activeSampleRateHz, appliedDb)
+        _playbackState.update {
+            it.copy(
+                signalPathBadge = badge,
+                replayGainAppliedDb = appliedDb
+            )
+        }
+        ZentryxWidgetProvider.updateWidgetFromState(context, _playbackState.value, _isAttenuated.value)
     }
 
     private fun syncOutputGain() {
-        var gain = min(1.0f, currentSpeedMultiplier)
-        if (_isAttenuated.value) {
-            gain *= 0.1f // -20 dB cockpit talk attenuation
+        // Apply GALA / SDVC speed boost (> 1.0) safely via hardware DSP preamp + brickwall limiter
+        val sdvcBoostDb = if (currentSpeedMultiplier > 1.0f) {
+            (20f * log10(currentSpeedMultiplier)).coerceIn(0f, 5.5f)
+        } else {
+            0f
         }
-        gain *= currentSoftStartGain * currentSleepFadeGain
+        dspAudioEngine.setDynamicSdvcBoostDb(sdvcBoostDb)
+
+        var gain = 1.0f
+        if (_isMuted.value) {
+            gain = 0f
+        } else if (_isAttenuated.value || _isReverseDucked.value) {
+            gain *= 0.1f // -20 dB cockpit talk / reverse-gear parking sensor attenuation
+        }
+        gain *= currentSoftStartGain * currentSleepFadeGain * currentTransitionDipGain * currentCrossfadeGain
         exoPlayer.volume = gain.coerceIn(0f, 1.0f)
     }
 
-    fun playSong(song: Song, queue: List<Song> = listOf(song)) {
-        activeQueue = queue.toMutableList()
+    private fun isLocallyAvailable(song: Song): Boolean {
+        if (!song.isDownloaded || song.localFilePath.isNullOrBlank()) return false
+        val path = song.localFilePath
+        return if (path.startsWith("content://")) {
+            try {
+                context.contentResolver.openAssetFileDescriptor(Uri.parse(path), "r")?.use { true } ?: false
+            } catch (_: Throwable) {
+                false
+            }
+        } else {
+            File(path).exists()
+        }
+    }
+
+    fun isSongPlayable(song: Song): Boolean {
+        return !isOfflineOnly || isLocallyAvailable(song)
+    }
+
+    fun syncExternalQueue(songs: List<Song>, startIndex: Int = 0) {
+        if (songs.isEmpty()) return
+        playerScope.launch {
+            val safeIdx = startIndex.coerceIn(0, songs.lastIndex)
+            val activeSong = activeQueue.getOrNull(safeIdx) ?: songs.getOrNull(safeIdx)
+            activeQueue = songs.toMutableList()
+            currentSoftStartGain = 1.0f
+            currentTransitionDipGain = 1.0f
+            currentCrossfadeGain = 1.0f
+            syncOutputGain()
+            attachAudioEffectsIfReady()
+            scheduleTunnelPrefetch(safeIdx)
+            _playbackState.update {
+                it.copy(
+                    currentSong = activeSong,
+                    queue = activeQueue,
+                    currentQueueIndex = safeIdx,
+                    errorMessage = null
+                )
+            }
+            applyTrackDspAndSignalPath(activeSong)
+        }
+    }
+
+    fun playSong(song: Song, queue: List<Song> = listOf(song), startPositionMs: Long = 0L) {
+        if (isOfflineOnly && !isLocallyAvailable(song)) {
+            _playbackState.update {
+                it.copy(errorMessage = "Offline Mode active: download \"${song.title}\" first to play without internet.")
+            }
+            return
+        }
+
+        val filteredQueue = if (isOfflineOnly) {
+            queue.filter { isLocallyAvailable(it) }.ifEmpty { listOf(song) }
+        } else {
+            queue.ifEmpty { listOf(song) }
+        }
+
+        if (manualPresetOverrideSongId != song.id) {
+            manualPresetOverrideSongId = null
+        }
+
+        activeQueue = filteredQueue.toMutableList()
         val index = activeQueue.indexOfFirst { it.id == song.id }.coerceAtLeast(0)
         val mediaItems = activeQueue.map { buildMediaItem(it) }
+        val safeStartPos = startPositionMs.coerceAtLeast(0L)
 
+        crossfadeInJob?.cancel()
         currentSoftStartGain = 1.0f
+        currentTransitionDipGain = 1.0f
+        currentCrossfadeGain = 1.0f
         syncOutputGain()
 
-        exoPlayer.setMediaItems(mediaItems, index, 0L)
+        exoPlayer.setMediaItems(mediaItems, index, safeStartPos)
         exoPlayer.playbackParameters = PlaybackParameters(currentPlaybackRate)
         exoPlayer.prepare()
         exoPlayer.play()
 
         attachAudioEffectsIfReady()
+        scheduleTunnelPrefetch(index)
 
         _playbackState.update {
             it.copy(
                 currentSong = song,
                 queue = activeQueue,
                 currentQueueIndex = index,
+                currentPositionMs = safeStartPos,
                 isPlaying = true,
                 errorMessage = null
             )
+        }
+        applyTrackDspAndSignalPath(song)
+        applyAutoGenreAndRecordPlay(song)
+    }
+
+    fun resumeSong(song: Song, queue: List<Song> = listOf(song)) {
+        val resumePos = if (
+            song.lastPositionMs > 5_000L &&
+            (song.durationMs <= 0L || song.lastPositionMs < song.durationMs - 10_000L)
+        ) {
+            song.lastPositionMs
+        } else {
+            0L
+        }
+        playSong(song, queue, startPositionMs = resumePos)
+    }
+
+    fun playNext(song: Song): Boolean {
+        if (isOfflineOnly && !isLocallyAvailable(song)) {
+            _playbackState.update {
+                it.copy(errorMessage = "Offline Mode active: download \"${song.title}\" first.")
+            }
+            return false
+        }
+        if (activeQueue.isEmpty() || _playbackState.value.currentSong == null) {
+            playSong(song)
+            return true
+        }
+        val currentIdx = exoPlayer.currentMediaItemIndex.coerceIn(0, activeQueue.lastIndex)
+        val insertIdx = (currentIdx + 1).coerceAtMost(activeQueue.size)
+        activeQueue.add(insertIdx, song)
+        exoPlayer.addMediaItem(insertIdx, buildMediaItem(song))
+        _playbackState.update {
+            it.copy(
+                queue = activeQueue.toList(),
+                currentQueueIndex = exoPlayer.currentMediaItemIndex.coerceIn(0, activeQueue.lastIndex)
+            )
+        }
+        scheduleTunnelPrefetch(exoPlayer.currentMediaItemIndex)
+        return true
+    }
+
+    fun addToQueue(song: Song): Boolean {
+        if (isOfflineOnly && !isLocallyAvailable(song)) {
+            _playbackState.update {
+                it.copy(errorMessage = "Offline Mode active: download \"${song.title}\" first.")
+            }
+            return false
+        }
+        if (activeQueue.isEmpty() || _playbackState.value.currentSong == null) {
+            playSong(song)
+            return true
+        }
+        activeQueue.add(song)
+        exoPlayer.addMediaItem(buildMediaItem(song))
+        _playbackState.update { it.copy(queue = activeQueue.toList()) }
+        return true
+    }
+
+    fun moveQueueItem(fromIndex: Int, toIndex: Int) {
+        if (fromIndex !in activeQueue.indices || toIndex !in activeQueue.indices || fromIndex == toIndex) return
+        val moved = activeQueue.removeAt(fromIndex)
+        activeQueue.add(toIndex, moved)
+        exoPlayer.moveMediaItem(fromIndex, toIndex)
+        val newIdx = exoPlayer.currentMediaItemIndex.takeIf { it in activeQueue.indices }
+            ?: activeQueue.indexOfFirst { it.id == _playbackState.value.currentSong?.id }.coerceAtLeast(0)
+        _playbackState.update {
+            it.copy(
+                queue = activeQueue.toList(),
+                currentQueueIndex = newIdx,
+                currentSong = activeQueue.getOrNull(newIdx) ?: it.currentSong
+            )
+        }
+        scheduleTunnelPrefetch(newIdx)
+    }
+
+    fun removeQueueItem(index: Int) {
+        if (index !in activeQueue.indices) return
+        if (activeQueue.size <= 1) {
+            clearQueue(keepCurrent = false)
+            return
+        }
+        val curIdx = exoPlayer.currentMediaItemIndex
+        activeQueue.removeAt(index)
+        exoPlayer.removeMediaItem(index)
+        val nextIdx = exoPlayer.currentMediaItemIndex.coerceIn(0, activeQueue.lastIndex)
+        val nextSong = activeQueue.getOrNull(nextIdx)
+        _playbackState.update {
+            it.copy(
+                queue = activeQueue.toList(),
+                currentQueueIndex = nextIdx,
+                currentSong = nextSong
+            )
+        }
+        if (index == curIdx) {
+            applyTrackDspAndSignalPath(nextSong)
+        }
+        scheduleTunnelPrefetch(nextIdx)
+    }
+
+    fun clearQueue(keepCurrent: Boolean = true) {
+        if (activeQueue.isEmpty()) return
+        if (keepCurrent) {
+            val curIdx = exoPlayer.currentMediaItemIndex.coerceIn(0, activeQueue.lastIndex)
+            val curSong = activeQueue.getOrNull(curIdx) ?: return
+            if (curIdx + 1 < exoPlayer.mediaItemCount) {
+                exoPlayer.removeMediaItems(curIdx + 1, exoPlayer.mediaItemCount)
+            }
+            if (curIdx > 0) {
+                exoPlayer.removeMediaItems(0, curIdx)
+            }
+            activeQueue = mutableListOf(curSong)
+            _playbackState.update {
+                it.copy(
+                    queue = activeQueue.toList(),
+                    currentQueueIndex = 0,
+                    currentSong = curSong
+                )
+            }
+        } else {
+            exoPlayer.stop()
+            exoPlayer.clearMediaItems()
+            activeQueue.clear()
+            _playbackState.update {
+                it.copy(
+                    currentSong = null,
+                    queue = emptyList(),
+                    currentQueueIndex = 0,
+                    isPlaying = false,
+                    currentPositionMs = 0L,
+                    durationMs = 0L,
+                    signalPathBadge = null
+                )
+            }
         }
     }
 
@@ -181,9 +549,18 @@ class ZentryxPlayerManager @Inject constructor(
     }
 
     fun seekTo(positionMs: Long) {
-        exoPlayer.seekTo(positionMs)
-        _playbackState.update { it.copy(currentPositionMs = positionMs) }
+        val safe = positionMs.coerceAtLeast(0L)
+        exoPlayer.seekTo(safe)
+        _playbackState.update { it.copy(currentPositionMs = safe) }
         saveCurrentPosition()
+    }
+
+    fun seekBy(deltaMs: Long) {
+        val cur = exoPlayer.currentPosition.coerceAtLeast(0L)
+        val dur = exoPlayer.duration.takeIf { it > 0L }
+            ?: _playbackState.value.durationMs.takeIf { it > 0L }
+            ?: Long.MAX_VALUE
+        seekTo((cur + deltaMs).coerceIn(0L, dur))
     }
 
     fun skipToNext() {
@@ -200,6 +577,64 @@ class ZentryxPlayerManager @Inject constructor(
         } else if (exoPlayer.hasPreviousMediaItem()) {
             exoPlayer.seekToPreviousMediaItem()
         }
+    }
+
+    /**
+     * Jumps cleanly to the first track of the next album (either later in current queue or in Room DB).
+     */
+    fun skipToNextAlbum() {
+        val currentIdx = exoPlayer.currentMediaItemIndex
+        val currentAlbum = activeQueue.getOrNull(currentIdx)?.album
+        if (currentIdx >= 0 && activeQueue.size > 1) {
+            for (i in (currentIdx + 1) until activeQueue.size) {
+                if (activeQueue[i].album != currentAlbum) {
+                    exoPlayer.seekTo(i, 0L)
+                    return
+                }
+            }
+        }
+
+        playerScope.launch {
+            val repo = musicRepositoryLazy.get()
+            val albums = repo.getAlbums().firstOrNull().orEmpty()
+            if (albums.isEmpty()) {
+                skipToNext()
+                return@launch
+            }
+            val curAlbumIdx = albums.indexOfFirst { it.name == currentAlbum }
+            val nextAlbum = albums[(curAlbumIdx + 1) % albums.size]
+            val albumSongs = repo.getSongsByAlbum(nextAlbum.name, nextAlbum.artist).firstOrNull().orEmpty()
+            val playableSongs = if (isOfflineOnly) albumSongs.filter { isLocallyAvailable(it) } else albumSongs
+            if (playableSongs.isNotEmpty()) {
+                playSong(playableSongs.first(), playableSongs)
+            } else {
+                skipToNext()
+            }
+        }
+    }
+
+    /**
+     * Toggles the Heart / Favorite state of the currently playing track from Steering Wheel / UI.
+     */
+    fun toggleFavoriteCurrentSong() {
+        val current = _playbackState.value.currentSong ?: return
+        val nextFav = !current.isFavorite
+        playerScope.launch {
+            musicRepositoryLazy.get().setFavorite(current.id, nextFav)
+            val updatedSong = current.copy(isFavorite = nextFav)
+            activeQueue = activeQueue.map { if (it.id == current.id) updatedSong else it }.toMutableList()
+            _playbackState.update {
+                it.copy(
+                    currentSong = if (it.currentSong?.id == current.id) updatedSong else it.currentSong,
+                    queue = activeQueue
+                )
+            }
+        }
+    }
+
+    fun toggleMute() {
+        _isMuted.value = !_isMuted.value
+        syncOutputGain()
     }
 
     fun setShuffleMode(enabled: Boolean) {
@@ -226,6 +661,48 @@ class ZentryxPlayerManager @Inject constructor(
     fun toggleAttenuation() {
         _isAttenuated.value = !_isAttenuated.value
         syncOutputGain()
+        ZentryxWidgetProvider.updateWidgetFromState(context, _playbackState.value, _isAttenuated.value)
+    }
+
+    fun setReverseGearDucking(active: Boolean) {
+        if (_isReverseDucked.value == active) return
+        _isReverseDucked.value = active
+        syncOutputGain()
+    }
+
+    fun cycleSurroundMode() = dspAudioEngine.cycleSurroundMode()
+
+    fun cycleEqPreset() = dspAudioEngine.cycleEqPreset()
+
+    fun startCruisingMix() {
+        playerScope.launch {
+            val all = musicRepositoryLazy.get().getAllSongs().firstOrNull().orEmpty()
+                .filter { isSongPlayable(it) }
+            if (all.isEmpty()) return@launch
+            val favs = all.filter { it.isFavorite }.shuffled()
+            val unheard = all.filter { !it.isFavorite && it.playCount == 0 }.shuffled()
+            val others = all.filter { !it.isFavorite && it.playCount > 0 }.shuffled()
+            val mix = (favs + unheard + others).take(100)
+            if (mix.isNotEmpty()) {
+                setShuffleMode(true)
+                playSong(mix.first(), mix)
+            }
+        }
+    }
+
+    fun resumeOrStartOnBluetooth() {
+        playerScope.launch {
+            if (exoPlayer.isPlaying) return@launch
+            if (exoPlayer.mediaItemCount > 0) {
+                play()
+            } else {
+                restoreLastPlaybackState(musicRepositoryLazy.get())
+            }
+        }
+    }
+
+    fun clearErrorMessage() {
+        _playbackState.update { it.copy(errorMessage = null) }
     }
 
     fun setSleepTimer(minutes: Int) {
@@ -261,10 +738,6 @@ class ZentryxPlayerManager @Inject constructor(
         }
     }
 
-    /**
-     * Restores last played track and position on ignition / app boot.
-     * Respects autoResumeOnBoot and autoResumeSoftRamp preferences.
-     */
     suspend fun restoreLastPlaybackState(musicRepository: MusicRepository) {
         val autoResumeEnabled = settingsPreferences.autoResumeOnBootFlow.firstOrNull() ?: true
         if (!autoResumeEnabled) return
@@ -272,7 +745,7 @@ class ZentryxPlayerManager @Inject constructor(
         val (lastSongId, lastPos) = playerPreferences.getLastPlaybackState()
         if (lastSongId != null) {
             val song = musicRepository.getSongById(lastSongId)
-            if (song != null) {
+            if (song != null && (!isOfflineOnly || isLocallyAvailable(song))) {
                 activeQueue = mutableListOf(song)
                 val softRamp = settingsPreferences.autoResumeSoftRampFlow.firstOrNull() ?: true
                 if (softRamp) {
@@ -295,6 +768,7 @@ class ZentryxPlayerManager @Inject constructor(
                         isPlaying = true
                     )
                 }
+                applyTrackDspAndSignalPath(song)
             }
         }
     }
@@ -315,6 +789,63 @@ class ZentryxPlayerManager @Inject constructor(
         }
     }
 
+    private fun triggerNonGaplessSpacing() {
+        gapPauseJob?.cancel()
+        currentTransitionDipGain = 0f
+        syncOutputGain()
+        gapPauseJob = playerScope.launch {
+            delay(350L)
+            currentTransitionDipGain = 1.0f
+            syncOutputGain()
+        }
+    }
+
+    private fun triggerCrossfadeIn() {
+        crossfadeInJob?.cancel()
+        val fadeInMs = (crossfadeSeconds.coerceIn(1, 8).coerceAtMost(4) * 500L)
+        val steps = 16
+        val stepMs = (fadeInMs / steps).coerceAtLeast(30L)
+        currentCrossfadeGain = 0.12f
+        syncOutputGain()
+        crossfadeInJob = playerScope.launch {
+            for (i in 1..steps) {
+                delay(stepMs)
+                val p = i.toFloat() / steps
+                currentCrossfadeGain = sqrt(p).coerceIn(0.12f, 1.0f)
+                syncOutputGain()
+            }
+            currentCrossfadeGain = 1.0f
+            syncOutputGain()
+        }
+    }
+
+    private fun scheduleTunnelPrefetch(currentIndex: Int) {
+        prefetchJob?.cancel()
+        if (bufferMode != "TUNNEL_GUARD" || activeQueue.size <= 1) return
+
+        prefetchJob = playerScope.launch(Dispatchers.IO) {
+            val lookAheadCount = 2
+            for (offset in 1..lookAheadCount) {
+                val targetIdx = currentIndex + offset
+                if (targetIdx >= activeQueue.size) break
+                val nextSong = activeQueue[targetIdx]
+                if (isLocallyAvailable(nextSong)) continue
+                try {
+                    val dataSource = cacheDataSourceFactory.createDataSourceFactory().createDataSource()
+                    val cacheDs = dataSource as? androidx.media3.datasource.cache.CacheDataSource ?: continue
+                    val dataSpec = DataSpec.Builder()
+                        .setUri(Uri.parse(nextSong.fileUrl))
+                        .setPosition(0L)
+                        .setLength(4L * 1024L * 1024L) // 4 MiB tunnel head-buffer
+                        .build()
+                    CacheWriter(cacheDs, dataSpec, null, null).cache()
+                } catch (_: Throwable) {
+                    // Best-effort prefetch
+                }
+            }
+        }
+    }
+
     fun onVisualizerPermissionUpdated() {
         attachAudioEffectsIfReady()
     }
@@ -327,18 +858,22 @@ class ZentryxPlayerManager @Inject constructor(
         }
     }
 
-    private fun buildMediaItem(song: Song): MediaItem {
+    fun buildMediaItem(song: Song): MediaItem {
         val metadataBuilder = MediaMetadata.Builder()
             .setTitle(song.title)
             .setArtist(song.artist)
             .setAlbumTitle(song.album)
+            .setIsBrowsable(false)
+            .setIsPlayable(true)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
 
         if (song.artworkPath != null) {
             metadataBuilder.setArtworkUri(Uri.parse(song.artworkPath))
         }
 
-        val playbackUri = if (song.isDownloaded && song.localFilePath != null && java.io.File(song.localFilePath).exists()) {
-            Uri.fromFile(java.io.File(song.localFilePath))
+        val playbackUri = if (isLocallyAvailable(song)) {
+            val localPath = song.localFilePath!!
+            if (localPath.startsWith("content://")) Uri.parse(localPath) else Uri.fromFile(File(localPath))
         } else {
             Uri.parse(song.fileUrl)
         }
@@ -353,9 +888,10 @@ class ZentryxPlayerManager @Inject constructor(
 
     private fun saveCurrentPosition() {
         val currentSong = _playbackState.value.currentSong ?: return
-        val pos = exoPlayer.currentPosition
+        val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
         playerScope.launch {
             playerPreferences.savePlaybackState(currentSong.id, pos)
+            runCatching { musicRepositoryLazy.get().updateResumePosition(currentSong.id, pos) }
         }
     }
 
@@ -372,8 +908,22 @@ class ZentryxPlayerManager @Inject constructor(
                             durationMs = if (dur > 0) dur else it.durationMs
                         )
                     }
+
+                    // Equal-power DJ Crossfade fade-out ramp during final N seconds before track transition
+                    val cfWindowMs = crossfadeSeconds * 1000L
+                    if (crossfadeSeconds > 0 && dur > cfWindowMs + 1500L && exoPlayer.hasNextMediaItem()) {
+                        val remainingMs = dur - pos
+                        if (remainingMs in 1..cfWindowMs) {
+                            val ratio = (remainingMs.toFloat() / cfWindowMs.toFloat()).coerceIn(0.04f, 1.0f)
+                            currentCrossfadeGain = sqrt(ratio)
+                            syncOutputGain()
+                        } else if (crossfadeInJob?.isActive != true && currentCrossfadeGain != 1.0f) {
+                            currentCrossfadeGain = 1.0f
+                            syncOutputGain()
+                        }
+                    }
                 }
-                delay(500)
+                delay(250)
             }
         }
     }
@@ -383,6 +933,7 @@ class ZentryxPlayerManager @Inject constructor(
             if (audioSessionId != C.AUDIO_SESSION_ID_UNSET && audioSessionId > 0) {
                 dspAudioEngine.attachAudioSession(audioSessionId)
                 fftCapturer.attachAudioSession(audioSessionId, exoPlayer.isPlaying)
+                applyTrackDspAndSignalPath(_playbackState.value.currentSong)
             }
         }
 
@@ -400,6 +951,7 @@ class ZentryxPlayerManager @Inject constructor(
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _playbackState.update { it.copy(isPlaying = isPlaying) }
             fftCapturer.setCaptureActive(isPlaying)
+            ZentryxWidgetProvider.updateWidgetFromState(context, _playbackState.value, _isAttenuated.value)
             if (!isPlaying) {
                 saveCurrentPosition()
             }
@@ -409,6 +961,21 @@ class ZentryxPlayerManager @Inject constructor(
             if (mediaItem != null) {
                 val index = exoPlayer.currentMediaItemIndex
                 val currentSong = activeQueue.getOrNull(index)
+                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+                    if (crossfadeSeconds > 0) {
+                        triggerCrossfadeIn()
+                    } else if (!isGaplessEnabled) {
+                        triggerNonGaplessSpacing()
+                    }
+                } else {
+                    crossfadeInJob?.cancel()
+                    currentCrossfadeGain = 1.0f
+                    syncOutputGain()
+                }
+                scheduleTunnelPrefetch(index)
+                if (manualPresetOverrideSongId != currentSong?.id) {
+                    manualPresetOverrideSongId = null
+                }
                 _playbackState.update {
                     it.copy(
                         currentSong = currentSong,
@@ -416,6 +983,10 @@ class ZentryxPlayerManager @Inject constructor(
                         durationMs = exoPlayer.duration.coerceAtLeast(0L),
                         currentPositionMs = 0L
                     )
+                }
+                applyTrackDspAndSignalPath(currentSong)
+                if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) {
+                    applyAutoGenreAndRecordPlay(currentSong)
                 }
                 saveCurrentPosition()
             }
@@ -429,6 +1000,7 @@ class ZentryxPlayerManager @Inject constructor(
                     errorMessage = "Playback error: ${error.localizedMessage}"
                 )
             }
+            ZentryxWidgetProvider.updateWidgetFromState(context, _playbackState.value, _isAttenuated.value)
         }
     }
 
@@ -436,6 +1008,9 @@ class ZentryxPlayerManager @Inject constructor(
         positionUpdateJob?.cancel()
         sleepTimerJob?.cancel()
         softStartJob?.cancel()
+        crossfadeInJob?.cancel()
+        gapPauseJob?.cancel()
+        prefetchJob?.cancel()
         fftCapturer.release()
         dspAudioEngine.releaseEffects()
         exoPlayer.release()

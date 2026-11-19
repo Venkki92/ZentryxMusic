@@ -4,10 +4,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.zentryx.music.download.DownloadManager
 import com.zentryx.music.dsp.AndroidDspAudioEngine
+import com.zentryx.music.dsp.AudioOutputRoute
 import com.zentryx.music.dsp.DspSettings
 import com.zentryx.music.lyrics.LyricsParser
 import com.zentryx.music.lyrics.ParsedLyrics
 import com.zentryx.music.models.PlaybackState
+import com.zentryx.music.models.Playlist
 import com.zentryx.music.models.RepeatMode
 import com.zentryx.music.player.MbuxAccentColor
 import com.zentryx.music.player.SettingsPreferences
@@ -48,6 +50,8 @@ class PlayerViewModel @Inject constructor(
     val sleepTimerRemainingSec: StateFlow<Int?> = playerManager.sleepTimerRemainingSec
 
     val dspSettings: StateFlow<DspSettings> = dspAudioEngine.dspSettings
+    val activeOutputRoute: StateFlow<AudioOutputRoute> = dspAudioEngine.activeOutputRoute
+    val isMuted: StateFlow<Boolean> = playerManager.isMuted
     val visualizerFrame: StateFlow<VisualizerFrame> = fftCapturer.frame
 
     val accentColor: StateFlow<MbuxAccentColor> = settingsPreferences.accentColorFlow
@@ -62,6 +66,9 @@ class PlayerViewModel @Inject constructor(
     val idleScreensaverSeconds: StateFlow<Int> = settingsPreferences.idleScreensaverSecondsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
+    val driveModeAutoSpeedKmH: StateFlow<Int> = settingsPreferences.driveModeAutoSpeedKmHFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
     val visualizerMode: StateFlow<VisualizerMode> = settingsPreferences.visualizerModeFlow
         .map { VisualizerMode.fromId(it) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), VisualizerMode.GAUGE)
@@ -69,6 +76,9 @@ class PlayerViewModel @Inject constructor(
     val visualizerColorway: StateFlow<VisualizerColorway> = settingsPreferences.visualizerColorwayFlow
         .map { VisualizerColorway.fromId(it) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), VisualizerColorway.AMBER)
+
+    val playlists: StateFlow<List<Playlist>> = musicRepository.getPlaylists()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _isLyricsVisible = MutableStateFlow(false)
     val isLyricsVisible: StateFlow<Boolean> = _isLyricsVisible.asStateFlow()
@@ -94,10 +104,7 @@ class PlayerViewModel @Inject constructor(
     }
 
     fun toggleFavorite() {
-        val current = playbackState.value.currentSong ?: return
-        viewModelScope.launch {
-            musicRepository.setFavorite(current.id, !current.isFavorite)
-        }
+        playerManager.toggleFavoriteCurrentSong()
     }
 
     fun downloadCurrentSong() {
@@ -109,14 +116,36 @@ class PlayerViewModel @Inject constructor(
         }
     }
 
+    fun addCurrentSongToPlaylist(playlistId: String) {
+        val current = playbackState.value.currentSong ?: return
+        viewModelScope.launch {
+            musicRepository.addSongToPlaylist(playlistId, current.id)
+        }
+    }
+
+    fun createPlaylistAndAddCurrent(name: String) {
+        val current = playbackState.value.currentSong ?: return
+        viewModelScope.launch {
+            val created = musicRepository.createPlaylist(name)
+            musicRepository.addSongToPlaylist(created.id, current.id)
+        }
+    }
+
     fun togglePlayPause() = playerManager.togglePlayPause()
     fun play() = playerManager.play()
     fun pause() = playerManager.pause()
     fun seekTo(positionMs: Long) = playerManager.seekTo(positionMs)
+    fun seekBy(deltaMs: Long) = playerManager.seekBy(deltaMs)
     fun skipToNext() = playerManager.skipToNext()
     fun skipToPrevious() = playerManager.skipToPrevious()
     fun toggleAttenuation() = playerManager.toggleAttenuation()
+    fun toggleMute() = playerManager.toggleMute()
     fun setSleepTimer(minutes: Int) = playerManager.setSleepTimer(minutes)
+    fun clearError() = playerManager.clearErrorMessage()
+    fun moveQueueItem(fromIndex: Int, toIndex: Int) = playerManager.moveQueueItem(fromIndex, toIndex)
+    fun removeQueueItem(index: Int) = playerManager.removeQueueItem(index)
+    fun clearQueue() = playerManager.clearQueue(keepCurrent = true)
+    fun selectOutputRouteManually(route: AudioOutputRoute) = dspAudioEngine.selectOutputRouteManually(route)
 
     fun setPlaybackRate(speed: Float) {
         viewModelScope.launch {

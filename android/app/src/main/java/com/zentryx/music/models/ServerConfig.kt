@@ -1,26 +1,49 @@
 package com.zentryx.music.models
 
+import java.net.URLEncoder
+
 /**
  * Encapsulates Nextcloud connection parameters.
  * Persisted securely using Android Keystore AES-GCM + DataStore.
  */
 data class ServerConfig(
     val serverUrl: String,                    // e.g. "https://cloud.example.com"
-    val username: String,                     // Nextcloud username
+    val username: String,                     // Canonical Nextcloud username / user_id
     val tokenOrPassword: String,              // App password or user password
     val sslCertificateFingerprint: String? = null, // SHA-256 hash for Trust-On-First-Use (TOFU)
     val musicFolderPath: String = "/Music",   // Root folder path for library scans
-    val isLoggedIn: Boolean = false
+    val isLoggedIn: Boolean = false,
+    val useLegacyWebDav: Boolean = false      // Fallback to /remote.php/webdav if /dav/files/<user> returns 404
 ) {
+    private fun encodeSegment(seg: String): String =
+        URLEncoder.encode(seg, "UTF-8")
+            .replace("+", "%20")
+            .replace("%21", "!")
+            .replace("%27", "'")
+            .replace("%28", "(")
+            .replace("%29", ")")
+            .replace("%7E", "~")
+
     /**
-     * Builds the standard WebDAV endpoint for this user.
-     * Normalized to avoid double slashes.
+     * Builds the standard WebDAV endpoint for this user (`/remote.php/dav/files/<user>`),
+     * or `/remote.php/webdav` when [useLegacyWebDav] is enabled.
      */
     val webDavBaseUrl: String
         get() {
             val cleanBase = serverUrl.trimEnd('/')
-            return "$cleanBase/remote.php/dav/files/$username"
+            return if (useLegacyWebDav) {
+                "$cleanBase/remote.php/webdav"
+            } else {
+                "$cleanBase/remote.php/dav/files/${encodeSegment(username.trim())}"
+            }
         }
+
+    /**
+     * Explicit legacy Nextcloud WebDAV root (`/remote.php/webdav`), useful as a 404 fallback
+     * when email-based usernames or federated auth aliases are used.
+     */
+    val legacyWebDavBaseUrl: String
+        get() = "${serverUrl.trimEnd('/')}/remote.php/webdav"
 
     /**
      * Builds the WebDAV endpoint pointing specifically to the music directory.
@@ -31,7 +54,10 @@ data class ServerConfig(
             return if (cleanRoot.isEmpty()) {
                 webDavBaseUrl
             } else {
-                "$webDavBaseUrl/$cleanRoot"
+                val encodedSegments = cleanRoot.split('/')
+                    .filter { it.isNotEmpty() }
+                    .joinToString("/") { encodeSegment(it) }
+                if (encodedSegments.isEmpty()) webDavBaseUrl else "$webDavBaseUrl/$encodedSegments"
             }
         }
 }

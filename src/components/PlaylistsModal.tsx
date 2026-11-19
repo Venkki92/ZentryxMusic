@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   ListMusic,
   Plus,
@@ -8,6 +8,10 @@ import {
   Check,
   Disc,
   FolderPlus,
+  Download,
+  Upload,
+  Cloud,
+  RefreshCw,
 } from 'lucide-react';
 import { Playlist } from '../utils/fuzzySearch';
 import { Track } from '../App';
@@ -20,6 +24,11 @@ interface PlaylistsModalProps {
   onDeletePlaylist: (id: string) => void;
   onPlayPlaylist: (playlist: Playlist) => void;
   onAddTrackToPlaylist?: (playlistId: string, trackId: string) => void;
+  onExportM3u8?: (playlist: Playlist) => void;
+  onImportM3u8File?: (file: File) => void;
+  onSyncPlaylistsCloud?: () => void;
+  isSyncingPlaylists?: boolean;
+  isLoggedIn?: boolean;
   trackToAdd?: Track | null;
   accentHex: string;
 }
@@ -32,6 +41,11 @@ export const PlaylistsModal: React.FC<PlaylistsModalProps> = ({
   onDeletePlaylist,
   onPlayPlaylist,
   onAddTrackToPlaylist,
+  onExportM3u8,
+  onImportM3u8File,
+  onSyncPlaylistsCloud,
+  isSyncingPlaylists = false,
+  isLoggedIn = false,
   trackToAdd,
   accentHex,
 }) => {
@@ -39,6 +53,7 @@ export const PlaylistsModal: React.FC<PlaylistsModalProps> = ({
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [addedNotice, setAddedNotice] = useState<string | null>(null);
+  const m3uFileInputRef = useRef<HTMLInputElement | null>(null);
 
   if (!isOpen) return null;
 
@@ -67,7 +82,7 @@ export const PlaylistsModal: React.FC<PlaylistsModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-150">
-      <div className="w-full max-w-lg bg-[#0b1120] border border-slate-800 rounded-3xl p-6 shadow-2xl relative space-y-5">
+      <div className="w-full max-w-lg bg-[#0b1120] border border-slate-800 rounded-3xl p-6 shadow-2xl relative space-y-4">
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-slate-800">
           <div className="flex items-center gap-2.5">
@@ -79,12 +94,12 @@ export const PlaylistsModal: React.FC<PlaylistsModalProps> = ({
             </div>
             <div>
               <h2 className="text-lg font-bold text-white">
-                {trackToAdd ? 'Add to Playlist' : 'Vehicle Playlists'}
+                {trackToAdd ? 'Add to Playlist' : 'Vehicle Playlists (.m3u8)'}
               </h2>
               <p className="text-xs text-slate-400">
                 {trackToAdd
                   ? `Choose a playlist for "${trackToAdd.title}"`
-                  : 'Curate your custom Nextcloud cruising sets'}
+                  : 'Curate cruising sets & sync .m3u8 with Nextcloud'}
               </p>
             </div>
           </div>
@@ -101,6 +116,52 @@ export const PlaylistsModal: React.FC<PlaylistsModalProps> = ({
           <div className="p-3 bg-lime-950/60 border border-lime-700/60 rounded-xl text-xs text-lime-400 flex items-center gap-2">
             <Check className="w-4 h-4 shrink-0" />
             <span>{addedNotice}</span>
+          </div>
+        )}
+
+        {/* Quick M3U8 Import & Nextcloud Sync Toolbar */}
+        {!trackToAdd && (onImportM3u8File || onSyncPlaylistsCloud) && (
+          <div className="flex items-center gap-2 flex-wrap">
+            {onImportM3u8File && (
+              <>
+                <input
+                  ref={m3uFileInputRef}
+                  type="file"
+                  accept=".m3u,.m3u8,audio/x-mpegurl"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) onImportM3u8File(file);
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => m3uFileInputRef.current?.click()}
+                  className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-colors"
+                >
+                  <Upload className="w-3.5 h-3.5" style={{ color: accentHex }} />
+                  Import .m3u8
+                </button>
+              </>
+            )}
+
+            {onSyncPlaylistsCloud && isLoggedIn && (
+              <button
+                type="button"
+                disabled={isSyncingPlaylists}
+                onClick={onSyncPlaylistsCloud}
+                className="px-3 py-1.5 rounded-xl text-xs font-bold text-black flex items-center gap-1.5 transition-all shadow active:scale-95 disabled:opacity-50"
+                style={{ backgroundColor: accentHex }}
+              >
+                {isSyncingPlaylists ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Cloud className="w-3.5 h-3.5" />
+                )}
+                {isSyncingPlaylists ? 'Syncing...' : 'Sync .m3u8 with Nextcloud'}
+              </button>
+            )}
           </div>
         )}
 
@@ -197,7 +258,16 @@ export const PlaylistsModal: React.FC<PlaylistsModalProps> = ({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 shrink-0 ml-2">
+                <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                  {!trackToAdd && onExportM3u8 && (
+                    <button
+                      onClick={() => onExportM3u8(pl)}
+                      className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 transition-colors"
+                      title="Export .m3u8"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                   {!trackToAdd && (
                     <button
                       onClick={() => {

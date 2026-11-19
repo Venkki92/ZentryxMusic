@@ -34,6 +34,7 @@ import {
   KeyRound,
   Sparkles,
   ShieldCheck,
+  ChevronLeft,
   ChevronRight,
   ArrowUp,
   Terminal,
@@ -63,6 +64,11 @@ import {
   Power,
   Lock,
   Crosshair,
+  HardDrive,
+  Car,
+  Headphones,
+  Info,
+  Columns2,
 } from 'lucide-react';
 import { parseAudioMetadata, estimateBitrateKbps } from './utils/id3Parser';
 import {
@@ -115,10 +121,18 @@ import {
   isDriverSafeLockActive,
   calculateDimmerOverlayOpacity,
   DEFAULT_SWC_BINDINGS,
+  DEFAULT_SWC_LONG_PRESS_BINDINGS,
   SteeringAction,
   SteeringKeyBindings,
+  SteeringLongPressBindings,
   sanitizeSteeringBindings,
+  sanitizeSteeringLongPressBindings,
   resolveSteeringAction,
+  DriverProfile,
+  DEFAULT_DRIVER_PROFILES,
+  sanitizeDriverProfiles,
+  RoadtripPool,
+  buildRoadtripOfflinePlan,
   replayGainDbToMultiplier,
   calculateCrossfadeGains,
   selectOfflineCacheEvictions,
@@ -131,18 +145,48 @@ import { AudioVisualizer } from './components/AudioVisualizer';
 import { QueueDrawer } from './components/QueueDrawer';
 import { PlaylistsModal } from './components/PlaylistsModal';
 import { StickyMiniPlayer } from './components/StickyMiniPlayer';
+import { FloatingCockpitBar } from './components/FloatingCockpitBar';
 import { SettingsPanel } from './components/SettingsPanel';
 import { LazyColumn } from './components/LazyColumn';
-import { PWAInstallButton, OfflineIndicator } from './components/PWAComponents';
+import { LazyAlbumArt } from './components/LazyAlbumArt';
+import { PWAInstallButton, AndroidApkDownloadButton, OfflineIndicator } from './components/PWAComponents';
 import { buildTrackIndexMap } from './utils/mediatekOptimization';
 import {
+  authorizeSavedOfflineFolder,
+  clearSavedOfflineFolder,
+  isFolderPickerSupported,
+  loadSavedOfflineFolder,
+  pickOfflineFolder,
+  saveTrackToSelectedFolder,
+} from './utils/offlineFolder';
+import {
+  AudioOutputRouteId,
+  AUDIO_OUTPUT_ROUTES,
   DEFAULT_DSP_SETTINGS,
   DspPreset16,
   DspSettings,
+  FACTORY_DSP_PRESETS,
+  SURROUND_MODES,
+  SurroundModeId,
+  applyPresetToDsp,
+  matchPresetForTrack,
   sanitizeCustomPresets,
   sanitizeDspSettings,
 } from './utils/dspConsole';
 import { HeadunitDspEngine } from './utils/dspAudioEngine';
+import { isDaylightBySolar } from './utils/solarCalculator';
+import {
+  buildSettingsBackupPayload,
+  parseSettingsBackupJson,
+} from './utils/settingsBackup';
+import {
+  parseM3u8Paths,
+  resolveMatchedTracksForPaths,
+  resolvePlaylistNameFromM3u8,
+  resolveTracksForPlaylist,
+  serializeM3u8,
+  serializePlaylistFileName,
+} from './utils/m3uPlaylist';
 
 export function safeBtoa(str: string): string {
   try {
@@ -173,6 +217,8 @@ export interface Track {
   fileName: string;
   folderPath: string;
   contentType?: string;
+  sourceType?: 'WEBDAV' | 'LOCAL';
+  bitsPerSample?: number;
 }
 
 interface WebDAVFolder {
@@ -195,8 +241,35 @@ export interface DiagnosticLogEntry {
   body?: string;
 }
 
+type MenuTab = 'player' | 'library' | 'search' | 'settings';
+type LibraryFilterType =
+  | 'all'
+  | 'albums'
+  | 'artists'
+  | 'folders'
+  | 'recent'
+  | 'most_played'
+  | 'resume'
+  | 'favorites'
+  | 'downloaded'
+  | 'playlists';
+interface MenuNavEntry {
+  tab: MenuTab;
+  libraryFilter: LibraryFilterType;
+  selectedAlbum: string | null;
+  selectedArtist: string | null;
+}
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'player' | 'library' | 'search' | 'settings'>('player');
+  const [activeTab, setActiveTab] = useState<MenuTab>('player');
+  const [navHistory, setNavHistory] = useState<MenuNavEntry[]>([
+    { tab: 'player', libraryFilter: 'all', selectedAlbum: null, selectedArtist: null },
+  ]);
+  const [navHistoryIndex, setNavHistoryIndex] = useState(0);
+  const navHistoryRef = useRef(navHistory);
+  const navHistoryIndexRef = useRef(navHistoryIndex);
+  navHistoryRef.current = navHistory;
+  navHistoryIndexRef.current = navHistoryIndex;
 
   // Real Connection & Stream Diagnostics Logging State
   const [diagnosticLogs, setDiagnosticLogs] = useState<DiagnosticLogEntry[]>([]);
@@ -235,6 +308,27 @@ export default function App() {
   const [isBrowserLoading, setIsBrowserLoading] = useState(false);
   const [browserError, setBrowserError] = useState<string | null>(null);
   const [manualPathInput, setManualPathInput] = useState(() => localStorage.getItem('zentryx_nc_folder') || 'Music');
+
+  // Step-by-Step Folder Scan Diagnostics State
+  type FolderDiagStatus = 'RUNNING' | 'PASS' | 'WARN' | 'FAIL';
+  interface FolderDiagEntry {
+    id: string;
+    stepTitle: string;
+    targetPath: string;
+    httpStatusCode: number | null;
+    permissionsLabel: string;
+    rawPermissions: string | null;
+    detailMessage: string;
+    latencyMs: number;
+    status: FolderDiagStatus;
+  }
+  const [showScanDiagnosticsModal, setShowScanDiagnosticsModal] = useState(false);
+  const [scanDiagnosticsRunning, setScanDiagnosticsRunning] = useState(false);
+  const [scanDiagnosticsStepText, setScanDiagnosticsStepText] = useState('');
+  const [scanDiagnosticsSummary, setScanDiagnosticsSummary] = useState<string | null>(null);
+  const [scanDiagnosticsEntries, setScanDiagnosticsEntries] = useState<FolderDiagEntry[]>([]);
+  const [scanDiagnosticsStartPath, setScanDiagnosticsStartPath] = useState<string>('');
+  const scanDiagRunIdRef = useRef(0);
 
   // MBUX Ambient Accent Color
   const [accentKey, setAccentKey] = useState<'LIME' | 'AMBER' | 'CYAN' | 'SILVER' | 'RED'>(() => {
@@ -305,9 +399,12 @@ export default function App() {
   const [isPlaylistsOpen, setIsPlaylistsOpen] = useState(false);
   const [trackForPlaylist, setTrackForPlaylist] = useState<Track | null>(null);
 
-  // Offline Storage Records (IndexedDB)
+  // Offline Storage Records (IndexedDB) & Optional Local Download Folder
   const [offlineTrackIds, setOfflineTrackIds] = useState<Set<string>>(new Set());
   const [offlineStorageBytes, setOfflineStorageBytes] = useState(0);
+  const [offlineFolderHandle, setOfflineFolderHandle] = useState<any>(null);
+  const [offlineFolderName, setOfflineFolderName] = useState<string | null>(null);
+  const [offlineFolderPermission, setOfflineFolderPermission] = useState<'granted' | 'prompt' | 'denied'>('prompt');
 
   // Embedded Cover Art URLs
   const [coverArtUrls, setCoverArtUrls] = useState<Record<string, string>>({});
@@ -350,6 +447,23 @@ export default function App() {
     }
   });
 
+  // A/B DSP Compare & Momentary Bypass
+  const [activeCompareSlot, setActiveCompareSlot] = useState<'A' | 'B'>('A');
+  const slotADspSnapshotRef = useRef<DspSettings | null>(null);
+  const [slotBDspSnapshot, setSlotBDspSnapshot] = useState<DspSettings | null>(() => {
+    try {
+      const saved = localStorage.getItem('zentryx_dsp_slot_b');
+      return saved ? sanitizeDspSettings(JSON.parse(saved)) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [isHoldBypassed, setIsHoldBypassed] = useState<boolean>(false);
+
+  // Per-Output Audio Device Auto-Profile Routing
+  const [activeOutputRoute, setActiveOutputRoute] = useState<AudioOutputRouteId>('headunit_speakers');
+  const manualOverrideTrackIdsRef = useRef<Set<string>>(new Set());
+
   // Quick Attenuation / "Talk" Ducking (-20dB)
   const [isAttenuated, setIsAttenuated] = useState<boolean>(false);
 
@@ -358,6 +472,8 @@ export default function App() {
     return (localStorage.getItem('zentryx_scv_sensitivity') as any) || 'medium';
   });
   const [currentGpsSpeed, setCurrentGpsSpeed] = useState<number>(0);
+  const [gpsCoords, setGpsCoords] = useState<{ lat: number; lon: number } | null>(null);
+  const [solarMinuteTick, setSolarMinuteTick] = useState<number>(() => Math.floor(Date.now() / 60000));
   const [gpsStatus, setGpsStatus] = useState<'active' | 'waiting' | 'denied' | 'unavailable' | 'off'>('waiting');
   const [gpsPollNonce, setGpsPollNonce] = useState<number>(0);
 
@@ -451,7 +567,42 @@ export default function App() {
       return { ...DEFAULT_SWC_BINDINGS };
     }
   });
+  const [swcLongPressBindings, setSwcLongPressBindings] = useState<SteeringLongPressBindings>(() => {
+    try {
+      const saved = localStorage.getItem('zentryx_swc_long_bindings');
+      return saved
+        ? sanitizeSteeringLongPressBindings(JSON.parse(saved))
+        : { ...DEFAULT_SWC_LONG_PRESS_BINDINGS };
+    } catch {
+      return { ...DEFAULT_SWC_LONG_PRESS_BINDINGS };
+    }
+  });
   const isListeningSwcKeyRef = useRef<boolean>(false);
+
+  // Multi-Profile Driver Slots
+  const [driverProfiles, setDriverProfiles] = useState<DriverProfile[]>(() => {
+    try {
+      const saved = localStorage.getItem('zentryx_driver_profiles');
+      return saved ? sanitizeDriverProfiles(JSON.parse(saved)) : DEFAULT_DRIVER_PROFILES.map((p) => ({ ...p }));
+    } catch {
+      return DEFAULT_DRIVER_PROFILES.map((p) => ({ ...p }));
+    }
+  });
+  const [activeDriverProfileId, setActiveDriverProfileId] = useState<string>(() => {
+    return localStorage.getItem('zentryx_active_driver_profile') || 'venki';
+  });
+
+  // Android Headunit Hardware Automation & Floating Cockpit PiP Bar
+  const [autoPlayOnBluetooth, setAutoPlayOnBluetooth] = useState<boolean>(() => {
+    return localStorage.getItem('zentryx_bt_autoplay') !== 'false';
+  });
+  const [duckOnReverseGear, setDuckOnReverseGear] = useState<boolean>(() => {
+    return localStorage.getItem('zentryx_reverse_duck') !== 'false';
+  });
+  const [globalAudioSessionAttach, setGlobalAudioSessionAttach] = useState<boolean>(() => {
+    return localStorage.getItem('zentryx_global_eq') === 'true';
+  });
+  const [floatingMiniBarOpen, setFloatingMiniBarOpen] = useState<boolean>(false);
 
   // Category 3: ReplayGain, Crossfade, Smart Rolling Cache, Stats & Jump-to-Track
   const [replayGainEnabled, setReplayGainEnabled] = useState<boolean>(() => {
@@ -460,7 +611,7 @@ export default function App() {
   const [crossfadeSeconds, setCrossfadeSeconds] = useState<number>(() => {
     const saved = localStorage.getItem('zentryx_crossfade_sec');
     const parsed = saved !== null ? Number(saved) : 0;
-    return Number.isFinite(parsed) ? Math.max(0, Math.min(6, parsed)) : 0;
+    return Number.isFinite(parsed) ? Math.max(0, Math.min(8, parsed)) : 0;
   });
   const [crossfadeGain, setCrossfadeGain] = useState<number>(1);
   const crossfadeTriggeredForTrackRef = useRef<string | null>(null);
@@ -483,8 +634,33 @@ export default function App() {
       return {};
     }
   });
+  const [resumableProgressMap, setResumableProgressMap] = useState<
+    Record<string, { positionSeconds: number; durationSeconds: number; updatedAt: number }>
+  >(() => {
+    try {
+      const saved = localStorage.getItem('zentryx_resume_map');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
   const lastRecordedPlayTrackIdRef = useRef<string | null>(null);
   const [libraryScrollRequest, setLibraryScrollRequest] = useState<{ index: number; nonce: number } | null>(null);
+
+  // General Headunit UI Usability Features
+  const [dualPaneCockpit, setDualPaneCockpit] = useState<boolean>(() => {
+    return localStorage.getItem('zentryx_dual_pane_cockpit') !== 'false';
+  });
+  const [driveModeAutoSpeedKmH, setDriveModeAutoSpeedKmH] = useState<number>(() => {
+    const saved = localStorage.getItem('zentryx_drive_auto_speed');
+    const parsed = saved !== null ? Number(saved) : 0;
+    return [0, 15, 30].includes(parsed) ? parsed : 0;
+  });
+  const [isDriveModeOpen, setIsDriveModeOpen] = useState<boolean>(false);
+  const driveModeDismissedAtSpeedRef = useRef<boolean>(false);
+  const [isStreamInspectorOpen, setIsStreamInspectorOpen] = useState<boolean>(false);
+  const [isVoiceListening, setIsVoiceListening] = useState<boolean>(false);
+  const voiceRecognitionRef = useRef<any>(null);
 
   // Favorites & Downloaded Sets
   const [favorites, setFavorites] = useState<Set<string>>(() => {
@@ -508,21 +684,23 @@ export default function App() {
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
 
   // Library & Search State
-  const [libraryFilter, setLibraryFilter] = useState<'all' | 'albums' | 'artists' | 'favorites' | 'downloaded' | 'playlists'>('all');
+  const [libraryFilter, setLibraryFilter] = useState<LibraryFilterType>('all');
   const [selectedAlbum, setSelectedAlbum] = useState<string | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<string | null>(null);
+  const [selectedFolderPath, setSelectedFolderPath] = useState<string>('');
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
+  const [isSyncingPlaylists, setIsSyncingPlaylists] = useState(false);
+  const [isSyncingBackup, setIsSyncingBackup] = useState(false);
+  const [librarySearchQuery, setLibrarySearchQuery] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Driver Safe Motion Lock & Resolved Day/Night Display Mode
+  // Driver Safe Motion Lock & Astronomical Solar GPS Day/Night Mode
   const driverSafeActive = isDriverSafeLockActive(driverSafeMode, currentGpsSpeed, 10);
-  const isDaylightCockpit =
-    cockpitThemeMode === 'day' ||
-    (cockpitThemeMode === 'auto' &&
-      (() => {
-        const hr = new Date().getHours();
-        return hr >= 7 && hr < 19;
-      })());
+  const isDaylightCockpit = useMemo(() => {
+    if (cockpitThemeMode === 'day') return true;
+    if (cockpitThemeMode === 'night') return false;
+    return isDaylightBySolar(gpsCoords?.lat, gpsCoords?.lon);
+  }, [cockpitThemeMode, gpsCoords, solarMinuteTick]);
 
   // Current Track Pointer from active Queue (fallback to indexed tracks)
   const currentTrack: Track | undefined = queue[currentTrackIndex] || tracks[currentTrackIndex];
@@ -607,7 +785,111 @@ export default function App() {
 
   useEffect(() => {
     refreshOfflineStorage();
+    loadSavedOfflineFolder().then((saved) => {
+      if (saved) {
+        setOfflineFolderHandle(saved.handle);
+        setOfflineFolderName(saved.name);
+        setOfflineFolderPermission(saved.permission);
+      }
+    });
   }, []);
+
+  const applyMenuNavEntry = useCallback((entry: MenuNavEntry) => {
+    setActiveTab(entry.tab);
+    setLibraryFilter(entry.libraryFilter);
+    setSelectedAlbum(entry.selectedAlbum);
+    setSelectedArtist(entry.selectedArtist);
+  }, []);
+
+  const navigateToMenu = useCallback(
+    (patch: Partial<MenuNavEntry>) => {
+      const curIdx = navHistoryIndexRef.current;
+      const list = navHistoryRef.current;
+      const cur = list[curIdx] || {
+        tab: activeTab,
+        libraryFilter,
+        selectedAlbum,
+        selectedArtist,
+      };
+      const next: MenuNavEntry = {
+        tab: patch.tab ?? cur.tab,
+        libraryFilter: patch.libraryFilter ?? cur.libraryFilter,
+        selectedAlbum: patch.selectedAlbum !== undefined ? patch.selectedAlbum : cur.selectedAlbum,
+        selectedArtist: patch.selectedArtist !== undefined ? patch.selectedArtist : cur.selectedArtist,
+      };
+
+      const same =
+        cur.tab === next.tab &&
+        cur.libraryFilter === next.libraryFilter &&
+        cur.selectedAlbum === next.selectedAlbum &&
+        cur.selectedArtist === next.selectedArtist;
+
+      applyMenuNavEntry(next);
+      if (same) return;
+
+      const truncated = list.slice(0, curIdx + 1);
+      const updated = [...truncated, next];
+      setNavHistory(updated);
+      setNavHistoryIndex(updated.length - 1);
+    },
+    [activeTab, libraryFilter, selectedAlbum, selectedArtist, applyMenuNavEntry]
+  );
+
+  const canMenuGoBack = navHistoryIndex > 0;
+  const canMenuGoForward = navHistoryIndex < navHistory.length - 1;
+
+  const handleMenuBack = useCallback(() => {
+    const idx = navHistoryIndexRef.current;
+    if (idx <= 0) return;
+    const target = navHistoryRef.current[idx - 1];
+    if (!target) return;
+    setNavHistoryIndex(idx - 1);
+    applyMenuNavEntry(target);
+  }, [applyMenuNavEntry]);
+
+  const handleMenuForward = useCallback(() => {
+    const idx = navHistoryIndexRef.current;
+    if (idx >= navHistoryRef.current.length - 1) return;
+    const target = navHistoryRef.current[idx + 1];
+    if (!target) return;
+    setNavHistoryIndex(idx + 1);
+    applyMenuNavEntry(target);
+  }, [applyMenuNavEntry]);
+
+  const handlePickOfflineFolder = async () => {
+    try {
+      const picked = await pickOfflineFolder();
+      setOfflineFolderHandle(picked.handle);
+      setOfflineFolderName(picked.name);
+      setOfflineFolderPermission(picked.permission);
+      setStatusMessage(`Offline download folder set to "${picked.name}".`);
+      setTimeout(() => setStatusMessage(null), 3500);
+    } catch (err: any) {
+      if (err?.name === 'AbortError') return;
+      setStatusMessage(err?.message || 'Could not open folder picker.');
+      setTimeout(() => setStatusMessage(null), 4000);
+    }
+  };
+
+  const handleAuthorizeOfflineFolder = async () => {
+    const ok = await authorizeSavedOfflineFolder(offlineFolderHandle);
+    setOfflineFolderPermission(ok ? 'granted' : 'denied');
+    setStatusMessage(
+      ok
+        ? `Write permission verified for "${offlineFolderName}".`
+        : 'Folder write permission was declined.'
+    );
+    setTimeout(() => setStatusMessage(null), 3000);
+  };
+
+  const handleClearOfflineFolder = async () => {
+    await clearSavedOfflineFolder();
+    setOfflineFolderHandle(null);
+    setOfflineFolderName(null);
+    setOfflineFolderPermission('prompt');
+    setStatusMessage('Offline downloads reset to browser IndexedDB cache.');
+    setTimeout(() => setStatusMessage(null), 3000);
+  };
 
   const handleRequestPersistentStorage = async () => {
     try {
@@ -729,31 +1011,75 @@ export default function App() {
     });
   }, [currentTrack, isPlaying, positionSeconds, durationSeconds, coverArtUrls]);
 
-  // In-Car Steering Wheel & Remappable CANBUS Shortcuts
+  const handleCycleSurroundMode = () => {
+    const order: SurroundModeId[] = ['off', 'logic7_surround', 'concert_hall', 'studio_focused'];
+    setDspSettings((prev) => {
+      const idx = order.indexOf(prev.surroundMode ?? 'off');
+      const nextMode = order[(idx + 1) % order.length];
+      setStatusMessage(`Surround Mode: ${SURROUND_MODES[nextMode].label}`);
+      setTimeout(() => setStatusMessage(null), 2200);
+      return {
+        ...prev,
+        dspEnabled: true,
+        surroundMode: nextMode,
+        monoFoldDown: nextMode !== 'off' ? false : prev.monoFoldDown,
+      };
+    });
+  };
+
+  // In-Car Steering Wheel & Remappable CANBUS Shortcuts (Short-Press & Long-Press >= 550ms)
   useEffect(() => {
+    const executeSwcAction = (swcAction: SteeringAction) => {
+      if (swcAction === 'play_pause') {
+        togglePlayPause();
+      } else if (swcAction === 'next') {
+        handleNextTrack();
+      } else if (swcAction === 'prev') {
+        handlePrevTrack();
+      } else if (swcAction === 'mute') {
+        setIsMuted((m) => !m);
+      } else if (swcAction === 'duck') {
+        handleToggleAttenuation();
+      } else if (swcAction === 'visualizer') {
+        setIsVisualizerOpen((v) => !v);
+      } else if (swcAction === 'favorite') {
+        if (currentTrack) toggleFavorite(currentTrack.id);
+      } else if (swcAction === 'cruising_mix') {
+        handlePlaySmartMix('cruising');
+      } else if (swcAction === 'drive_mode') {
+        setIsDriveModeOpen((d) => !d);
+      } else if (swcAction === 'cycle_surround') {
+        handleCycleSurroundMode();
+      }
+    };
+
+    const activeHolds = new Map<string, { timer: number; triggeredLong: boolean; shortAction: SteeringAction | null }>();
+
     const handleKeyDown = (e: KeyboardEvent) => {
       if (isListeningSwcKeyRef.current) return;
       if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) {
         return;
       }
 
-      const swcAction = resolveSteeringAction(e.key, e.code, swcBindings);
-      if (swcAction) {
+      const keyId = e.code || e.key;
+      const shortAction = resolveSteeringAction(e.key, e.code, swcBindings);
+      const longAction = resolveSteeringAction(e.key, e.code, swcLongPressBindings);
+
+      if (shortAction || longAction) {
         e.preventDefault();
-        if (swcAction === 'play_pause') {
-          togglePlayPause();
-        } else if (swcAction === 'next') {
-          handleNextTrack();
-        } else if (swcAction === 'prev') {
-          handlePrevTrack();
-        } else if (swcAction === 'mute') {
-          setIsMuted((m) => !m);
-        } else if (swcAction === 'duck') {
-          handleToggleAttenuation();
-        } else if (swcAction === 'visualizer') {
-          setIsVisualizerOpen((v) => !v);
-        } else if (swcAction === 'favorite') {
-          if (currentTrack) toggleFavorite(currentTrack.id);
+        if (e.repeat) return;
+        if (longAction) {
+          if (activeHolds.has(keyId)) return;
+          const timer = window.setTimeout(() => {
+            const entry = activeHolds.get(keyId);
+            if (entry) {
+              entry.triggeredLong = true;
+              executeSwcAction(longAction);
+            }
+          }, 550);
+          activeHolds.set(keyId, { timer, triggeredLong: false, shortAction });
+        } else if (shortAction) {
+          executeSwcAction(shortAction);
         }
         return;
       }
@@ -788,9 +1114,26 @@ export default function App() {
       }
     };
 
+    const handleKeyUp = (e: KeyboardEvent) => {
+      const keyId = e.code || e.key;
+      const entry = activeHolds.get(keyId);
+      if (!entry) return;
+      window.clearTimeout(entry.timer);
+      activeHolds.delete(keyId);
+      if (!entry.triggeredLong && entry.shortAction) {
+        executeSwcAction(entry.shortAction);
+      }
+    };
+
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [positionSeconds, durationSeconds, isPlaying, currentTrackIndex, queue, swcBindings, currentTrack]);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      activeHolds.forEach((entry) => window.clearTimeout(entry.timer));
+      activeHolds.clear();
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [positionSeconds, durationSeconds, isPlaying, currentTrackIndex, queue, swcBindings, swcLongPressBindings, currentTrack]);
 
   // Helpers: Format Seconds and Bytes
   const formatTime = (secs: number) => {
@@ -1144,6 +1487,354 @@ export default function App() {
     }
 
     return { files, subfolders };
+  };
+
+  const decodeWebDavPermissions = (rawPermissions: string | null, httpStatus: number | null): string => {
+    const raw = (rawPermissions || '').trim().toUpperCase();
+    if (raw) {
+      const caps: string[] = [];
+      if (raw.includes('G')) caps.push('Read');
+      if (raw.includes('W')) caps.push('Write');
+      if (raw.includes('C')) caps.push('Create Files');
+      if (raw.includes('K')) caps.push('Create Folders');
+      if (raw.includes('D')) caps.push('Delete');
+      if (raw.includes('N')) caps.push('Rename');
+      if (raw.includes('V')) caps.push('Move');
+      if (raw.includes('S')) caps.push('Shared');
+      if (raw.includes('M')) caps.push('External Mount');
+      const summary = caps.length > 0 ? caps.join(', ') : 'Accessible';
+      return `${summary} [${raw}]`;
+    }
+    if (httpStatus === 207 || httpStatus === 200) return 'Readable (PROPFIND 207 OK)';
+    if (httpStatus === 401) return 'Unauthorized (401 — check credentials / app password)';
+    if (httpStatus === 403) return 'Forbidden (403 — folder access denied)';
+    if (httpStatus === 404) return 'Not Found (404 — folder missing)';
+    if (httpStatus === 405) return 'Method Not Allowed (405)';
+    if (httpStatus !== null && httpStatus >= 500 && httpStatus < 600) return `Server Error (HTTP ${httpStatus})`;
+    if (httpStatus === null) return 'Connection / SSL Failed';
+    return `HTTP ${httpStatus}`;
+  };
+
+  const probeWebDavDirectory = async (
+    folderPath: string,
+    user: string,
+    pass: string,
+    depth: '0' | '1' = '1',
+    forceLegacyWebdav = false
+  ) => {
+    const cleanPath = folderPath.replace(/^\/+/, '').replace(/\/+$/, '');
+    const encodedSegments = cleanPath ? cleanPath.split('/').map(encodeURIComponent).join('/') : '';
+    const basePrefix = forceLegacyWebdav
+      ? '/api/nextcloud/remote.php/webdav'
+      : `/api/nextcloud/remote.php/dav/files/${encodeURIComponent(user)}`;
+    const url = `${basePrefix}${encodedSegments ? '/' + encodedSegments : ''}/`;
+
+    const propfindBody = `<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:prop>
+    <d:resourcetype/>
+    <d:getcontentlength/>
+    <d:getcontenttype/>
+    <d:displayname/>
+    <oc:permissions/>
+  </d:prop>
+</d:propfind>`;
+
+    const t0 = performance.now();
+    try {
+      const res = await fetch(url, {
+        method: 'PROPFIND',
+        headers: {
+          Authorization: `Basic ${safeBtoa(`${user}:${pass}`)}`,
+          Depth: depth,
+          'Content-Type': 'application/xml; charset=utf-8',
+        },
+        body: propfindBody,
+      });
+      const latencyMs = Math.round(performance.now() - t0);
+      const davHeader = res.headers.get('dav');
+      if (res.status !== 207 && !(res.status >= 200 && res.status < 300)) {
+        return {
+          url,
+          httpStatus: res.status,
+          selfPermissions: null as string | null,
+          davHeader,
+          subfolders: [] as Array<{ name: string; path: string; permissions: string | null }>,
+          audioCount: 0,
+          latencyMs,
+          error: `HTTP ${res.status} ${res.statusText || ''}`.trim(),
+        };
+      }
+
+      const xmlText = await res.text();
+      const parser = new DOMParser();
+      const xmlDoc = parser.parseFromString(xmlText, 'application/xml');
+      const parseError = xmlDoc.querySelector('parsererror');
+      if (parseError) {
+        return {
+          url,
+          httpStatus: res.status,
+          selfPermissions: null as string | null,
+          davHeader,
+          subfolders: [] as Array<{ name: string; path: string; permissions: string | null }>,
+          audioCount: 0,
+          latencyMs,
+          error: 'XML response parse failed',
+        };
+      }
+
+      let selfPermissions: string | null = null;
+      const subfolders: Array<{ name: string; path: string; permissions: string | null }> = [];
+      let audioCount = 0;
+
+      const responses = Array.from(xmlDoc.getElementsByTagNameNS('*', 'response'));
+      for (const r of responses) {
+        const hrefEl = r.getElementsByTagNameNS('*', 'href')[0];
+        if (!hrefEl || !hrefEl.textContent) continue;
+        const decodedHref = decodeURIComponent(hrefEl.textContent);
+        const match = decodedHref.match(/^.*\/files\/[^/]+\/?(.*)$/i) || decodedHref.match(/^.*\/webdav\/?(.*)$/i);
+        const relPath = match ? match[1].replace(/^\/+/, '').replace(/\/+$/, '') : '';
+        const permEl = r.getElementsByTagNameNS('*', 'permissions')[0];
+        const perms = permEl?.textContent?.trim() || null;
+
+        if (relPath.toLowerCase() === cleanPath.toLowerCase()) {
+          if (perms) selfPermissions = perms;
+          continue;
+        }
+
+        const resType = r.getElementsByTagNameNS('*', 'resourcetype')[0];
+        const isCollection = Boolean(resType && resType.getElementsByTagNameNS('*', 'collection').length > 0);
+        const displayNameEl = r.getElementsByTagNameNS('*', 'displayname')[0];
+        const name = displayNameEl?.textContent || decodedHref.replace(/\/+$/, '').split('/').pop() || '';
+
+        if (isCollection) {
+          if (name && !name.startsWith('.')) {
+            subfolders.push({ name, path: relPath, permissions: perms });
+          }
+        } else {
+          const ctEl = r.getElementsByTagNameNS('*', 'getcontenttype')[0];
+          const contentType = ctEl?.textContent || '';
+          const isAudio =
+            contentType.startsWith('audio/') ||
+            /\.(mp3|flac|m4a|aac|ogg|opus|wav|wma|m4b|alac|aiff)$/i.test(name);
+          if (isAudio) audioCount += 1;
+        }
+      }
+
+      return {
+        url,
+        httpStatus: res.status,
+        selfPermissions,
+        davHeader,
+        subfolders,
+        audioCount,
+        latencyMs,
+        error: null as string | null,
+      };
+    } catch (e: any) {
+      return {
+        url,
+        httpStatus: null as number | null,
+        selfPermissions: null as string | null,
+        davHeader: null as string | null,
+        subfolders: [] as Array<{ name: string; path: string; permissions: string | null }>,
+        audioCount: 0,
+        latencyMs: Math.round(performance.now() - t0),
+        error: e?.message || 'Network request failed',
+      };
+    }
+  };
+
+  const runFolderScanDiagnostics = async (startPathOverride?: string) => {
+    const runId = ++scanDiagRunIdRef.current;
+    const rawTarget = startPathOverride !== undefined ? startPathOverride : (musicFolder || '');
+    const startPath = rawTarget.startsWith('local:') ? (musicFolder || '') : rawTarget.replace(/^\/+/, '').replace(/\/+$/, '');
+    setScanDiagnosticsStartPath(startPath);
+    setShowScanDiagnosticsModal(true);
+    setScanDiagnosticsRunning(true);
+    setScanDiagnosticsSummary(null);
+    setScanDiagnosticsEntries([]);
+    setScanDiagnosticsStepText('Step 1: Verifying stored Nextcloud WebDAV credentials...');
+
+    const entries: FolderDiagEntry[] = [];
+    const pushOrUpdate = (entry: FolderDiagEntry) => {
+      if (scanDiagRunIdRef.current !== runId) return;
+      const idx = entries.findIndex((e) => e.id === entry.id);
+      if (idx >= 0) entries[idx] = entry;
+      else entries.push(entry);
+      setScanDiagnosticsEntries([...entries]);
+    };
+
+    // Step 1: Credential check
+    if (!serverUrl || !username || !password) {
+      pushOrUpdate({
+        id: 'step_config',
+        stepTitle: 'Step 1 · Nextcloud Configuration',
+        targetPath: serverUrl || 'Not configured',
+        httpStatusCode: null,
+        permissionsLabel: 'Missing credentials',
+        rawPermissions: null,
+        detailMessage: 'Server URL, username, or app password missing. Sign in via Nextcloud Account first.',
+        latencyMs: 0,
+        status: 'FAIL',
+      });
+      setScanDiagnosticsRunning(false);
+      setScanDiagnosticsStepText('Diagnostics stopped: missing Nextcloud credentials');
+      setScanDiagnosticsSummary('Failed at Step 1: Sign in with Nextcloud credentials first.');
+      return;
+    }
+
+    pushOrUpdate({
+      id: 'step_config',
+      stepTitle: 'Step 1 · Nextcloud Configuration',
+      targetPath: serverUrl,
+      httpStatusCode: 200,
+      permissionsLabel: 'Credentials Configured',
+      rawPermissions: null,
+      detailMessage: `User: ${username} • Start folder: /${startPath || 'Root'}`,
+      latencyMs: 0,
+      status: 'PASS',
+    });
+
+    // Step 2: WebDAV Root handshake (Depth: 0)
+    setScanDiagnosticsStepText('Step 2: Checking Nextcloud WebDAV root handshake (PROPFIND Depth: 0)...');
+    pushOrUpdate({
+      id: 'step_root_probe',
+      stepTitle: 'Step 2 · WebDAV Root Handshake',
+      targetPath: `/remote.php/dav/files/${username}/`,
+      httpStatusCode: null,
+      permissionsLabel: 'Probing...',
+      rawPermissions: null,
+      detailMessage: 'Sending PROPFIND Depth: 0 request...',
+      latencyMs: 0,
+      status: 'RUNNING',
+    });
+
+    let useLegacy = false;
+    let rootProbe = await probeWebDavDirectory('', username, password, '0', false);
+    if (scanDiagRunIdRef.current !== runId) return;
+    if (rootProbe.httpStatus === 404 || rootProbe.httpStatus === 405) {
+      const legacyProbe = await probeWebDavDirectory('', username, password, '0', true);
+      if (scanDiagRunIdRef.current !== runId) return;
+      if (legacyProbe.httpStatus === 207 || (legacyProbe.httpStatus !== null && legacyProbe.httpStatus >= 200 && legacyProbe.httpStatus < 300)) {
+        rootProbe = legacyProbe;
+        useLegacy = true;
+      }
+    }
+
+    const rootOk = rootProbe.httpStatus === 207 || (rootProbe.httpStatus !== null && rootProbe.httpStatus >= 200 && rootProbe.httpStatus < 300);
+    pushOrUpdate({
+      id: 'step_root_probe',
+      stepTitle: 'Step 2 · WebDAV Root Handshake',
+      targetPath: rootProbe.url.replace(/^\/api\/nextcloud/, ''),
+      httpStatusCode: rootProbe.httpStatus,
+      permissionsLabel: decodeWebDavPermissions(rootProbe.selfPermissions, rootProbe.httpStatus),
+      rawPermissions: rootProbe.selfPermissions,
+      detailMessage: rootOk
+        ? `WebDAV connected (${rootProbe.davHeader || 'DAV endpoint ready'})`
+        : (rootProbe.error || `Unexpected status HTTP ${rootProbe.httpStatus ?? 'ERR'}`),
+      latencyMs: rootProbe.latencyMs,
+      status: rootOk ? 'PASS' : 'FAIL',
+    });
+
+    if (!rootOk) {
+      setScanDiagnosticsRunning(false);
+      setScanDiagnosticsStepText('Diagnostics finished with root connection error');
+      setScanDiagnosticsSummary(
+        rootProbe.httpStatus === 401
+          ? 'Authentication rejected (HTTP 401): Check username or regenerate Nextcloud App Password.'
+          : `Root WebDAV endpoint unreachable (${rootProbe.httpStatus ? `HTTP ${rootProbe.httpStatus}` : rootProbe.error}).`
+      );
+      return;
+    }
+
+    // Step 3+: Walk target folder and every subdirectory probed during a scan (BFS, cap 40 subdirectories)
+    const queue: Array<{ path: string; knownPerms: string | null }> = [{ path: startPath, knownPerms: null }];
+    const visited = new Set<string>();
+    const maxDirectories = 40;
+    let fallbackQueued = false;
+    let stepIndex = 3;
+
+    while (queue.length > 0 && visited.size < maxDirectories) {
+      if (scanDiagRunIdRef.current !== runId) return;
+      const { path: currentPath, knownPerms } = queue.shift()!;
+      const normKey = currentPath.toLowerCase();
+      if (visited.has(normKey)) continue;
+      visited.add(normKey);
+
+      const displayPath = currentPath ? `/${currentPath}` : '/ (Root)';
+      const entryId = `dir_${stepIndex}_${normKey || 'root'}`;
+      const curStep = stepIndex++;
+      setScanDiagnosticsStepText(`Step ${curStep}: Probing ${displayPath}...`);
+
+      pushOrUpdate({
+        id: entryId,
+        stepTitle: `Step ${curStep} · Probe Directory`,
+        targetPath: displayPath,
+        httpStatusCode: null,
+        permissionsLabel: decodeWebDavPermissions(knownPerms, null),
+        rawPermissions: knownPerms,
+        detailMessage: 'Sending PROPFIND Depth: 1...',
+        latencyMs: 0,
+        status: 'RUNNING',
+      });
+
+      const dirProbe = await probeWebDavDirectory(currentPath, username, password, '1', useLegacy);
+      if (scanDiagRunIdRef.current !== runId) return;
+
+      const rawPerms = dirProbe.selfPermissions || knownPerms;
+      const permLabel = decodeWebDavPermissions(rawPerms, dirProbe.httpStatus);
+      const isOk = dirProbe.httpStatus === 207 || (dirProbe.httpStatus !== null && dirProbe.httpStatus >= 200 && dirProbe.httpStatus < 300);
+
+      let stepStatus: FolderDiagStatus = 'FAIL';
+      let detail = '';
+      if (isOk) {
+        stepStatus = rawPerms && !rawPerms.toUpperCase().includes('G') ? 'WARN' : 'PASS';
+        detail = `Found ${dirProbe.audioCount} audio file(s) and ${dirProbe.subfolders.length} subfolder(s)`;
+        for (const sub of dirProbe.subfolders) {
+          if (sub.path && !visited.has(sub.path.toLowerCase())) {
+            queue.push({ path: sub.path, knownPerms: sub.permissions });
+          }
+        }
+        if (currentPath && dirProbe.audioCount === 0 && dirProbe.subfolders.length === 0 && !fallbackQueued && !visited.has('')) {
+          fallbackQueued = true;
+          queue.push({ path: '', knownPerms: null });
+        }
+      } else {
+        stepStatus = dirProbe.httpStatus === 404 && currentPath && !fallbackQueued ? 'WARN' : 'FAIL';
+        detail =
+          dirProbe.httpStatus === 404 && currentPath && !fallbackQueued
+            ? `HTTP 404 on ${displayPath} — auto-fallback will probe / (Root)`
+            : (dirProbe.error || `PROPFIND failed with HTTP ${dirProbe.httpStatus ?? 'ERR'}`);
+        if (currentPath && !fallbackQueued && !visited.has('')) {
+          fallbackQueued = true;
+          queue.push({ path: '', knownPerms: null });
+        }
+      }
+
+      pushOrUpdate({
+        id: entryId,
+        stepTitle: `Step ${curStep} · Probe Directory`,
+        targetPath: displayPath,
+        httpStatusCode: dirProbe.httpStatus,
+        permissionsLabel: permLabel,
+        rawPermissions: rawPerms,
+        detailMessage: detail,
+        latencyMs: dirProbe.latencyMs,
+        status: stepStatus,
+      });
+    }
+
+    const folderEntries = entries.filter((e) => e.id.startsWith('dir_'));
+    const passCount = folderEntries.filter((e) => e.status === 'PASS').length;
+    const warnCount = folderEntries.filter((e) => e.status === 'WARN').length;
+    const failCount = folderEntries.filter((e) => e.status === 'FAIL').length;
+
+    setScanDiagnosticsRunning(false);
+    setScanDiagnosticsStepText('Scan Diagnostics Complete');
+    setScanDiagnosticsSummary(
+      `Probed ${folderEntries.length} directory(s): ${passCount} OK, ${warnCount} warning(s), ${failCount} failed.`
+    );
   };
 
   // Scan Music Folders with deep subfolder support
@@ -1572,9 +2263,12 @@ export default function App() {
     setTimeout(() => setStatusMessage(null), 3500);
   };
 
-  // Helper: Generates resilient candidate streaming URLs (Legacy WebDAV & Canonical WebDAV)
+  // Helper: Generates resilient candidate streaming URLs (Local USB/Device Blob or WebDAV)
   const getTrackCandidateUrls = (track?: Track): string[] => {
     if (!track) return [];
+    if (track.sourceType === 'LOCAL' || (track.streamUrl && track.streamUrl.startsWith('blob:'))) {
+      return track.streamUrl ? [track.streamUrl] : [];
+    }
     const auth = username && password ? safeBtoa(`${username}:${password}`) : '';
     const authQuery = auth ? `auth=${encodeURIComponent(auth)}` : '';
 
@@ -1738,12 +2432,13 @@ export default function App() {
     }
   };
 
-  // Schedule debounced non-blocking localStorage mirror of enriched tracks
+  // Schedule debounced non-blocking localStorage mirror of enriched remote tracks
   const schedulePersistTracks = (updatedTracks: Track[]) => {
     if (persistTracksTimerRef.current) clearTimeout(persistTracksTimerRef.current);
     persistTracksTimerRef.current = setTimeout(() => {
       try {
-        localStorage.setItem('zentryx_nc_tracks', JSON.stringify(updatedTracks));
+        const remoteOnly = updatedTracks.filter((t) => t.sourceType !== 'LOCAL');
+        localStorage.setItem('zentryx_nc_tracks', JSON.stringify(remoteOnly));
       } catch {}
     }, 800);
   };
@@ -1925,9 +2620,24 @@ export default function App() {
       } catch {}
 
       await saveOfflineTrack(target, audioBlob, mimeType, coverBlob);
+      let savedFolderMsg = '';
+      if (offlineFolderHandle) {
+        try {
+          const diskRes = await saveTrackToSelectedFolder(
+            offlineFolderHandle,
+            target.fileName,
+            target.artist,
+            target.title,
+            audioBlob
+          );
+          if (diskRes.savedToDisk) {
+            savedFolderMsg = ` & folder "${offlineFolderName || 'Selected'}"`;
+          }
+        } catch {}
+      }
       setOfflineTrackIds(prev => new Set(prev).add(target.id));
       setDownloadedTracks(prev => new Set(prev).add(target.id));
-      setStatusMessage(`"${target.title}" saved to vehicle offline storage!`);
+      setStatusMessage(`"${target.title}" saved to vehicle offline storage${savedFolderMsg}!`);
       await enforceOfflineCacheCap(favorites, offlineCacheCapMb);
     } catch (err: any) {
       setStatusMessage(`Offline sync notice: ${err.message}`);
@@ -2038,6 +2748,544 @@ export default function App() {
     setPositionSeconds(0);
     startAudioPlayback(plTracks[0]);
     setActiveTab('player');
+  };
+
+  // Export .m3u8 playlist download
+  const handleExportPlaylistM3u8 = (pl: Playlist) => {
+    triggerHaptic();
+    const plTracks = resolveTracksForPlaylist(pl, tracks);
+    const content = serializeM3u8(pl.name, plTracks);
+    const blob = new Blob([content], { type: 'application/x-mpegurl;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = serializePlaylistFileName(pl.name);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setStatusMessage(`Exported "${pl.name}" (${plTracks.length} tracks) as .m3u8`);
+    setTimeout(() => setStatusMessage(null), 3000);
+  };
+
+  // Import .m3u8 playlist file from disk
+  const handleImportM3u8File = async (file: File) => {
+    try {
+      const text = await file.text();
+      const baseName = file.name.replace(/\.(m3u8?|txt)$/i, '') || 'Imported Playlist';
+      const resolvedName = resolvePlaylistNameFromM3u8(text, baseName);
+      const paths = parseM3u8Paths(text);
+      const matched = resolveMatchedTracksForPaths(paths, tracks);
+      const created: Playlist = {
+        ...createPlaylist(resolvedName, `Imported (${matched.length} matched)`),
+        trackIds: matched.map((t) => t.id),
+      };
+      await savePlaylistRecord(created);
+      setPlaylists((prev) => [...prev, created]);
+      setStatusMessage(`Imported playlist "${resolvedName}" (${matched.length} tracks matched)`);
+      setTimeout(() => setStatusMessage(null), 3500);
+    } catch (e: any) {
+      setStatusMessage(`Could not import .m3u8: ${e?.message || 'Parse error'}`);
+      setTimeout(() => setStatusMessage(null), 3500);
+    }
+  };
+
+  // Two-way Nextcloud .m3u8 Playlist Sync (<musicFolder>/Playlists)
+  const handleSyncPlaylistsCloud = async () => {
+    if (!isLoggedIn || !username || !password) {
+      setStatusMessage('Sign in to Nextcloud first to sync .m3u8 playlists.');
+      setTimeout(() => setStatusMessage(null), 3000);
+      return;
+    }
+    if (isSyncingPlaylists) return;
+    setIsSyncingPlaylists(true);
+    try {
+      const basicAuth = safeBtoa(`${username}:${password}`);
+      const cleanRoot = (musicFolder || '').replace(/^\/+/, '').replace(/\/+$/, '');
+      const playlistRelDir = cleanRoot ? `${cleanRoot}/Playlists` : 'Playlists';
+      const dirSegs = playlistRelDir.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+      const davDirUrl = `/api/nextcloud/remote.php/dav/files/${encodeURIComponent(username)}/${dirSegs}/`;
+
+      // Ensure /Playlists collection exists (MKCOL returns 201 Created or 405 Method Not Allowed if exists)
+      await fetch(davDirUrl, {
+        method: 'MKCOL',
+        headers: { Authorization: `Basic ${basicAuth}` },
+      }).catch(() => {});
+
+      let pushed = 0;
+      for (const pl of playlists) {
+        const plTracks = resolveTracksForPlaylist(pl, tracks);
+        const m3uText = serializeM3u8(pl.name, plTracks);
+        const fileName = encodeURIComponent(serializePlaylistFileName(pl.name));
+        const putRes = await fetch(`${davDirUrl}${fileName}`, {
+          method: 'PUT',
+          headers: {
+            Authorization: `Basic ${basicAuth}`,
+            'Content-Type': 'audio/x-mpegurl; charset=utf-8',
+          },
+          body: m3uText,
+        });
+        if (putRes.ok) pushed++;
+      }
+
+      // Pull any remote .m3u8 playlists from Nextcloud
+      let pulled = 0;
+      const propRes = await fetch(davDirUrl, {
+        method: 'PROPFIND',
+        headers: {
+          Authorization: `Basic ${basicAuth}`,
+          Depth: '1',
+        },
+      });
+      if (propRes.ok) {
+        const xmlText = await propRes.text();
+        const xmlDoc = new DOMParser().parseFromString(xmlText, 'application/xml');
+        const responses = Array.from(xmlDoc.getElementsByTagNameNS('*', 'response'));
+        const existingLower = new Set(playlists.map((p) => p.name.trim().toLowerCase()));
+        const importedList: Playlist[] = [];
+
+        for (const r of responses) {
+          const href = r.getElementsByTagNameNS('*', 'href')[0]?.textContent || '';
+          const decoded = decodeURIComponent(href);
+          const nameFromHref = decoded.replace(/\/+$/, '').split('/').pop() || '';
+          if (!/\.(m3u8?)$/i.test(nameFromHref)) continue;
+
+          const getUrl = `/api/nextcloud${href.startsWith('/') ? href : '/' + href}`;
+          const fileRes = await fetch(getUrl, {
+            headers: { Authorization: `Basic ${basicAuth}` },
+          });
+          if (!fileRes.ok) continue;
+          const m3uBody = await fileRes.text();
+          const plName = resolvePlaylistNameFromM3u8(
+            m3uBody,
+            nameFromHref.replace(/\.(m3u8?)$/i, '')
+          );
+          if (existingLower.has(plName.trim().toLowerCase())) continue;
+
+          const matched = resolveMatchedTracksForPaths(parseM3u8Paths(m3uBody), tracks);
+          const created: Playlist = {
+            ...createPlaylist(plName, 'Synced from Nextcloud .m3u8'),
+            trackIds: matched.map((t) => t.id),
+          };
+          await savePlaylistRecord(created);
+          importedList.push(created);
+          existingLower.add(plName.trim().toLowerCase());
+          pulled++;
+        }
+
+        if (importedList.length > 0) {
+          setPlaylists((prev) => [...prev, ...importedList]);
+        }
+      }
+
+      setStatusMessage(`Nextcloud .m3u8 sync complete: ${pushed} pushed, ${pulled} imported.`);
+    } catch (e: any) {
+      setStatusMessage(`Playlist sync failed: ${e?.message || 'Network error'}`);
+    } finally {
+      setIsSyncingPlaylists(false);
+      setTimeout(() => setStatusMessage(null), 4000);
+    }
+  };
+
+  // Local USB / MicroSD / Device Folder Scanner (File System Access API + FileList fallback)
+  const processScannedLocalFiles = async (entries: Array<{ file: File; relPath: string }>, rootName: string) => {
+    const audioRegex = /\.(mp3|flac|wav|m4a|aac|ogg|opus|wma|alac|aiff)$/i;
+    const valid = entries.filter((e) => e.file.type.startsWith('audio/') || audioRegex.test(e.file.name));
+    if (valid.length === 0) {
+      setStatusMessage(`No supported audio files found in "${rootName}".`);
+      setTimeout(() => setStatusMessage(null), 3500);
+      return;
+    }
+
+    setStatusMessage(`Scanning ${valid.length} local USB/device audio files...`);
+    const localTracks: Track[] = [];
+    const newCoverUrls: Record<string, string> = {};
+
+    for (const { file, relPath } of valid) {
+      const cleanRel = relPath.replace(/^\/+/, '');
+      const folderPart = cleanRel.includes('/') ? cleanRel.slice(0, cleanRel.lastIndexOf('/')) : rootName;
+      const trackId = `local_${safeBtoa(`${cleanRel}:${file.size}`).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48)}`;
+      const objectUrl = URL.createObjectURL(file);
+
+      let parsedMeta: any = null;
+      try {
+        const headerBuf = await file.slice(0, 131072).arrayBuffer();
+        parsedMeta = parseAudioMetadata(headerBuf, file.name);
+        if (parsedMeta?.coverImage) {
+          const coverBlob = new Blob([parsedMeta.coverImage.data as any], { type: parsedMeta.coverImage.mimeType });
+          newCoverUrls[trackId] = URL.createObjectURL(coverBlob);
+        }
+      } catch {}
+
+      const fallbackTitle = file.name.replace(/\.[^/.]+$/, '').replace(/[_]+/g, ' ');
+      const durSec = parsedMeta?.durationSeconds || 0;
+      const yearNum =
+        parsedMeta?.year && /^\d{4}/.test(parsedMeta.year)
+          ? parseInt(parsedMeta.year.slice(0, 4), 10)
+          : undefined;
+
+      localTracks.push({
+        id: trackId,
+        title: parsedMeta?.title || fallbackTitle,
+        artist: parsedMeta?.artist || 'Local Audio',
+        album: parsedMeta?.album || rootName || 'USB Storage',
+        year: yearNum,
+        genre: parsedMeta?.genre,
+        codec: parsedMeta?.codec || file.name.split('.').pop()?.toUpperCase(),
+        sampleRateHz: parsedMeta?.sampleRateHz,
+        replayGainDb: parsedMeta?.replayGainDb,
+        metadataHydrated: Boolean(parsedMeta),
+        duration: durSec > 0 ? formatTime(durSec) : 'Local',
+        durationSeconds: durSec,
+        sizeBytes: file.size,
+        sizeFormatted: formatBytes(file.size),
+        href: cleanRel,
+        streamUrl: objectUrl,
+        fileName: file.name,
+        folderPath: folderPart.startsWith('Local/') ? folderPart : `Local/${folderPart}`,
+        contentType: file.type || 'audio/mpeg',
+        sourceType: 'LOCAL',
+      });
+    }
+
+    if (Object.keys(newCoverUrls).length > 0) {
+      setCoverArtUrls((prev) => ({ ...prev, ...newCoverUrls }));
+    }
+
+    setTracks((prev) => {
+      const merged = new Map(prev.map((t) => [t.id, t]));
+      for (const lt of localTracks) {
+        merged.set(lt.id, lt);
+      }
+      return Array.from(merged.values());
+    });
+    setQueue((prev) => (prev.length === 0 ? localTracks : prev));
+    setStatusMessage(`Loaded ${localTracks.length} local tracks from "${rootName}"!`);
+    setTimeout(() => setStatusMessage(null), 4000);
+  };
+
+  const handleScanLocalFolder = async () => {
+    const picker = (window as any).showDirectoryPicker;
+    if (typeof picker !== 'function') {
+      setStatusMessage('Use the "Select Files" button to choose local USB/device folders in this browser.');
+      setTimeout(() => setStatusMessage(null), 3500);
+      return;
+    }
+    try {
+      const rootHandle = await picker({ mode: 'read' });
+      const collected: Array<{ file: File; relPath: string }> = [];
+      const walk = async (dirHandle: any, prefix: string) => {
+        for await (const [name, handle] of dirHandle.entries()) {
+          if (handle.kind === 'file') {
+            const file = await handle.getFile();
+            collected.push({ file, relPath: `${prefix}/${name}` });
+          } else if (handle.kind === 'directory' && !name.startsWith('.')) {
+            await walk(handle, `${prefix}/${name}`);
+          }
+        }
+      };
+      await walk(rootHandle, rootHandle.name || 'USB');
+      await processScannedLocalFiles(collected, rootHandle.name || 'USB');
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') {
+        setStatusMessage(`Local scan failed: ${err?.message || 'Permission denied'}`);
+        setTimeout(() => setStatusMessage(null), 3500);
+      }
+    }
+  };
+
+  const handleScanLocalInputFiles = async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    const files = Array.from(fileList);
+    const firstRel = (files[0] as any).webkitRelativePath || files[0].name;
+    const rootName = firstRel.includes('/') ? firstRel.split('/')[0] : 'Local Audio';
+    const entries = files.map((file) => ({
+      file,
+      relPath: (file as any).webkitRelativePath || `${rootName}/${file.name}`,
+    }));
+    await processScannedLocalFiles(entries, rootName);
+  };
+
+  // Batch Album Offline Pin & Pin All Favorites Handlers
+  const runBatchDownloadTracks = async (targets: Track[], label: string) => {
+    if (targets.length === 0 || isBatchSyncing) return;
+    const pending = targets.filter((t) => t.sourceType !== 'LOCAL' && !offlineTrackIds.has(t.id));
+    if (pending.length === 0) {
+      setStatusMessage(`All tracks in ${label} are already saved offline!`);
+      setTimeout(() => setStatusMessage(null), 3000);
+      return;
+    }
+    setIsBatchSyncing(true);
+    for (let i = 0; i < pending.length; i++) {
+      const t = pending[i];
+      setBatchSyncProgress({ current: i + 1, total: pending.length, trackTitle: t.title });
+      try {
+        await downloadTrackForOffline(t);
+      } catch {}
+    }
+    setIsBatchSyncing(false);
+    setBatchSyncProgress(null);
+    await refreshOfflineStorage();
+    setStatusMessage(`Pinned ${pending.length} tracks from ${label} for offline driving!`);
+    setTimeout(() => setStatusMessage(null), 3500);
+  };
+
+  const handleDownloadAlbum = (albumName: string, albumTracks: Track[]) => {
+    triggerHaptic();
+    runBatchDownloadTracks(albumTracks, `album "${albumName}"`);
+  };
+
+  const handlePinAllFavorites = () => {
+    triggerHaptic();
+    const favTracks = tracks.filter((t) => favorites.has(t.id));
+    if (favTracks.length === 0) {
+      setStatusMessage('Mark some tracks with ❤️ Favorite first.');
+      setTimeout(() => setStatusMessage(null), 3000);
+      return;
+    }
+    runBatchDownloadTracks(favTracks, 'Favorites');
+  };
+
+  const handlePinFolderOffline = (folderPrefix: string, explicitTracks?: Track[], customLabel?: string) => {
+    triggerHaptic();
+    const cleanPrefix = folderPrefix.replace(/^\/+/, '').replace(/\/+$/, '');
+    const matching =
+      explicitTracks && explicitTracks.length > 0
+        ? explicitTracks
+        : tracks.filter((t) => {
+            const fp = (t.folderPath || '').replace(/^\/+/, '').replace(/\/+$/, '');
+            if (!cleanPrefix) return true;
+            return fp === cleanPrefix || fp.startsWith(`${cleanPrefix}/`);
+          });
+    if (matching.length === 0) {
+      setStatusMessage(
+        cleanPrefix
+          ? `No scanned tracks found under /${cleanPrefix}. Scan the folder first.`
+          : 'No tracks available to pin offline.'
+      );
+      setTimeout(() => setStatusMessage(null), 3500);
+      return;
+    }
+    runBatchDownloadTracks(matching, customLabel || (cleanPrefix ? `folder "/${cleanPrefix}"` : 'Root Folder'));
+  };
+
+  // Portable Tune Backup (.json Export/Import & Nextcloud /ZentryxBackup/zentryx-tune.json)
+  const applyRestoredBackup = (parsed: ReturnType<typeof parseSettingsBackupJson>) => {
+    if (!parsed) {
+      setStatusMessage('Invalid Zentryx tune backup JSON.');
+      setTimeout(() => setStatusMessage(null), 3500);
+      return;
+    }
+    if (parsed.accentKey) setAccentKey(parsed.accentKey);
+    if (parsed.cockpitThemeMode) setCockpitThemeMode(parsed.cockpitThemeMode);
+    if (parsed.nightBrightness !== undefined) setNightBrightness(parsed.nightBrightness);
+    if (parsed.warmAmberFilter !== undefined) setWarmAmberFilter(parsed.warmAmberFilter);
+    if (parsed.replayGainEnabled !== undefined) setReplayGainEnabled(parsed.replayGainEnabled);
+    if (parsed.crossfadeSeconds !== undefined) setCrossfadeSeconds(parsed.crossfadeSeconds);
+    if (parsed.scvSensitivity) setScvSensitivity(parsed.scvSensitivity);
+    if (parsed.autoResumeOnBoot !== undefined) setAutoResumeOnBoot(parsed.autoResumeOnBoot);
+    if (parsed.autoResumeSoftRamp !== undefined) setAutoResumeSoftRamp(parsed.autoResumeSoftRamp);
+    if (parsed.autoPlayOnBluetooth !== undefined) setAutoPlayOnBluetooth(parsed.autoPlayOnBluetooth);
+    if (parsed.duckOnReverseGear !== undefined) setDuckOnReverseGear(parsed.duckOnReverseGear);
+    if (parsed.globalAudioSessionAttach !== undefined) setGlobalAudioSessionAttach(parsed.globalAudioSessionAttach);
+    if (parsed.playbackRate !== undefined) setPlaybackRate(parsed.playbackRate);
+    if (parsed.enableSwipeGestures !== undefined) setEnableSwipeGestures(parsed.enableSwipeGestures);
+    if (parsed.idleScreensaverSeconds !== undefined) setIdleScreensaverSeconds(parsed.idleScreensaverSeconds);
+    if (parsed.driverSafeMode !== undefined) setDriverSafeMode(parsed.driverSafeMode);
+    if (parsed.smartRollingCache !== undefined) setSmartRollingCache(parsed.smartRollingCache);
+    if (parsed.offlineCacheCapMb !== undefined) setOfflineCacheCapMb(parsed.offlineCacheCapMb);
+    if (parsed.deadzoneGuardMode) setDeadzoneGuardMode(parsed.deadzoneGuardMode);
+    if (parsed.dualPaneCockpit !== undefined) setDualPaneCockpit(parsed.dualPaneCockpit);
+    if (parsed.driveModeAutoSpeedKmH !== undefined) setDriveModeAutoSpeedKmH(parsed.driveModeAutoSpeedKmH);
+    if (parsed.dspSettings) setDspSettings(parsed.dspSettings);
+    if (parsed.customDspPresets) setCustomDspPresets(parsed.customDspPresets);
+    if (parsed.swcBindings) setSwcBindings(parsed.swcBindings);
+    if (parsed.swcLongPressBindings) setSwcLongPressBindings(parsed.swcLongPressBindings);
+    if (parsed.driverProfiles) setDriverProfiles(parsed.driverProfiles);
+    if (parsed.activeDriverProfileId) setActiveDriverProfileId(parsed.activeDriverProfileId);
+    setStatusMessage('DSP curves, EQ presets & cockpit tune restored!');
+    setTimeout(() => setStatusMessage(null), 3500);
+  };
+
+  const handleSelectDriverProfile = (profileId: string) => {
+    const profile = driverProfiles.find((p) => p.id === profileId);
+    if (!profile) return;
+    triggerHaptic();
+    setActiveDriverProfileId(profile.id);
+    setAccentKey(profile.accentKey);
+    setCockpitThemeMode(profile.cockpitThemeMode);
+    setNightBrightness(profile.nightBrightness);
+    setWarmAmberFilter(profile.warmAmberFilter);
+    const allPresets = [...FACTORY_DSP_PRESETS, ...customDspPresets];
+    const preset = allPresets.find((p) => p.id === profile.selectedPresetId);
+    setDspSettings((prev) => {
+      const base = preset ? applyPresetToDsp(prev, preset) : prev;
+      return {
+        ...base,
+        listeningStage: profile.listeningStage,
+        leftDelayMs: profile.leftDelayMs,
+        rightDelayMs: profile.rightDelayMs,
+        balance: profile.balance,
+        fader: profile.fader,
+        surroundMode: profile.surroundMode,
+        surroundIntensity: profile.surroundIntensity,
+        subTrimDb: profile.subTrimDb,
+      };
+    });
+    setStatusMessage(`Loaded Driver Profile: ${profile.name}`);
+    setTimeout(() => setStatusMessage(null), 2500);
+  };
+
+  const handleSaveCurrentToDriverProfile = (profileId: string) => {
+    triggerHaptic();
+    setDriverProfiles((prev) =>
+      prev.map((p) =>
+        p.id === profileId
+          ? {
+              ...p,
+              accentKey,
+              cockpitThemeMode,
+              nightBrightness,
+              warmAmberFilter,
+              listeningStage: dspSettings.listeningStage,
+              leftDelayMs: dspSettings.leftDelayMs,
+              rightDelayMs: dspSettings.rightDelayMs,
+              balance: dspSettings.balance,
+              fader: dspSettings.fader,
+              surroundMode: dspSettings.surroundMode,
+              surroundIntensity: dspSettings.surroundIntensity,
+              selectedPresetId: dspSettings.selectedPresetId,
+              subTrimDb: dspSettings.subTrimDb,
+            }
+          : p
+      )
+    );
+    const targetName = driverProfiles.find((p) => p.id === profileId)?.name || 'Active';
+    setStatusMessage(`Saved current cockpit & DSP tune to "${targetName}"`);
+    setTimeout(() => setStatusMessage(null), 2500);
+  };
+
+  const handleBuildRoadtripPlan = useCallback(
+    (hours: number, pool: RoadtripPool) =>
+      buildRoadtripOfflinePlan(tracks, hours, pool, favorites, playStats, offlineTrackIds),
+    [tracks, favorites, playStats, offlineTrackIds]
+  );
+
+  const handlePinRoadtripOffline = (hours: number, pool: RoadtripPool) => {
+    const plan = buildRoadtripOfflinePlan(tracks, hours, pool, favorites, playStats, offlineTrackIds);
+    const missing = plan.tracks.filter((t) => !offlineTrackIds.has(t.id));
+    if (missing.length === 0) {
+      setStatusMessage(`All ${plan.tracks.length} tracks for your ${hours}h roadtrip are already cached offline!`);
+      setTimeout(() => setStatusMessage(null), 3000);
+      return;
+    }
+    runBatchDownloadTracks(missing, `${hours}h Roadtrip (${plan.tracks.length} tracks)`);
+  };
+
+  const buildCurrentBackupJson = () =>
+    JSON.stringify(
+      buildSettingsBackupPayload({
+        nextcloudUrl: serverUrl,
+        musicFolder,
+        accentKey,
+        cockpitThemeMode,
+        nightBrightness,
+        warmAmberFilter,
+        replayGainEnabled,
+        crossfadeSeconds,
+        scvSensitivity,
+        autoResumeOnBoot,
+        autoResumeSoftRamp,
+        autoPlayOnBluetooth,
+        duckOnReverseGear,
+        globalAudioSessionAttach,
+        playbackRate,
+        enableSwipeGestures,
+        idleScreensaverSeconds,
+        driverSafeMode,
+        smartRollingCache,
+        offlineCacheCapMb,
+        deadzoneGuardMode,
+        dualPaneCockpit,
+        driveModeAutoSpeedKmH,
+        dspSettings,
+        customDspPresets,
+        swcBindings,
+        swcLongPressBindings,
+        driverProfiles,
+        activeDriverProfileId,
+      }),
+      null,
+      2
+    );
+
+  const handleExportBackupJson = () => {
+    triggerHaptic();
+    const json = buildCurrentBackupJson();
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'zentryx-tune.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setStatusMessage('Exported zentryx-tune.json');
+    setTimeout(() => setStatusMessage(null), 3000);
+  };
+
+  const handleImportBackupJson = async (file: File) => {
+    try {
+      const text = await file.text();
+      applyRestoredBackup(parseSettingsBackupJson(text));
+    } catch {
+      setStatusMessage('Could not read backup JSON file.');
+      setTimeout(() => setStatusMessage(null), 3000);
+    }
+  };
+
+  const handlePushBackupCloud = async () => {
+    if (!isLoggedIn || !username || !password) return;
+    setIsSyncingBackup(true);
+    try {
+      const basicAuth = safeBtoa(`${username}:${password}`);
+      const folderUrl = `/api/nextcloud/remote.php/dav/files/${encodeURIComponent(username)}/ZentryxBackup/`;
+      await fetch(folderUrl, { method: 'MKCOL', headers: { Authorization: `Basic ${basicAuth}` } }).catch(() => {});
+      const putRes = await fetch(`${folderUrl}zentryx-tune.json`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Basic ${basicAuth}`,
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: buildCurrentBackupJson(),
+      });
+      if (!putRes.ok) throw new Error(`HTTP ${putRes.status}`);
+      setStatusMessage('Saved tune backup to Nextcloud /ZentryxBackup/zentryx-tune.json');
+    } catch (e: any) {
+      setStatusMessage(`Cloud backup failed: ${e?.message || 'Network error'}`);
+    } finally {
+      setIsSyncingBackup(false);
+      setTimeout(() => setStatusMessage(null), 3500);
+    }
+  };
+
+  const handlePullBackupCloud = async () => {
+    if (!isLoggedIn || !username || !password) return;
+    setIsSyncingBackup(true);
+    try {
+      const basicAuth = safeBtoa(`${username}:${password}`);
+      const fileUrl = `/api/nextcloud/remote.php/dav/files/${encodeURIComponent(username)}/ZentryxBackup/zentryx-tune.json`;
+      const res = await fetch(fileUrl, { headers: { Authorization: `Basic ${basicAuth}` } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      applyRestoredBackup(parseSettingsBackupJson(text));
+    } catch (e: any) {
+      setStatusMessage(`Cloud restore failed: ${e?.message || 'Not found'}`);
+    } finally {
+      setIsSyncingBackup(false);
+      setTimeout(() => setStatusMessage(null), 3500);
+    }
   };
 
   // Up-Next Queue Handlers
@@ -2293,6 +3541,27 @@ export default function App() {
         });
         return;
       } catch {}
+    }
+
+    // 0c. Direct Local USB / Device Blob URL playback (zero network request)
+    if (targetTrack.sourceType === 'LOCAL' || (targetTrack.streamUrl && targetTrack.streamUrl.startsWith('blob:'))) {
+      try {
+        audio.pause();
+        audio.removeAttribute('src');
+        audio.load();
+        audio.dataset.trackId = targetTrack.id;
+        audio.dataset.trackUrl = targetTrack.streamUrl;
+        audio.src = targetTrack.streamUrl;
+        audio.load();
+        await audio.play();
+        setIsPlaying(true);
+        setPlaybackError(null);
+        setStatusMessage(null);
+        return;
+      } catch (localErr: any) {
+        setPlaybackError(`Local audio playback failed: ${localErr?.message || 'Unsupported format'}`);
+        return;
+      }
     }
 
     // 1. Direct HTML5 Media Streaming attempt with multi-candidate fallback
@@ -2830,9 +4099,16 @@ export default function App() {
     }
   }, [playbackRate]);
 
-  // Real GPS Speed Tracker for Speed-Compensated Volume
+  // Solar auto theme 1-minute tick timer
   useEffect(() => {
-    if (scvSensitivity === 'off') {
+    if (cockpitThemeMode !== 'auto') return;
+    const id = setInterval(() => setSolarMinuteTick(Math.floor(Date.now() / 60000)), 60000);
+    return () => clearInterval(id);
+  }, [cockpitThemeMode]);
+
+  // Real GPS Speed & Position Tracker for SDVC + NOAA Astronomical Solar Night Mode
+  useEffect(() => {
+    if (scvSensitivity === 'off' && cockpitThemeMode !== 'auto') {
       setCurrentGpsSpeed(0);
       setGpsStatus('off');
       return;
@@ -2847,6 +4123,9 @@ export default function App() {
     let watchId: number | null = null;
     const handlePos = (pos: GeolocationPosition) => {
       setGpsStatus('active');
+      if (Number.isFinite(pos.coords.latitude) && Number.isFinite(pos.coords.longitude)) {
+        setGpsCoords({ lat: pos.coords.latitude, lon: pos.coords.longitude });
+      }
       if (pos.coords.speed !== null && !isNaN(pos.coords.speed)) {
         const kmh = Math.round(pos.coords.speed * 3.6);
         setCurrentGpsSpeed(Math.max(0, kmh));
@@ -2883,7 +4162,7 @@ export default function App() {
     return () => {
       if (watchId !== null) navigator.geolocation.clearWatch(watchId);
     };
-  }, [scvSensitivity, gpsPollNonce]);
+  }, [scvSensitivity, cockpitThemeMode, gpsPollNonce]);
 
   // Sleep Timer Countdown & Volume Fade-out effect
   useEffect(() => {
@@ -3091,16 +4370,90 @@ export default function App() {
     return tracks.reduce((acc, t) => acc + (t.sizeBytes || 0), 0);
   }, [tracks]);
 
+  // Hierarchical Folder Browser entries derived for current selectedFolderPath
+  const folderBrowserData = useMemo(() => {
+    const cleanPrefix = selectedFolderPath.replace(/^\/+/, '').replace(/\/+$/, '');
+    const subFolderCounts = new Map<string, number>();
+    const directTracks: Track[] = [];
+    const q = librarySearchQuery.trim().toLowerCase();
+
+    for (const t of tracks) {
+      const rawFolder = (t.folderPath || '').replace(/^\/+/, '').replace(/\/+$/, '');
+      if (cleanPrefix) {
+        if (rawFolder === cleanPrefix) {
+          directTracks.push(t);
+        } else if (rawFolder.startsWith(`${cleanPrefix}/`)) {
+          const rest = rawFolder.slice(cleanPrefix.length + 1);
+          const nextSeg = rest.split('/')[0];
+          if (nextSeg) {
+            const fullChild = `${cleanPrefix}/${nextSeg}`;
+            subFolderCounts.set(fullChild, (subFolderCounts.get(fullChild) || 0) + 1);
+          }
+        }
+      } else {
+        if (!rawFolder) {
+          directTracks.push(t);
+        } else {
+          const firstSeg = rawFolder.split('/')[0];
+          if (firstSeg) {
+            subFolderCounts.set(firstSeg, (subFolderCounts.get(firstSeg) || 0) + 1);
+          }
+        }
+      }
+    }
+
+    const subFolders = Array.from(subFolderCounts.entries())
+      .map(([fullPath, count]) => ({
+        fullPath,
+        name: fullPath.split('/').pop() || fullPath,
+        count,
+        isLocal: fullPath === 'Local' || fullPath.startsWith('Local/'),
+      }))
+      .filter((f) => !q || f.name.toLowerCase().includes(q))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    const filteredDirect = directTracks.filter((t) => {
+      if (!q) return true;
+      return (
+        t.title.toLowerCase().includes(q) ||
+        t.artist.toLowerCase().includes(q) ||
+        t.album.toLowerCase().includes(q) ||
+        t.fileName.toLowerCase().includes(q)
+      );
+    });
+
+    return { subFolders, directTracks: filteredDirect };
+  }, [tracks, selectedFolderPath, librarySearchQuery]);
+
+  const resumableTracksCount = useMemo(() => {
+    return tracks.filter((track) => {
+      const rec = resumableProgressMap[track.id];
+      if (!rec || rec.positionSeconds < 10) return false;
+      const dur = rec.durationSeconds || track.durationSeconds;
+      if (dur > 0 && rec.positionSeconds >= Math.max(dur - 5, 10)) return false;
+      return true;
+    }).length;
+  }, [tracks, resumableProgressMap]);
+
   // Filtered tracks for Library view
   const displayedTracks = useMemo(() => {
-    return tracks.filter((track) => {
-      if (offlineOnly && !downloadedTracks.has(track.id)) return false;
+    const q = librarySearchQuery.trim().toLowerCase();
+    const filtered = tracks.filter((track) => {
+      if (offlineOnly && !downloadedTracks.has(track.id) && !offlineTrackIds.has(track.id)) return false;
       if (selectedAlbum && track.album !== selectedAlbum) return false;
       if (selectedArtist && track.artist !== selectedArtist) return false;
-      if (libraryFilter === 'favorites') return favorites.has(track.id);
-      if (libraryFilter === 'downloaded') return downloadedTracks.has(track.id);
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
+      if (libraryFilter === 'favorites' && !favorites.has(track.id)) return false;
+      if (libraryFilter === 'downloaded' && !downloadedTracks.has(track.id) && !offlineTrackIds.has(track.id)) return false;
+      if (libraryFilter === 'playlists' && selectedPlaylist && !selectedPlaylist.trackIds.includes(track.id)) return false;
+      if (libraryFilter === 'recent' && !(playStats[track.id]?.lastPlayedAt > 0)) return false;
+      if (libraryFilter === 'most_played' && !(playStats[track.id]?.playCount > 0)) return false;
+      if (libraryFilter === 'resume') {
+        const rec = resumableProgressMap[track.id];
+        if (!rec || rec.positionSeconds < 10) return false;
+        const dur = rec.durationSeconds || track.durationSeconds;
+        if (dur > 0 && rec.positionSeconds >= Math.max(dur - 5, 10)) return false;
+      }
+      if (q) {
         return (
           track.title.toLowerCase().includes(q) ||
           track.artist.toLowerCase().includes(q) ||
@@ -3110,10 +4463,66 @@ export default function App() {
       }
       return true;
     });
-  }, [tracks, offlineOnly, downloadedTracks, selectedAlbum, selectedArtist, libraryFilter, favorites, searchQuery]);
+
+    if (libraryFilter === 'recent') {
+      return [...filtered].sort(
+        (a, b) => (playStats[b.id]?.lastPlayedAt || 0) - (playStats[a.id]?.lastPlayedAt || 0)
+      );
+    }
+    if (libraryFilter === 'most_played') {
+      return [...filtered].sort(
+        (a, b) =>
+          (playStats[b.id]?.playCount || 0) - (playStats[a.id]?.playCount || 0) ||
+          (playStats[b.id]?.lastPlayedAt || 0) - (playStats[a.id]?.lastPlayedAt || 0)
+      );
+    }
+    if (libraryFilter === 'resume') {
+      return [...filtered].sort(
+        (a, b) => (resumableProgressMap[b.id]?.updatedAt || 0) - (resumableProgressMap[a.id]?.updatedAt || 0)
+      );
+    }
+    return filtered;
+  }, [
+    tracks,
+    offlineOnly,
+    downloadedTracks,
+    offlineTrackIds,
+    selectedAlbum,
+    selectedArtist,
+    libraryFilter,
+    favorites,
+    selectedPlaylist,
+    librarySearchQuery,
+    playStats,
+    resumableProgressMap,
+  ]);
+
+  const filteredAlbumsList = useMemo(() => {
+    const q = librarySearchQuery.trim().toLowerCase();
+    if (!q) return albumsList;
+    return albumsList.filter(
+      (album) =>
+        album.name.toLowerCase().includes(q) ||
+        album.artist.toLowerCase().includes(q) ||
+        album.tracks.some((t) => t.title.toLowerCase().includes(q))
+    );
+  }, [albumsList, librarySearchQuery]);
+
+  const filteredArtistsList = useMemo(() => {
+    const q = librarySearchQuery.trim().toLowerCase();
+    if (!q) return artistsList;
+    return artistsList.filter(
+      (artist) =>
+        artist.name.toLowerCase().includes(q) ||
+        artist.tracks.some(
+          (t) => t.title.toLowerCase().includes(q) || t.album.toLowerCase().includes(q)
+        )
+    );
+  }, [artistsList, librarySearchQuery]);
 
   // O(1) Track Index Map for MediaTek Cortex-A55 RAM optimization
   const trackIndexMap = useMemo(() => buildTrackIndexMap(tracks), [tracks]);
+  const localTrackCount = useMemo(() => tracks.filter((t) => t.sourceType === 'LOCAL').length, [tracks]);
 
   // Persist MediaTek Hardware Optimization & Auto-Metadata modes
   useEffect(() => {
@@ -3196,8 +4605,22 @@ export default function App() {
   useEffect(() => {
     try {
       localStorage.setItem('zentryx_swc_bindings', JSON.stringify(swcBindings));
+      localStorage.setItem('zentryx_swc_long_bindings', JSON.stringify(swcLongPressBindings));
     } catch {}
-  }, [swcBindings]);
+  }, [swcBindings, swcLongPressBindings]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('zentryx_driver_profiles', JSON.stringify(driverProfiles));
+      localStorage.setItem('zentryx_active_driver_profile', activeDriverProfileId);
+    } catch {}
+  }, [driverProfiles, activeDriverProfileId]);
+
+  useEffect(() => {
+    localStorage.setItem('zentryx_bt_autoplay', autoPlayOnBluetooth ? 'true' : 'false');
+    localStorage.setItem('zentryx_reverse_duck', duckOnReverseGear ? 'true' : 'false');
+    localStorage.setItem('zentryx_global_eq', globalAudioSessionAttach ? 'true' : 'false');
+  }, [autoPlayOnBluetooth, duckOnReverseGear, globalAudioSessionAttach]);
 
   useEffect(() => {
     localStorage.setItem('zentryx_replay_gain', replayGainEnabled ? 'true' : 'false');
@@ -3223,8 +4646,12 @@ export default function App() {
     try {
       localStorage.setItem('zentryx_dsp_settings', JSON.stringify(dspSettings));
     } catch {}
-    dspEngineRef.current?.applySettings(dspSettings, isMuted ? 0 : volume);
-  }, [dspSettings, volume, isMuted]);
+    dspEngineRef.current?.applySettings(
+      isHoldBypassed ? { ...dspSettings, dspEnabled: false } : dspSettings,
+      isMuted ? 0 : volume,
+      currentGpsSpeed
+    );
+  }, [dspSettings, volume, isMuted, isHoldBypassed, currentGpsSpeed]);
 
   useEffect(() => {
     try {
@@ -3237,6 +4664,225 @@ export default function App() {
       localStorage.setItem('zentryx_play_stats', JSON.stringify(playStats));
     } catch {}
   }, [playStats]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('zentryx_resume_map', JSON.stringify(resumableProgressMap));
+    } catch {}
+  }, [resumableProgressMap]);
+
+  useEffect(() => {
+    localStorage.setItem('zentryx_dual_pane_cockpit', dualPaneCockpit ? 'true' : 'false');
+  }, [dualPaneCockpit]);
+
+  useEffect(() => {
+    localStorage.setItem('zentryx_drive_auto_speed', String(driveModeAutoSpeedKmH));
+  }, [driveModeAutoSpeedKmH]);
+
+  // Apply preset helper (shared by output device auto-profiles & auto-genre matching)
+  const applyDspPresetById = useCallback(
+    (presetId: string, base: DspSettings): DspSettings | null => {
+      const preset = [...FACTORY_DSP_PRESETS, ...customDspPresets].find((p) => p.id === presetId);
+      if (!preset) return null;
+      return applyPresetToDsp(base, preset);
+    },
+    [customDspPresets]
+  );
+
+  // Per-Output Audio Device Auto-Profile detection (Headunit / Bluetooth A2DP / USB DAC)
+  const detectAudioOutputRoute = useCallback(async () => {
+    try {
+      if (!navigator.mediaDevices?.enumerateDevices) return;
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const outputs = devices.filter((d) => d.kind === 'audiooutput');
+      const labels = outputs.map((d) => (d.label || '').toLowerCase()).join(' | ');
+      let detected: AudioOutputRouteId = 'headunit_speakers';
+      if (/bluetooth|a2dp|hands-free|airpods|buds|car audio bt/.test(labels)) {
+        detected = 'bluetooth_a2dp';
+      } else if (/usb|dac|headphone|aux|line out|external/.test(labels)) {
+        detected = 'usb_dac_aux';
+      }
+      setActiveOutputRoute((prev) => {
+        if (prev !== detected && dspSettings.autoSwitchDevicePreset) {
+          const targetPresetId = dspSettings.devicePresetMap?.[detected];
+          if (targetPresetId) {
+            setDspSettings((curr) => applyDspPresetById(targetPresetId, curr) || curr);
+          }
+        }
+        return detected;
+      });
+    } catch {}
+  }, [dspSettings.autoSwitchDevicePreset, dspSettings.devicePresetMap, applyDspPresetById]);
+
+  useEffect(() => {
+    detectAudioOutputRoute();
+    const md = navigator.mediaDevices;
+    if (!md?.addEventListener) return;
+    md.addEventListener('devicechange', detectAudioOutputRoute);
+    return () => md.removeEventListener('devicechange', detectAudioOutputRoute);
+  }, [detectAudioOutputRoute]);
+
+  const handleSelectOutputRoute = useCallback(
+    (route: AudioOutputRouteId) => {
+      setActiveOutputRoute(route);
+      if (dspSettings.autoSwitchDevicePreset) {
+        const mappedId = dspSettings.devicePresetMap?.[route];
+        const applied = mappedId ? applyDspPresetById(mappedId, dspSettings) : null;
+        if (applied) {
+          setDspSettings(applied);
+          const routeLabel = AUDIO_OUTPUT_ROUTES.find((r) => r.id === route)?.label || route;
+          setStatusMessage(`Output switched to ${routeLabel} · Preset: ${mappedId.toUpperCase()}`);
+          setTimeout(() => setStatusMessage(null), 2500);
+        }
+      }
+    },
+    [dspSettings, applyDspPresetById]
+  );
+
+  // Auto-Preset by Track Genre or Folder (respects per-track manual overrides)
+  useEffect(() => {
+    if (!currentTrack || !dspSettings.autoGenrePresetEnabled) return;
+    if (manualOverrideTrackIdsRef.current.has(currentTrack.id)) return;
+    const matchedId = matchPresetForTrack(currentTrack.genre, currentTrack.folderPath, currentTrack.title);
+    if (!matchedId || matchedId === dspSettings.selectedPresetId) return;
+    setDspSettings((prev) => applyDspPresetById(matchedId, prev) || prev);
+  }, [currentTrack?.id, currentTrack?.genre, currentTrack?.folderPath, dspSettings.autoGenrePresetEnabled, applyDspPresetById]);
+
+  // A/B Profile Compare & Momentary DSP Bypass Handlers
+  const handleSnapshotSlotB = useCallback(() => {
+    triggerHaptic();
+    const snap = sanitizeDspSettings({ ...dspSettings, bands16: [...dspSettings.bands16] });
+    setSlotBDspSnapshot(snap);
+    try {
+      localStorage.setItem('zentryx_dsp_slot_b', JSON.stringify(snap));
+    } catch {}
+    setStatusMessage('Snapshotted current DSP tune into Compare Slot B.');
+    setTimeout(() => setStatusMessage(null), 2500);
+  }, [dspSettings]);
+
+  const handleToggleCompareSlot = useCallback(() => {
+    triggerHaptic();
+    if (!slotBDspSnapshot) {
+      handleSnapshotSlotB();
+      return;
+    }
+    if (activeCompareSlot === 'A') {
+      slotADspSnapshotRef.current = sanitizeDspSettings({ ...dspSettings, bands16: [...dspSettings.bands16] });
+      setDspSettings(sanitizeDspSettings(slotBDspSnapshot));
+      setActiveCompareSlot('B');
+    } else {
+      const slotA = slotADspSnapshotRef.current;
+      if (slotA) {
+        setDspSettings(sanitizeDspSettings(slotA));
+      }
+      setActiveCompareSlot('A');
+    }
+  }, [activeCompareSlot, slotBDspSnapshot, dspSettings, handleSnapshotSlotB]);
+
+  const handleDspSettingsFromPanel = useCallback(
+    (updater: DspSettings | ((prev: DspSettings) => DspSettings)) => {
+      if (currentTrack?.id) {
+        manualOverrideTrackIdsRef.current.add(currentTrack.id);
+      }
+      setDspSettings((prev) => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (activeCompareSlot === 'B') {
+          setSlotBDspSnapshot(next);
+          try {
+            localStorage.setItem('zentryx_dsp_slot_b', JSON.stringify(next));
+          } catch {}
+        } else {
+          slotADspSnapshotRef.current = next;
+        }
+        return next;
+      });
+    },
+    [currentTrack?.id, activeCompareSlot]
+  );
+
+  // Speed Auto-Engage Drive Mode HUD
+  useEffect(() => {
+    if (driveModeAutoSpeedKmH <= 0) return;
+    if (currentGpsSpeed >= driveModeAutoSpeedKmH && isPlaying) {
+      if (!driveModeDismissedAtSpeedRef.current && !isDriveModeOpen) {
+        setIsDriveModeOpen(true);
+      }
+    } else if (currentGpsSpeed < Math.max(5, driveModeAutoSpeedKmH - 5)) {
+      driveModeDismissedAtSpeedRef.current = false;
+    }
+  }, [currentGpsSpeed, driveModeAutoSpeedKmH, isPlaying, isDriveModeOpen]);
+
+  // Hands-Free Web Speech API Voice Search ("play <query>" or filter query)
+  const handleStartVoiceSearch = useCallback(() => {
+    triggerHaptic();
+    const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRec) {
+      setStatusMessage('Voice search is not supported in this browser — use Search or native Android APK.');
+      setTimeout(() => setStatusMessage(null), 3500);
+      return;
+    }
+    if (isVoiceListening && voiceRecognitionRef.current) {
+      try {
+        voiceRecognitionRef.current.stop();
+      } catch {}
+      setIsVoiceListening(false);
+      return;
+    }
+    try {
+      const recognition = new SpeechRec();
+      recognition.lang = navigator.language || 'en-US';
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+      voiceRecognitionRef.current = recognition;
+      setIsVoiceListening(true);
+      setStatusMessage('Listening for voice command (say "Play <song>" or artist)...');
+
+      recognition.onresult = (event: any) => {
+        const transcript = (event?.results?.[0]?.[0]?.transcript || '').trim().replace(/[.!?]+$/, '');
+        setIsVoiceListening(false);
+        if (!transcript) return;
+        const playMatch = transcript.match(/^(?:play|listen to|start)\s+(.+)$/i);
+        const queryText = playMatch ? playMatch[1].trim() : transcript;
+        setSearchQuery(queryText);
+        setLibrarySearchQuery(queryText);
+
+        if (playMatch && tracks.length > 0) {
+          const matches = searchTracks(tracks, queryText);
+          if (matches.length > 0) {
+            const top = matches[0];
+            const qIdx = queue.findIndex((t) => t.id === top.id);
+            if (qIdx !== -1) {
+              playTrackAtIndex(qIdx);
+            } else {
+              setQueue((prev) => [top, ...prev]);
+              setCurrentTrackIndex(0);
+              startAudioPlayback(top);
+            }
+            navigateToMenu({ tab: 'player' });
+            setStatusMessage(`Voice playing "${top.title}"`);
+            setTimeout(() => setStatusMessage(null), 3000);
+            return;
+          }
+        }
+        navigateToMenu({ tab: 'search' });
+        setStatusMessage(`Voice search: "${queryText}"`);
+        setTimeout(() => setStatusMessage(null), 3000);
+      };
+      recognition.onerror = () => {
+        setIsVoiceListening(false);
+        setStatusMessage('Voice capture cancelled or unavailable.');
+        setTimeout(() => setStatusMessage(null), 2500);
+      };
+      recognition.onend = () => {
+        setIsVoiceListening(false);
+      };
+      recognition.start();
+    } catch {
+      setIsVoiceListening(false);
+      setStatusMessage('Could not start voice microphone.');
+      setTimeout(() => setStatusMessage(null), 2500);
+    }
+  }, [isVoiceListening, tracks, queue, navigateToMenu]);
 
   // Boot Ignition Auto-Resume Restoration (runs BEFORE session snapshot writer so initial render never clobbers zentryx_last_session)
   useEffect(() => {
@@ -3433,6 +5079,14 @@ export default function App() {
               // Auto-bookmark timestamp & ignition resume snapshot every 5 seconds
               if (currentTrack && cur > 0 && cur % 5 === 0) {
                 saveTrackProgress(currentTrack.id, cur, durationSeconds);
+                setResumableProgressMap((prev) => ({
+                  ...prev,
+                  [currentTrack.id]: {
+                    positionSeconds: cur,
+                    durationSeconds: durationSeconds || currentTrack.durationSeconds || 0,
+                    updatedAt: Date.now(),
+                  },
+                }));
                 try {
                   localStorage.setItem(
                     'zentryx_last_session',
@@ -3489,8 +5143,38 @@ export default function App() {
       {/* Sleek Minimalist Top Navigation */}
       <header className="border-b border-slate-800/80 bg-[#020617]/90 backdrop-blur sticky top-0 z-40">
         <div className="headunit-header-bar max-w-6xl mx-auto px-3 sm:px-4 min-h-16 py-2 flex flex-wrap items-center justify-between gap-2">
-          {/* Logo & Brand */}
-          <div className="flex items-center gap-2.5 shrink-0">
+          {/* Logo & Brand + Headunit Menu Back/Forward Buttons */}
+          <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
+            <div className="flex items-center gap-1 mr-1">
+              <button
+                type="button"
+                onClick={handleMenuBack}
+                disabled={!canMenuGoBack}
+                aria-label="Navigate Back"
+                title="Back to previous menu"
+                className={`w-9 h-9 rounded-xl flex items-center justify-center border transition-all active:scale-95 ${
+                  canMenuGoBack
+                    ? 'bg-[#0b1120] border-slate-700 text-white hover:border-slate-500 hover:bg-slate-800'
+                    : 'bg-[#0b1120]/50 border-slate-800/60 text-slate-600 cursor-not-allowed'
+                }`}
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={handleMenuForward}
+                disabled={!canMenuGoForward}
+                aria-label="Navigate Forward"
+                title="Forward to next menu"
+                className={`w-9 h-9 rounded-xl flex items-center justify-center border transition-all active:scale-95 ${
+                  canMenuGoForward
+                    ? 'bg-[#0b1120] border-slate-700 text-white hover:border-slate-500 hover:bg-slate-800'
+                    : 'bg-[#0b1120]/50 border-slate-800/60 text-slate-600 cursor-not-allowed'
+                }`}
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
             <div
               className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl flex items-center justify-center font-bold text-black shadow-md transition-colors"
               style={{ backgroundColor: activeAccent.hex }}
@@ -3507,7 +5191,7 @@ export default function App() {
           {/* Clean Navigation Tabs */}
           <nav className="order-3 lg:order-2 w-full lg:w-auto flex items-center justify-between lg:justify-start bg-[#0b1120] p-1 rounded-xl border border-slate-800 text-xs font-semibold overflow-x-auto">
             <button
-              onClick={() => setActiveTab('player')}
+              onClick={() => navigateToMenu({ tab: 'player' })}
               className={`px-3.5 py-1.5 rounded-lg transition-all ${
                 activeTab === 'player' ? 'text-black font-bold shadow' : 'text-slate-400 hover:text-white'
               }`}
@@ -3518,10 +5202,13 @@ export default function App() {
 
             <button
               onClick={() => {
-                setActiveTab('library');
-                setSelectedAlbum(null);
-                setSelectedArtist(null);
                 setSelectedPlaylist(null);
+                navigateToMenu({
+                  tab: 'library',
+                  libraryFilter: 'all',
+                  selectedAlbum: null,
+                  selectedArtist: null,
+                });
               }}
               className={`px-3.5 py-1.5 rounded-lg transition-all ${
                 activeTab === 'library' ? 'text-black font-bold shadow' : 'text-slate-400 hover:text-white'
@@ -3543,7 +5230,7 @@ export default function App() {
             </button>
 
             <button
-              onClick={() => setActiveTab('search')}
+              onClick={() => navigateToMenu({ tab: 'search' })}
               className={`px-3.5 py-1.5 rounded-lg transition-all ${
                 activeTab === 'search' ? 'text-black font-bold shadow' : 'text-slate-400 hover:text-white'
               }`}
@@ -3553,7 +5240,7 @@ export default function App() {
             </button>
 
             <button
-              onClick={() => setActiveTab('settings')}
+              onClick={() => navigateToMenu({ tab: 'settings' })}
               className={`px-3.5 py-1.5 rounded-lg transition-all ${
                 activeTab === 'settings' ? 'text-black font-bold shadow' : 'text-slate-400 hover:text-white'
               }`}
@@ -3595,6 +5282,38 @@ export default function App() {
               )}
             </button>
 
+            {/* Hands-Free Voice Search */}
+            <button
+              type="button"
+              onClick={handleStartVoiceSearch}
+              className={`p-2 rounded-xl border transition-all active:scale-95 ${
+                isVoiceListening
+                  ? 'bg-red-500/20 border-red-500 text-red-400 animate-pulse'
+                  : 'bg-[#0b1120] hover:bg-slate-800 border-slate-800 text-slate-300 hover:text-white'
+              }`}
+              title='Voice Search (say "Play <song>")'
+            >
+              <Mic className="w-4 h-4" style={!isVoiceListening ? { color: activeAccent.hex } : undefined} />
+            </button>
+
+            {/* Simplified Drive Mode HUD Toggle */}
+            <button
+              type="button"
+              onClick={() => {
+                triggerHaptic();
+                driveModeDismissedAtSpeedRef.current = false;
+                setIsDriveModeOpen(true);
+              }}
+              className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-[#0b1120] hover:bg-slate-800 border border-slate-800 text-xs font-bold text-slate-200 hover:text-white transition-all active:scale-95"
+              title="Launch High-Contrast Simplified Drive HUD"
+            >
+              <Car className="w-4 h-4" style={{ color: activeAccent.hex }} />
+              <span className="hidden md:inline">Drive</span>
+            </button>
+
+            {/* Download Native Android APK */}
+            <AndroidApkDownloadButton accentHex={activeAccent.hex} compact />
+
             {/* Install Headunit PWA Button */}
             <PWAInstallButton accentHex={activeAccent.hex} compact />
 
@@ -3632,10 +5351,15 @@ export default function App() {
       )}
 
       {/* Main Viewport */}
-      <main className="headunit-main-viewport flex-1 min-w-0 max-w-6xl w-full mx-auto px-4 py-6 flex flex-col justify-center">
-        {/* VIEW 1: PLAYER SCREEN (MBUX COCKPIT) */}
+      <main
+        className={`headunit-main-viewport flex-1 min-w-0 ${
+          dualPaneCockpit ? 'max-w-7xl' : 'max-w-6xl'
+        } w-full mx-auto px-4 py-6 flex flex-col justify-center`}
+      >
+        {/* VIEW 1: PLAYER SCREEN (MBUX COCKPIT + OPTIONAL DUAL-PANE WIDESCREEN) */}
         {activeTab === 'player' && (
-          <div className="w-full max-w-4xl mx-auto">
+          <div className={`w-full mx-auto ${dualPaneCockpit && tracks.length > 0 ? 'max-w-7xl grid grid-cols-1 xl:grid-cols-12 gap-6 items-start' : 'max-w-4xl'}`}>
+            <div className={dualPaneCockpit && tracks.length > 0 ? 'xl:col-span-8' : 'w-full'}>
             {tracks.length === 0 ? (
               /* Empty State: Prompt User to Sync or Sign In */
               <div
@@ -3965,9 +5689,51 @@ export default function App() {
                       </h1>
                       <p className="text-base text-slate-300 font-medium mt-1 truncate">
                         {currentTrack?.artist || 'Unknown Artist'} <span className="text-slate-600">•</span>{' '}
-                        {currentTrack?.album || 'Nextcloud Music'}
+                        {currentTrack?.album || (currentTrack?.sourceType === 'LOCAL' ? 'USB / Local Audio' : 'Nextcloud Music')}
                         {currentTrack?.year ? ` (${currentTrack.year})` : ''}
                       </p>
+                      {currentTrack && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            triggerHaptic();
+                            setIsStreamInspectorOpen(true);
+                          }}
+                          title="Tap to inspect full audio stream, codec & DSP signal path"
+                          className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-black/50 hover:bg-slate-900 border border-slate-800/80 hover:border-slate-600 text-[11px] font-mono text-slate-300 transition-colors active:scale-95"
+                        >
+                          <Info className="w-3 h-3 shrink-0" style={{ color: activeAccent.hex }} />
+                          <span style={{ color: activeAccent.hex }} className="font-bold">
+                            {currentTrack.codec || currentTrack.fileName.split('.').pop()?.toUpperCase() || 'AUDIO'}
+                          </span>
+                          {currentTrack.sampleRateHz && (
+                            <>
+                              <span className="text-slate-600">·</span>
+                              <span>
+                                {currentTrack.sampleRateHz % 1000 === 0
+                                  ? `${currentTrack.sampleRateHz / 1000} kHz`
+                                  : `${(currentTrack.sampleRateHz / 1000).toFixed(1)} kHz`}
+                              </span>
+                            </>
+                          )}
+                          {currentTrack.bitrateKbps && (
+                            <>
+                              <span className="text-slate-600">·</span>
+                              <span>{currentTrack.bitrateKbps} kbps</span>
+                            </>
+                          )}
+                          <span className="text-slate-600">·</span>
+                          <span>{currentTrack.sourceType === 'LOCAL' ? 'USB/LOCAL' : 'WEBDAV'}</span>
+                          {replayGainEnabled && currentTrack.replayGainDb !== undefined && (
+                            <>
+                              <span className="text-slate-600">·</span>
+                              <span className="text-cyan-300">
+                                RG {currentTrack.replayGainDb >= 0 ? `+${currentTrack.replayGainDb.toFixed(1)}` : currentTrack.replayGainDb.toFixed(1)}dB
+                              </span>
+                            </>
+                          )}
+                        </button>
+                      )}
                     </div>
 
                     {playbackError && (
@@ -4144,19 +5910,243 @@ export default function App() {
                 </div>
               </div>
             )}
+            </div>
+
+            {/* Dual-Pane Widescreen Companion Rail on Player View (Up Next & Quick Shortcuts) */}
+            {dualPaneCockpit && tracks.length > 0 && (
+              <aside className="hidden xl:flex xl:col-span-4 flex-col bg-[#0b1120] border border-slate-800/80 rounded-3xl p-4 shadow-2xl space-y-3 max-h-[560px]">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
+                  <div className="flex items-center gap-2">
+                    <Columns2 className="w-4 h-4" style={{ color: activeAccent.hex }} />
+                    <span className="text-xs font-bold uppercase tracking-wider text-white">Up Next Cockpit</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => navigateToMenu({ tab: 'library' })}
+                    className="text-[11px] font-bold hover:underline"
+                    style={{ color: activeAccent.hex }}
+                  >
+                    Open Library →
+                  </button>
+                </div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => handlePlaySmartMix('recent')}
+                    className="px-2.5 py-1 rounded-lg bg-black/50 border border-slate-800 hover:border-slate-600 text-[11px] font-semibold text-slate-200"
+                  >
+                    Recent
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handlePlaySmartMix('most_played')}
+                    className="px-2.5 py-1 rounded-lg bg-black/50 border border-slate-800 hover:border-slate-600 text-[11px] font-semibold text-slate-200"
+                  >
+                    Most Played
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigateToMenu({ tab: 'library', libraryFilter: 'resume' });
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-black/50 border border-slate-800 hover:border-slate-600 text-[11px] font-semibold text-slate-200"
+                  >
+                    Resume ({resumableTracksCount})
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
+                  {queue.slice(currentTrackIndex, currentTrackIndex + 15).map((qTrack, offset) => {
+                    const idx = currentTrackIndex + offset;
+                    const active = offset === 0;
+                    return (
+                      <div
+                        key={`${qTrack.id}-${idx}`}
+                        onClick={() => playTrackAtIndex(idx)}
+                        className={`p-2.5 rounded-xl flex items-center gap-2.5 cursor-pointer border transition-colors ${
+                          active
+                            ? 'bg-white/[0.08] border-slate-600'
+                            : 'bg-black/35 border-slate-800/60 hover:bg-slate-900/70'
+                        }`}
+                      >
+                        <LazyAlbumArt
+                          src={coverArtUrls[qTrack.id]}
+                          alt={qTrack.album || qTrack.title}
+                          accentHex={activeAccent.hex}
+                          isCurrent={active}
+                          variant="row"
+                          className="w-9 h-9"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div
+                            className="text-xs font-bold truncate"
+                            style={{ color: active ? activeAccent.hex : '#ffffff' }}
+                          >
+                            {qTrack.title}
+                          </div>
+                          <div className="text-[10px] text-slate-400 truncate">{qTrack.artist}</div>
+                        </div>
+                        <span className="text-[10px] font-mono text-slate-500 shrink-0">{qTrack.duration}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </aside>
+            )}
           </div>
         )}
 
-        {/* VIEW 2: LIBRARY SCREEN */}
+        {/* VIEW 2: LIBRARY SCREEN (WITH OPTIONAL DUAL-PANE COCKPIT PIN) */}
         {activeTab === 'library' && (
-          <div className="w-full max-w-4xl mx-auto space-y-4">
+          <div className={`w-full mx-auto ${dualPaneCockpit && currentTrack ? 'max-w-7xl grid grid-cols-1 xl:grid-cols-12 gap-6 items-start' : 'max-w-4xl'}`}>
+            {dualPaneCockpit && currentTrack && (
+              <aside
+                className="hidden xl:flex xl:col-span-5 flex-col bg-[#0b1120] border rounded-3xl p-5 shadow-2xl space-y-4 sticky top-20"
+                style={{ borderColor: activeAccent.border }}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                    <Columns2 className="w-3.5 h-3.5" style={{ color: activeAccent.hex }} />
+                    Dual-Pane Cockpit
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setIsStreamInspectorOpen(true)}
+                      className="px-2 py-1 rounded-lg bg-black/50 border border-slate-800 text-[10px] font-mono text-slate-300 hover:text-white flex items-center gap-1"
+                    >
+                      <Info className="w-3 h-3" style={{ color: activeAccent.hex }} />
+                      {currentTrack.codec || 'AUDIO'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => navigateToMenu({ tab: 'player' })}
+                      className="px-2 py-1 rounded-lg bg-slate-800 text-[10px] font-bold text-white"
+                    >
+                      Expand
+                    </button>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  <div
+                    className="w-28 h-28 rounded-2xl bg-black/60 border flex items-center justify-center overflow-hidden shrink-0"
+                    style={{ borderColor: activeAccent.border }}
+                  >
+                    {coverArtUrls[currentTrack.id] ? (
+                      <img src={coverArtUrls[currentTrack.id]} alt={currentTrack.title} className="w-full h-full object-cover" />
+                    ) : (
+                      <Disc className={`w-12 h-12 ${isPlaying ? 'animate-spin' : ''}`} style={{ color: activeAccent.hex }} />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="text-lg font-extrabold text-white line-clamp-2 leading-tight">
+                      {currentTrack.title}
+                    </div>
+                    <div className="text-xs text-slate-300 truncate">{currentTrack.artist}</div>
+                    <div className="text-[11px] text-slate-500 truncate">{currentTrack.album}</div>
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <input
+                    type="range"
+                    min={0}
+                    max={durationSeconds || 100}
+                    value={positionSeconds}
+                    onChange={(e) => seekTo(Number(e.target.value))}
+                    className="w-full h-2 bg-slate-800 rounded-lg cursor-pointer"
+                    style={{ accentColor: activeAccent.hex }}
+                  />
+                  <div className="flex justify-between text-[11px] font-mono text-slate-400">
+                    <span>{formatTime(positionSeconds)}</span>
+                    <span>{formatTime(durationSeconds)}</span>
+                  </div>
+                </div>
+                <div className="flex items-center justify-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handlePrevTrack}
+                    className="w-12 h-12 rounded-2xl bg-slate-900 border border-slate-700 text-white flex items-center justify-center active:scale-95"
+                  >
+                    <SkipBack className="w-5 h-5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={togglePlayPause}
+                    className="w-16 h-16 rounded-2xl text-black flex items-center justify-center shadow-lg active:scale-95"
+                    style={{ backgroundColor: activeAccent.hex }}
+                  >
+                    {isPlaying ? <Pause className="w-7 h-7 stroke-[2.5]" /> : <Play className="w-7 h-7 ml-0.5 stroke-[2.5]" />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleNextTrack()}
+                    className="w-12 h-12 rounded-2xl bg-slate-900 border border-slate-700 text-white flex items-center justify-center active:scale-95"
+                  >
+                    <SkipForward className="w-5 h-5" />
+                  </button>
+                </div>
+              </aside>
+            )}
+
+            <div className={`${dualPaneCockpit && currentTrack ? 'xl:col-span-7' : 'w-full'} space-y-4`}>
+            {/* Real-Time Library Search Bar (matches Search tab style) */}
+            {driverSafeActive && (
+              <div className="p-3.5 rounded-2xl bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs flex items-center gap-2.5 shadow">
+                <Lock className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>
+                  <strong>Driver Safe UI Lock Active ({currentGpsSpeed} km/h):</strong> Keyboard text search is paused while the vehicle is in motion (&ge; 10 km/h).
+                </span>
+              </div>
+            )}
+            <div className="relative flex items-center gap-2">
+              <div className="relative flex-1">
+                <Search className="w-5 h-5 text-slate-400 absolute left-4 top-4" />
+                <input
+                  type="text"
+                  readOnly={driverSafeActive}
+                  value={librarySearchQuery}
+                  onChange={(e) => {
+                    if (!driverSafeActive) setLibrarySearchQuery(e.target.value);
+                  }}
+                  placeholder={
+                    driverSafeActive
+                      ? 'Typing locked while driving (>= 10 km/h)...'
+                      : 'Filter library by artist, album, or title...'
+                  }
+                  className={`w-full bg-[#0b1120] border border-slate-800 rounded-2xl pl-12 pr-10 py-3.5 text-base text-white placeholder-slate-500 focus:outline-none focus:border-slate-600 transition-colors shadow-lg ${
+                    driverSafeActive ? 'opacity-60 cursor-not-allowed' : ''
+                  }`}
+                />
+                {librarySearchQuery && (
+                  <button
+                    onClick={() => setLibrarySearchQuery('')}
+                    className="absolute right-4 top-3.5 text-slate-400 hover:text-white p-1"
+                    aria-label="Clear library search"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={handleStartVoiceSearch}
+                className={`p-3.5 rounded-2xl border transition-all active:scale-95 shrink-0 ${
+                  isVoiceListening
+                    ? 'bg-red-500/20 border-red-500 text-red-400 animate-pulse'
+                    : 'bg-[#0b1120] border-slate-800 text-slate-300 hover:text-white'
+                }`}
+                title="Hands-Free Voice Filter"
+              >
+                <Mic className="w-5 h-5" style={!isVoiceListening ? { color: activeAccent.hex } : undefined} />
+              </button>
+            </div>
+
             {/* Library Header Bar */}
             <div className="flex items-center justify-between flex-wrap gap-3 pb-1 border-b border-slate-800/80">
               <div>
                 <h2 className="text-base font-bold text-white flex items-center gap-2">
                   <span>Nextcloud Collection</span>
                   <span className="text-xs font-normal text-slate-400 font-mono">
-                    ({tracks.length} tracks • {formatBytes(totalLibraryBytes)})
+                    ({librarySearchQuery.trim() ? `${displayedTracks.length} / ${tracks.length}` : tracks.length} tracks • {formatBytes(totalLibraryBytes)})
                   </span>
                 </h2>
               </div>
@@ -4197,13 +6187,16 @@ export default function App() {
             {/* Filter Pills & Smart Mix Quick Launch */}
             <div className="flex items-center justify-between flex-wrap gap-3">
               <div className="flex items-center gap-2 overflow-x-auto py-1">
-                {(['all', 'albums', 'artists', 'favorites', 'downloaded'] as const).map((filter) => (
+                {(
+                  ['all', 'recent', 'most_played', 'resume', 'albums', 'artists', 'folders', 'playlists', 'favorites', 'downloaded'] as const
+                ).map((filter) => (
                   <button
                     key={filter}
                     onClick={() => {
                       setLibraryFilter(filter);
                       setSelectedAlbum(null);
                       setSelectedArtist(null);
+                      if (filter !== 'playlists') setSelectedPlaylist(null);
                     }}
                     className={`px-3 py-1.5 rounded-xl text-xs font-semibold capitalize transition-all shrink-0 ${
                       libraryFilter === filter
@@ -4214,10 +6207,20 @@ export default function App() {
                   >
                     {filter === 'all'
                       ? `All Songs (${tracks.length})`
+                      : filter === 'recent'
+                      ? 'Recently Played'
+                      : filter === 'most_played'
+                      ? 'Most Played'
+                      : filter === 'resume'
+                      ? `Resume (${resumableTracksCount})`
                       : filter === 'albums'
                       ? `Albums (${albumsList.length})`
                       : filter === 'artists'
                       ? `Artists (${artistsList.length})`
+                      : filter === 'folders'
+                      ? 'Folders'
+                      : filter === 'playlists'
+                      ? `Playlists (${playlists.length})`
                       : filter === 'favorites'
                       ? `Favorites (${favorites.size})`
                       : `Downloaded (${downloadedTracks.size})`}
@@ -4236,6 +6239,48 @@ export default function App() {
                 Offline Only
               </button>
             </div>
+
+            {/* Favorites One-Tap Pin All Offline Action Banner */}
+            {libraryFilter === 'favorites' && favorites.size > 0 && (
+              <div className="flex items-center justify-between gap-3 p-3 rounded-2xl bg-[#0b1120] border border-slate-800">
+                <div className="text-xs text-slate-300">
+                  <strong className="text-white">{favorites.size} Favorite tracks</strong> ready to pin for deadzone roadtrips.
+                </div>
+                <button
+                  type="button"
+                  disabled={isBatchSyncing}
+                  onClick={handlePinAllFavorites}
+                  className="px-3.5 py-1.5 rounded-xl text-xs font-bold text-black flex items-center gap-1.5 transition-all active:scale-95 disabled:opacity-50"
+                  style={{ backgroundColor: activeAccent.hex }}
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  {isBatchSyncing ? 'Pinning...' : 'Pin All Favorites Offline'}
+                </button>
+              </div>
+            )}
+
+            {/* Batch Download Live Progress Banner */}
+            {isBatchSyncing && batchSyncProgress && (
+              <div className="p-3 rounded-2xl bg-[#0b1120] border border-slate-800 space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-300 truncate">
+                    Downloading: <strong className="text-white">{batchSyncProgress.trackTitle}</strong>
+                  </span>
+                  <span className="font-mono font-bold" style={{ color: activeAccent.hex }}>
+                    {batchSyncProgress.current}/{batchSyncProgress.total}
+                  </span>
+                </div>
+                <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full transition-all duration-200"
+                    style={{
+                      width: `${(batchSyncProgress.current / batchSyncProgress.total) * 100}%`,
+                      backgroundColor: activeAccent.hex,
+                    }}
+                  />
+                </div>
+              </div>
+            )}
 
             {/* One-Tap Smart Mixes */}
             {tracks.length > 0 && (
@@ -4268,14 +6313,17 @@ export default function App() {
             )}
 
             {/* Active Filter Breadcrumb */}
-            {(selectedAlbum || selectedArtist) && (
+            {(selectedAlbum || selectedArtist || selectedPlaylist) && (
               <div className="flex items-center gap-2 bg-[#0b1120] px-3 py-1.5 rounded-xl border border-slate-800 text-xs">
                 <span className="text-slate-400">Filtering by:</span>
-                <span className="font-bold text-white">{selectedAlbum || selectedArtist}</span>
+                <span className="font-bold text-white">
+                  {selectedAlbum || selectedArtist || selectedPlaylist?.name}
+                </span>
                 <button
                   onClick={() => {
                     setSelectedAlbum(null);
                     setSelectedArtist(null);
+                    setSelectedPlaylist(null);
                   }}
                   className="ml-auto text-slate-400 hover:text-white text-xs px-2 py-0.5 rounded bg-black/40"
                 >
@@ -4284,49 +6332,306 @@ export default function App() {
               </div>
             )}
 
-            {/* Content: Albums Grid / Artists List / Songs List */}
-            {libraryFilter === 'albums' && !selectedAlbum ? (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                {albumsList.length === 0 ? (
-                  <div className="col-span-full p-8 text-center text-slate-500 text-sm">
-                    No albums found in Nextcloud library.
+            {/* Content: Folders / Playlists / Albums Grid / Artists List / Songs List */}
+            {libraryFilter === 'folders' ? (
+              <div className="bg-[#0b1120] border border-slate-800/80 rounded-2xl p-4 space-y-3 shadow-2xl">
+                <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-800/60">
+                  <div className="flex items-center gap-2 text-xs font-mono text-slate-300 truncate">
+                    <Folder className="w-4 h-4 shrink-0" style={{ color: activeAccent.hex }} />
+                    <span className="truncate">/{selectedFolderPath || 'Root'}</span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+                    <button
+                      type="button"
+                      disabled={isBatchSyncing}
+                      onClick={() => handlePinFolderOffline(selectedFolderPath)}
+                      className="px-2.5 py-1 rounded-lg text-[11px] font-bold text-black flex items-center gap-1 disabled:opacity-50"
+                      style={{ backgroundColor: activeAccent.hex }}
+                      title="Download all tracks in this folder for offline playback"
+                    >
+                      <Download className="w-3 h-3" />
+                      Pin Folder Offline
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => runFolderScanDiagnostics(selectedFolderPath && !selectedFolderPath.startsWith('local:') ? selectedFolderPath : musicFolder)}
+                      className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1"
+                    >
+                      <Network className="w-3 h-3" style={{ color: activeAccent.hex }} />
+                      Scan Diagnostics
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleScanLocalFolder}
+                      className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1"
+                    >
+                      <HardDrive className="w-3 h-3" style={{ color: activeAccent.hex }} />
+                      Add USB Folder
+                    </button>
+                    {selectedFolderPath && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const idx = selectedFolderPath.lastIndexOf('/');
+                          setSelectedFolderPath(idx > 0 ? selectedFolderPath.slice(0, idx) : '');
+                        }}
+                        className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-black/60 text-slate-300 hover:text-white border border-slate-700 flex items-center gap-1"
+                      >
+                        <ArrowUp className="w-3 h-3" />
+                        Up
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {folderBrowserData.subFolders.length === 0 && folderBrowserData.directTracks.length === 0 ? (
+                  <div className="py-10 text-center text-xs text-slate-500">
+                    No folders or tracks found here. Scan Nextcloud or add a local USB folder.
                   </div>
                 ) : (
-                  albumsList.map((album, idx) => (
-                    <div
-                      key={idx}
-                      onClick={() => {
-                        setSelectedAlbum(album.name);
-                        setLibraryFilter('all');
-                      }}
-                      className="bg-[#0b1120] border border-slate-800/80 rounded-2xl p-4 hover:border-slate-700 transition-colors cursor-pointer group"
-                    >
-                      <div className="aspect-square rounded-xl bg-gradient-to-b from-slate-800 to-black flex items-center justify-center mb-3">
-                        <Disc
-                          className="w-12 h-12 opacity-60 group-hover:scale-105 transition-transform"
-                          style={{ color: activeAccent.hex }}
-                        />
+                  <div className="space-y-1.5 max-h-[460px] overflow-y-auto pr-1">
+                    {folderBrowserData.subFolders.map((sub) => (
+                      <div
+                        key={sub.fullPath}
+                        onClick={() => setSelectedFolderPath(sub.fullPath)}
+                        className="w-full p-3 rounded-xl bg-black/40 hover:bg-slate-900 border border-slate-800/70 flex items-center justify-between text-left transition-colors cursor-pointer gap-2"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          {sub.isLocal ? (
+                            <HardDrive className="w-4 h-4 shrink-0 text-cyan-400" />
+                          ) : (
+                            <Folder className="w-4 h-4 shrink-0" style={{ color: activeAccent.hex }} />
+                          )}
+                          <span className="text-sm font-semibold text-white truncate">{sub.name}</span>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-xs font-mono text-slate-400">{sub.count} tracks</span>
+                          {!sub.isLocal && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handlePinFolderOffline(sub.fullPath);
+                              }}
+                              className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200"
+                              title={`Pin entire "${sub.name}" folder offline`}
+                            >
+                              <Download className="w-3.5 h-3.5" style={{ color: activeAccent.hex }} />
+                            </button>
+                          )}
+                        </div>
                       </div>
-                      <div className="font-bold text-sm text-white truncate">{album.name}</div>
-                      <div className="text-xs text-slate-400 mt-0.5 truncate">{album.artist}</div>
-                      <div className="text-[11px] text-slate-500 mt-1">{album.count} tracks</div>
-                    </div>
-                  ))
+                    ))}
+                    {folderBrowserData.directTracks.map((track) => {
+                      const originalIndex = trackIndexMap.get(track.id) ?? -1;
+                      const isCurrent = currentTrackIndex === originalIndex;
+                      return (
+                        <div
+                          key={track.id}
+                          onClick={() => {
+                            if (originalIndex !== -1) playTrackAtIndex(originalIndex);
+                            navigateToMenu({ tab: 'player' });
+                          }}
+                          className={`p-3 rounded-xl flex items-center justify-between cursor-pointer border transition-colors gap-2 ${
+                            isCurrent
+                              ? 'bg-white/[0.07] border-slate-600'
+                              : 'bg-black/25 border-slate-800/50 hover:bg-slate-900/60'
+                          }`}
+                        >
+                          <div className="min-w-0 pr-2 flex-1">
+                            <div
+                              className="text-sm font-semibold truncate"
+                              style={{ color: isCurrent ? activeAccent.hex : '#ffffff' }}
+                            >
+                              {track.title}
+                            </div>
+                            <div className="text-[11px] text-slate-400 truncate flex items-center gap-1.5">
+                              <span>{track.artist} • {track.fileName}</span>
+                              {track.sourceType === 'LOCAL' && (
+                                <span className="px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 font-mono text-[9px]">
+                                  USB
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handlePlayNextInQueue(track);
+                              }}
+                              className="px-2 py-1 text-[10px] font-bold rounded-lg bg-slate-900 border border-slate-700 text-slate-200 hover:text-white"
+                              title="Play Next"
+                            >
+                              Next
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleAddToQueue(track);
+                              }}
+                              className="p-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 hover:text-white"
+                              title="Add to Queue"
+                            >
+                              <ListMusic className="w-3.5 h-3.5" />
+                            </button>
+                            <span className="text-xs font-mono text-slate-500">{track.duration}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : libraryFilter === 'playlists' && !selectedPlaylist ? (
+              <div className="bg-[#0b1120] border border-slate-800/80 rounded-2xl p-4 space-y-3 shadow-2xl">
+                <div className="flex items-center justify-between gap-2 flex-wrap pb-2 border-b border-slate-800/60">
+                  <span className="text-xs font-bold text-slate-300">
+                    Saved Vehicle Playlists ({playlists.length})
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsPlaylistsOpen(true)}
+                      className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 flex items-center gap-1"
+                    >
+                      <Plus className="w-3.5 h-3.5" style={{ color: activeAccent.hex }} />
+                      Manage / Import .m3u8
+                    </button>
+                    {isLoggedIn && (
+                      <button
+                        type="button"
+                        disabled={isSyncingPlaylists}
+                        onClick={handleSyncPlaylistsCloud}
+                        className="px-3 py-1.5 rounded-xl text-xs font-bold text-black flex items-center gap-1 disabled:opacity-50"
+                        style={{ backgroundColor: activeAccent.hex }}
+                      >
+                        <Cloud className="w-3.5 h-3.5" />
+                        {isSyncingPlaylists ? 'Syncing...' : 'Sync .m3u8'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {playlists.length === 0 ? (
+                  <div className="py-10 text-center text-xs text-slate-500">
+                    No playlists yet. Click "Manage / Import .m3u8" to create or import one.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    {playlists.map((pl) => (
+                      <div
+                        key={pl.id}
+                        onClick={() => setSelectedPlaylist(pl)}
+                        className="p-3.5 rounded-xl bg-black/40 border border-slate-800 hover:border-slate-700 flex items-center justify-between cursor-pointer"
+                      >
+                        <div className="min-w-0 pr-2">
+                          <div className="text-sm font-bold text-white truncate">{pl.name}</div>
+                          <div className="text-[11px] text-slate-400">{pl.trackIds.length} tracks</div>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handlePlayPlaylist(pl);
+                            }}
+                            className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white"
+                            title="Play Playlist"
+                          >
+                            <Play className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleExportPlaylistM3u8(pl);
+                            }}
+                            className="p-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800"
+                            title="Export .m3u8"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : libraryFilter === 'albums' && !selectedAlbum ? (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                {filteredAlbumsList.length === 0 ? (
+                  <div className="col-span-full p-8 text-center text-slate-500 text-sm">
+                    {librarySearchQuery.trim()
+                      ? `No albums found matching "${librarySearchQuery}".`
+                      : 'No albums found in Nextcloud library.'}
+                  </div>
+                ) : (
+                  filteredAlbumsList.map((album, idx) => {
+                    const albumCover = album.tracks.map((t) => coverArtUrls[t.id]).find(Boolean);
+                    return (
+                      <div
+                        key={idx}
+                        onClick={() => {
+                          navigateToMenu({
+                            tab: 'library',
+                            libraryFilter: 'all',
+                            selectedAlbum: album.name,
+                            selectedArtist: null,
+                          });
+                        }}
+                        className="bg-[#0b1120] border border-slate-800/80 rounded-2xl p-4 hover:border-slate-700 transition-colors cursor-pointer group"
+                      >
+                        <LazyAlbumArt
+                          src={albumCover}
+                          alt={album.name}
+                          accentHex={activeAccent.hex}
+                          variant="album"
+                          className="mb-3"
+                        />
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="font-bold text-sm text-white truncate">{album.name}</div>
+                            <div className="text-xs text-slate-400 mt-0.5 truncate">{album.artist}</div>
+                            <div className="text-[11px] text-slate-500 mt-1">{album.count} tracks</div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDownloadAlbum(album.name, album.tracks);
+                            }}
+                            title={`Download all tracks in ${album.name} for offline`}
+                            className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 shrink-0"
+                          >
+                            <Download className="w-3.5 h-3.5" style={{ color: activeAccent.hex }} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
                 )}
               </div>
             ) : libraryFilter === 'artists' && !selectedArtist ? (
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                {artistsList.length === 0 ? (
+                {filteredArtistsList.length === 0 ? (
                   <div className="col-span-full p-8 text-center text-slate-500 text-sm">
-                    No artists found in Nextcloud library.
+                    {librarySearchQuery.trim()
+                      ? `No artists found matching "${librarySearchQuery}".`
+                      : 'No artists found in Nextcloud library.'}
                   </div>
                 ) : (
-                  artistsList.map((artist, idx) => (
+                  filteredArtistsList.map((artist, idx) => (
                     <div
                       key={idx}
                       onClick={() => {
-                        setSelectedArtist(artist.name);
-                        setLibraryFilter('all');
+                        navigateToMenu({
+                          tab: 'library',
+                          libraryFilter: 'all',
+                          selectedArtist: artist.name,
+                          selectedAlbum: null,
+                        });
                       }}
                       className="bg-[#0b1120] border border-slate-800/80 rounded-2xl p-4 hover:border-slate-700 transition-colors cursor-pointer flex items-center gap-3"
                     >
@@ -4380,25 +6685,30 @@ export default function App() {
                     return (
                       <div
                         onClick={() => {
+                          const resumeRec = libraryFilter === 'resume' ? resumableProgressMap[track.id] : undefined;
                           if (originalIndex !== -1) {
-                            playTrackAtIndex(originalIndex);
+                            if (resumeRec && resumeRec.positionSeconds >= 10) {
+                              setCurrentTrackIndex(originalIndex);
+                              setPositionSeconds(resumeRec.positionSeconds);
+                              startAudioPlayback(track, resumeRec.positionSeconds);
+                            } else {
+                              playTrackAtIndex(originalIndex);
+                            }
                           }
-                          setActiveTab('player');
+                          navigateToMenu({ tab: 'player' });
                         }}
                         className={`h-full px-3.5 flex items-center justify-between cursor-pointer border-b border-slate-800/50 transition-colors select-none ${
                           isCurrent ? 'bg-white/[0.07]' : 'hover:bg-slate-900/60 active:bg-slate-800/50'
                         }`}
                       >
                         <div className="flex items-center gap-3 flex-1 min-w-0 pr-2">
-                          <div
-                            className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border border-slate-800 bg-black/60 shadow-inner"
-                            style={isCurrent ? { borderColor: activeAccent.hex } : {}}
-                          >
-                            <FileAudio
-                              className="w-4 h-4"
-                              style={{ color: isCurrent ? activeAccent.hex : '#94a3b8' }}
-                            />
-                          </div>
+                          <LazyAlbumArt
+                            src={coverArtUrls[track.id]}
+                            alt={track.album || track.title}
+                            accentHex={activeAccent.hex}
+                            isCurrent={isCurrent}
+                            variant="row"
+                          />
                           <div className="truncate flex-1">
                             <div
                               className="font-semibold text-sm truncate leading-snug"
@@ -4406,8 +6716,25 @@ export default function App() {
                             >
                               {track.title}
                             </div>
-                            <div className="text-[11px] text-slate-400 truncate mt-0.5">
-                              {track.artist} <span className="text-slate-600">•</span> {track.album}
+                            <div className="text-[11px] text-slate-400 truncate mt-0.5 flex items-center gap-1.5">
+                              <span>
+                                {track.artist} <span className="text-slate-600">•</span> {track.album}
+                              </span>
+                              {track.sourceType === 'LOCAL' && (
+                                <span className="px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 font-mono text-[9px] shrink-0">
+                                  USB
+                                </span>
+                              )}
+                              {libraryFilter === 'most_played' && playStats[track.id]?.playCount ? (
+                                <span className="px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-mono text-[9px] shrink-0">
+                                  {playStats[track.id].playCount}× plays
+                                </span>
+                              ) : null}
+                              {libraryFilter === 'resume' && resumableProgressMap[track.id] ? (
+                                <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-mono text-[9px] shrink-0">
+                                  Resume {formatTime(resumableProgressMap[track.id].positionSeconds)}
+                                </span>
+                              ) : null}
                             </div>
                           </div>
                         </div>
@@ -4422,7 +6749,7 @@ export default function App() {
                                   triggerHaptic();
                                   handlePlayNextInQueue(track);
                                 }}
-                                className="hidden md:inline-flex px-2 py-1 text-[11px] font-semibold rounded-lg bg-slate-900/80 border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white transition-all active:scale-95"
+                                className="inline-flex px-2 py-1 text-[10px] sm:text-[11px] font-semibold rounded-lg bg-slate-900/80 border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white transition-all active:scale-95"
                                 title="Play Next in Queue"
                               >
                                 Play Next
@@ -4497,6 +6824,7 @@ export default function App() {
                 />
               </div>
             )}
+            </div>
           </div>
         )}
 
@@ -4511,32 +6839,46 @@ export default function App() {
                 </span>
               </div>
             )}
-            <div className="relative">
-              <Search className="w-5 h-5 text-slate-400 absolute left-4 top-4" />
-              <input
-                type="text"
-                readOnly={driverSafeActive}
-                value={searchQuery}
-                onChange={(e) => {
-                  if (!driverSafeActive) setSearchQuery(e.target.value);
-                }}
-                placeholder={
-                  driverSafeActive
-                    ? 'Typing locked while driving (>= 10 km/h)...'
-                    : 'Fuzzy search songs, artists, albums, or file names...'
-                }
-                className={`w-full bg-[#0b1120] border border-slate-800 rounded-2xl pl-12 pr-10 py-3.5 text-base text-white placeholder-slate-500 focus:outline-none focus:border-slate-600 transition-colors shadow-lg ${
-                  driverSafeActive ? 'opacity-60 cursor-not-allowed' : ''
+            <div className="relative flex items-center gap-2">
+              <div className="relative flex-1">
+                <Search className="w-5 h-5 text-slate-400 absolute left-4 top-4" />
+                <input
+                  type="text"
+                  readOnly={driverSafeActive}
+                  value={searchQuery}
+                  onChange={(e) => {
+                    if (!driverSafeActive) setSearchQuery(e.target.value);
+                  }}
+                  placeholder={
+                    driverSafeActive
+                      ? 'Typing locked while driving (>= 10 km/h)...'
+                      : 'Fuzzy search songs, artists, albums, or file names...'
+                  }
+                  className={`w-full bg-[#0b1120] border border-slate-800 rounded-2xl pl-12 pr-10 py-3.5 text-base text-white placeholder-slate-500 focus:outline-none focus:border-slate-600 transition-colors shadow-lg ${
+                    driverSafeActive ? 'opacity-60 cursor-not-allowed' : ''
+                  }`}
+                />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-4 top-3.5 text-slate-400 hover:text-white p-1"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={handleStartVoiceSearch}
+                className={`p-3.5 rounded-2xl border transition-all active:scale-95 shrink-0 ${
+                  isVoiceListening
+                    ? 'bg-red-500/20 border-red-500 text-red-400 animate-pulse'
+                    : 'bg-[#0b1120] border-slate-800 text-slate-300 hover:text-white'
                 }`}
-              />
-              {searchQuery && (
-                <button
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-4 top-3.5 text-slate-400 hover:text-white p-1"
-                >
-                  ✕
-                </button>
-              )}
+                title='Hands-Free Voice Search (say "Play <song>")'
+              >
+                <Mic className="w-5 h-5" style={!isVoiceListening ? { color: activeAccent.hex } : undefined} />
+              </button>
             </div>
 
             {searchQuery.trim() ? (
@@ -4575,19 +6917,14 @@ export default function App() {
                           }}
                           className="flex items-center gap-3.5 flex-1 min-w-0 cursor-pointer"
                         >
-                          <div
-                            className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 border border-slate-800 bg-black/60 shadow"
-                            style={isCurrent ? { borderColor: activeAccent.hex } : {}}
-                          >
-                            {coverArtUrls[track.id] ? (
-                              <img src={coverArtUrls[track.id]} alt="" className="w-full h-full object-cover rounded-xl" />
-                            ) : (
-                              <FileAudio
-                                className="w-5 h-5"
-                                style={{ color: isCurrent ? activeAccent.hex : '#94a3b8' }}
-                              />
-                            )}
-                          </div>
+                          <LazyAlbumArt
+                            src={coverArtUrls[track.id]}
+                            alt={track.album || track.title}
+                            accentHex={activeAccent.hex}
+                            isCurrent={isCurrent}
+                            variant="row"
+                            className="w-11 h-11"
+                          />
                           <div className="truncate">
                             <div
                               className="font-bold text-sm truncate"
@@ -4688,8 +7025,19 @@ export default function App() {
             accentPalette={accentPalette}
 
             dspSettings={dspSettings}
-            onChangeDspSettings={setDspSettings}
+            onChangeDspSettings={handleDspSettingsFromPanel}
             customDspPresets={customDspPresets}
+            activeCompareSlot={activeCompareSlot}
+            slotBPresetName={slotBDspSnapshot?.selectedPresetId || null}
+            onToggleCompareSlot={handleToggleCompareSlot}
+            onSnapshotSlotB={handleSnapshotSlotB}
+            onHoldBypassChange={setIsHoldBypassed}
+            activeOutputRoute={activeOutputRoute}
+            onSelectOutputRoute={handleSelectOutputRoute}
+            dualPaneCockpit={dualPaneCockpit}
+            onToggleDualPaneCockpit={setDualPaneCockpit}
+            driveModeAutoSpeedKmH={driveModeAutoSpeedKmH}
+            onChangeDriveModeAutoSpeedKmH={setDriveModeAutoSpeedKmH}
             onSaveCustomDspPreset={(name: string) => {
               const id = `custom_${Date.now()}`;
               const preset: DspPreset16 = {
@@ -4766,6 +7114,13 @@ export default function App() {
             onClearOfflineStorage={handleClearOfflineStorage}
             storageQuota={storageQuota}
             onRequestPersistentStorage={handleRequestPersistentStorage}
+            offlineFolderName={offlineFolderName}
+            offlineFolderHasHandle={Boolean(offlineFolderHandle)}
+            offlineFolderPermission={offlineFolderPermission}
+            isFolderPickerSupported={isFolderPickerSupported()}
+            onPickOfflineFolder={handlePickOfflineFolder}
+            onAuthorizeOfflineFolder={handleAuthorizeOfflineFolder}
+            onClearOfflineFolder={handleClearOfflineFolder}
 
             autoResumeOnBoot={autoResumeOnBoot}
             onToggleAutoResumeOnBoot={setAutoResumeOnBoot}
@@ -4783,17 +7138,42 @@ export default function App() {
             swcBindings={swcBindings}
             onUpdateSwcBinding={(action: SteeringAction, keyBinding: string) => {
               setSwcBindings((prev) => ({ ...prev, [action]: keyBinding }));
-              setStatusMessage(`Bound Steering Key "${keyBinding}" to ${action}`);
+              setStatusMessage(`Bound Steering Tap "${keyBinding}" to ${action}`);
+              setTimeout(() => setStatusMessage(null), 2500);
+            }}
+            swcLongPressBindings={swcLongPressBindings}
+            onUpdateSwcLongPressBinding={(action: SteeringAction, keyBinding: string) => {
+              setSwcLongPressBindings((prev) => ({ ...prev, [action]: keyBinding }));
+              setStatusMessage(`Bound Steering Long-Press "${keyBinding}" to ${action}`);
               setTimeout(() => setStatusMessage(null), 2500);
             }}
             onResetSwcBindings={() => {
               setSwcBindings({ ...DEFAULT_SWC_BINDINGS });
-              setStatusMessage('Steering wheel key bindings reset to defaults.');
+              setSwcLongPressBindings({ ...DEFAULT_SWC_LONG_PRESS_BINDINGS });
+              setStatusMessage('Steering wheel short & long-press bindings reset.');
               setTimeout(() => setStatusMessage(null), 2500);
             }}
             onListeningSwcChange={(listening: boolean) => {
               isListeningSwcKeyRef.current = listening;
             }}
+
+            driverProfiles={driverProfiles}
+            activeDriverProfileId={activeDriverProfileId}
+            onSelectDriverProfile={handleSelectDriverProfile}
+            onSaveCurrentToDriverProfile={handleSaveCurrentToDriverProfile}
+
+            autoPlayOnBluetooth={autoPlayOnBluetooth}
+            onToggleAutoPlayOnBluetooth={setAutoPlayOnBluetooth}
+            duckOnReverseGear={duckOnReverseGear}
+            onToggleDuckOnReverseGear={setDuckOnReverseGear}
+            globalAudioSessionAttach={globalAudioSessionAttach}
+            onToggleGlobalAudioSessionAttach={setGlobalAudioSessionAttach}
+            floatingMiniBarOpen={floatingMiniBarOpen}
+            onToggleFloatingMiniBar={setFloatingMiniBarOpen}
+            getAudioContext={() => webAudioCtxRef.current}
+
+            onBuildRoadtripPlan={handleBuildRoadtripPlan}
+            onPinRoadtripOffline={handlePinRoadtripOffline}
 
             replayGainEnabled={replayGainEnabled}
             onToggleReplayGain={setReplayGainEnabled}
@@ -4803,6 +7183,15 @@ export default function App() {
             onToggleSmartRollingCache={setSmartRollingCache}
             offlineCacheCapMb={offlineCacheCapMb}
             onChangeOfflineCacheCapMb={setOfflineCacheCapMb}
+
+            localTrackCount={localTrackCount}
+            onScanLocalFolder={handleScanLocalFolder}
+            onScanLocalInputFiles={handleScanLocalInputFiles}
+            onExportBackupJson={handleExportBackupJson}
+            onImportBackupJson={handleImportBackupJson}
+            onPushBackupCloud={handlePushBackupCloud}
+            onPullBackupCloud={handlePullBackupCloud}
+            isSyncingBackup={isSyncingBackup}
 
             diagnosticLogs={diagnosticLogs}
             onRunDiagnostics={runStreamDiagnostics}
@@ -4974,9 +7363,31 @@ export default function App() {
 
             {/* Selection Status & Actions */}
             <div className="pt-3 border-t border-slate-800 space-y-3">
-              <div className="flex items-center justify-between text-xs text-slate-400">
-                <span>Selected Directory:</span>
-                <span className="font-mono text-white font-semibold">/{browserCurrentPath || 'Root'}</span>
+              <div className="flex items-center justify-between gap-2 text-xs text-slate-400 flex-wrap">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span>Selected Directory:</span>
+                  <span className="font-mono text-white font-semibold truncate">/{browserCurrentPath || 'Root'}</span>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    disabled={isBatchSyncing}
+                    onClick={() => handlePinFolderOffline(browserCurrentPath)}
+                    className="px-3 py-1.5 rounded-xl font-bold text-[11px] text-black flex items-center gap-1.5 shrink-0 disabled:opacity-50"
+                    style={{ backgroundColor: activeAccent.hex }}
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Pin Folder Offline
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => runFolderScanDiagnostics(browserCurrentPath)}
+                    className="px-3 py-1.5 rounded-xl font-bold text-[11px] text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 flex items-center gap-1.5 shrink-0 transition-colors"
+                  >
+                    <Network className="w-3.5 h-3.5" style={{ color: activeAccent.hex }} />
+                    Scan Diagnostics
+                  </button>
+                </div>
               </div>
 
               <div className="flex gap-2">
@@ -4999,6 +7410,132 @@ export default function App() {
                   This Folder Only
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* NEXTCLOUD WEBDAV FOLDER SCAN DIAGNOSTICS MODAL */}
+      {showScanDiagnosticsModal && (
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+          <div
+            className="w-full max-w-2xl bg-[#0b1120] border rounded-3xl p-6 shadow-2xl flex flex-col max-h-[88vh] space-y-4"
+            style={{ borderColor: activeAccent.border }}
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <Network className="w-5 h-5 shrink-0" style={{ color: activeAccent.hex }} />
+                <div className="min-w-0">
+                  <h3 className="text-base font-bold text-white">Nextcloud WebDAV Scan Diagnostics</h3>
+                  <p className="text-[11px] text-slate-400 truncate">
+                    {scanDiagnosticsRunning
+                      ? scanDiagnosticsStepText
+                      : 'Step-by-step HTTP status codes & Nextcloud folder permissions'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  scanDiagRunIdRef.current += 1;
+                  setScanDiagnosticsRunning(false);
+                  setShowScanDiagnosticsModal(false);
+                }}
+                className="text-slate-400 hover:text-white text-sm p-1"
+              >
+                ✕
+              </button>
+            </div>
+
+            {scanDiagnosticsRunning && (
+              <div className="w-full h-1 bg-slate-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full w-1/2 animate-pulse rounded-full"
+                  style={{ backgroundColor: activeAccent.hex }}
+                />
+              </div>
+            )}
+
+            {scanDiagnosticsSummary && (
+              <div
+                className={`px-3.5 py-2.5 rounded-xl text-xs font-semibold border ${
+                  scanDiagnosticsEntries.some((e) => e.status === 'FAIL')
+                    ? 'bg-red-500/10 border-red-500/40 text-red-300'
+                    : scanDiagnosticsEntries.some((e) => e.status === 'WARN')
+                    ? 'bg-amber-500/10 border-amber-500/40 text-amber-300'
+                    : 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
+                }`}
+              >
+                {scanDiagnosticsSummary}
+              </div>
+            )}
+
+            <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-[180px]">
+              {scanDiagnosticsEntries.map((entry) => {
+                const badgeClasses =
+                  entry.status === 'PASS'
+                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                    : entry.status === 'WARN'
+                    ? 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                    : entry.status === 'FAIL'
+                    ? 'bg-red-500/15 text-red-300 border-red-500/40'
+                    : 'bg-slate-700/40 text-slate-200 border-slate-600/50';
+                const httpLabel =
+                  entry.httpStatusCode !== null
+                    ? `HTTP ${entry.httpStatusCode}`
+                    : entry.status === 'RUNNING'
+                    ? '...'
+                    : 'ERR';
+                return (
+                  <div
+                    key={entry.id}
+                    className="p-3 rounded-xl bg-black/50 border border-slate-800/80 space-y-1"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-white truncate">{entry.stepTitle}</span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {entry.latencyMs > 0 && (
+                          <span className="text-[10px] font-mono text-slate-500">{entry.latencyMs} ms</span>
+                        )}
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border ${badgeClasses}`}>
+                          {httpLabel}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="text-[11px] font-mono truncate" style={{ color: activeAccent.hex }}>
+                      {entry.targetPath}
+                    </div>
+                    <div className="text-[11px] text-sky-300 font-medium">
+                      Permissions: {entry.permissionsLabel}
+                    </div>
+                    <div className="text-[11px] text-slate-400">{entry.detailMessage}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="pt-2 border-t border-slate-800 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={scanDiagnosticsRunning}
+                onClick={() => runFolderScanDiagnostics(scanDiagnosticsStartPath)}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white border border-slate-700 flex items-center gap-1.5"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${scanDiagnosticsRunning ? 'animate-spin' : ''}`} />
+                Re-run Check
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  scanDiagRunIdRef.current += 1;
+                  setScanDiagnosticsRunning(false);
+                  setShowScanDiagnosticsModal(false);
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-black"
+                style={{ backgroundColor: activeAccent.hex }}
+              >
+                Close
+              </button>
             </div>
           </div>
         </div>
@@ -5194,22 +7731,253 @@ export default function App() {
         </div>
       )}
 
-      {/* PERSISTENT STICKY MINI-PLAYER (Visible on Library, Search, and Settings tabs) */}
+      {/* AUDIO STREAM / CODEC & SIGNAL PATH INSPECTOR SHEET */}
+      {isStreamInspectorOpen && currentTrack && (
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+          <div
+            className="w-full max-w-lg bg-[#0b1120] border rounded-3xl p-6 shadow-2xl space-y-4"
+            style={{ borderColor: activeAccent.border }}
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <Headphones className="w-5 h-5 shrink-0" style={{ color: activeAccent.hex }} />
+                <div className="min-w-0">
+                  <h3 className="text-base font-bold text-white">Audio Stream &amp; DSP Signal Path</h3>
+                  <p className="text-[11px] text-slate-400 truncate">{currentTrack.fileName}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsStreamInspectorOpen(false)}
+                className="text-slate-400 hover:text-white text-sm p-1"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5 text-xs">
+              <div className="p-3 rounded-2xl bg-black/50 border border-slate-800/80">
+                <div className="text-[10px] text-slate-500 uppercase">Codec / Format</div>
+                <div className="font-mono font-bold text-white mt-0.5">
+                  {currentTrack.codec || currentTrack.fileName.split('.').pop()?.toUpperCase() || 'AUDIO'}
+                </div>
+              </div>
+              <div className="p-3 rounded-2xl bg-black/50 border border-slate-800/80">
+                <div className="text-[10px] text-slate-500 uppercase">Sample Rate / Bitrate</div>
+                <div className="font-mono font-bold text-white mt-0.5">
+                  {currentTrack.sampleRateHz ? `${(currentTrack.sampleRateHz / 1000).toFixed(1)} kHz` : 'Standard'} ·{' '}
+                  {currentTrack.bitrateKbps ? `${currentTrack.bitrateKbps} kbps` : 'VBR/Lossless'}
+                </div>
+              </div>
+              <div className="p-3 rounded-2xl bg-black/50 border border-slate-800/80">
+                <div className="text-[10px] text-slate-500 uppercase">Source Transport</div>
+                <div className="font-mono font-bold text-white mt-0.5">
+                  {offlineTrackIds.has(currentTrack.id)
+                    ? 'Offline Cache (0ms)'
+                    : currentTrack.sourceType === 'LOCAL'
+                    ? 'Local USB Storage'
+                    : 'Nextcloud WebDAV'}
+                </div>
+              </div>
+              <div className="p-3 rounded-2xl bg-black/50 border border-slate-800/80">
+                <div className="text-[10px] text-slate-500 uppercase">Output Route</div>
+                <div className="font-mono font-bold text-white mt-0.5">
+                  {AUDIO_OUTPUT_ROUTES.find((r) => r.id === activeOutputRoute)?.label || activeOutputRoute}
+                </div>
+              </div>
+              <div className="p-3 rounded-2xl bg-black/50 border border-slate-800/80">
+                <div className="text-[10px] text-slate-500 uppercase">DSP Pipeline</div>
+                <div className="font-mono font-bold mt-0.5" style={{ color: dspSettings.dspEnabled && !isHoldBypassed ? activeAccent.hex : '#94a3b8' }}>
+                  {isHoldBypassed ? 'MOMENTARY BYPASS' : dspSettings.dspEnabled ? `ACTIVE (${dspSettings.selectedPresetId.toUpperCase()})` : 'BYPASSED'}
+                </div>
+              </div>
+              <div className="p-3 rounded-2xl bg-black/50 border border-slate-800/80">
+                <div className="text-[10px] text-slate-500 uppercase">Crossovers &amp; Limiter</div>
+                <div className="font-mono font-bold text-white mt-0.5">
+                  HPF {dspSettings.hpfCutoffHz || 'OFF'}Hz · LPF {dspSettings.subLpfHz || 'OFF'}Hz · {dspSettings.peakLimiterCeilingDb}dB
+                </div>
+              </div>
+              <div className="p-3 rounded-2xl bg-black/50 border border-slate-800/80">
+                <div className="text-[10px] text-slate-500 uppercase">Stage &amp; Sub Trim</div>
+                <div className="font-mono font-bold text-white mt-0.5">
+                  Bal {dspSettings.balance} / Fad {dspSettings.fader} · Sub {dspSettings.subTrimDb >= 0 ? `+${dspSettings.subTrimDb}` : dspSettings.subTrimDb}dB ({dspSettings.subPhaseInverted ? '180°' : '0°'})
+                </div>
+              </div>
+              <div className="p-3 rounded-2xl bg-black/50 border border-slate-800/80">
+                <div className="text-[10px] text-slate-500 uppercase">Dynamics / ReplayGain</div>
+                <div className="font-mono font-bold text-white mt-0.5">
+                  {dspSettings.monoFoldDown ? 'Mono Sum' : 'Stereo'} ·{' '}
+                  {currentTrack.replayGainDb !== undefined ? `RG ${currentTrack.replayGainDb.toFixed(1)}dB` : 'No RG tag'}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsStreamInspectorOpen(false);
+                  navigateToMenu({ tab: 'settings' });
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 flex items-center gap-1.5"
+              >
+                <Sliders className="w-3.5 h-3.5" style={{ color: activeAccent.hex }} />
+                Open DSP Console
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsStreamInspectorOpen(false)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-black"
+                style={{ backgroundColor: activeAccent.hex }}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DRIVE MODE SIMPLIFIED LARGE-TARGET HUD OVERLAY */}
+      {isDriveModeOpen && (
+        <div className="fixed inset-0 z-[80] bg-[#020617] flex flex-col justify-between p-6 sm:p-10">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Car className="w-6 h-6" style={{ color: activeAccent.hex }} />
+              <span className="text-sm font-extrabold uppercase tracking-widest text-white">Drive Mode HUD</span>
+              <span className="px-3 py-1 rounded-xl bg-[#0b1120] border border-slate-800 text-xs font-mono font-bold text-slate-200">
+                {currentGpsSpeed} km/h
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                driveModeDismissedAtSpeedRef.current = true;
+                setIsDriveModeOpen(false);
+              }}
+              className="px-5 py-3 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-sm font-bold text-white"
+            >
+              Exit Drive Mode ✕
+            </button>
+          </div>
+
+          <div className="max-w-4xl w-full mx-auto flex flex-col items-center text-center space-y-6">
+            {currentTrack && (
+              <>
+                <div className="flex items-center gap-6">
+                  {coverArtUrls[currentTrack.id] ? (
+                    <img
+                      src={coverArtUrls[currentTrack.id]}
+                      alt={currentTrack.title}
+                      className="w-28 h-28 sm:w-36 sm:h-36 rounded-3xl object-cover border-2"
+                      style={{ borderColor: activeAccent.hex }}
+                    />
+                  ) : (
+                    <div
+                      className="w-28 h-28 sm:w-36 sm:h-36 rounded-3xl bg-[#0b1120] border-2 flex items-center justify-center"
+                      style={{ borderColor: activeAccent.hex }}
+                    >
+                      <Disc className={`w-16 h-16 ${isPlaying ? 'animate-spin' : ''}`} style={{ color: activeAccent.hex }} />
+                    </div>
+                  )}
+                  <div className="text-left min-w-0 max-w-xl">
+                    <h2 className="text-3xl sm:text-5xl font-extrabold text-white line-clamp-2 leading-tight">
+                      {currentTrack.title}
+                    </h2>
+                    <p className="text-xl sm:text-2xl text-slate-300 font-semibold mt-2 truncate">
+                      {currentTrack.artist}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="w-full max-w-2xl space-y-2">
+                  <div className="w-full h-3 bg-slate-800 rounded-full overflow-hidden">
+                    <div
+                      className="h-full rounded-full transition-all"
+                      style={{
+                        width: `${durationSeconds > 0 ? Math.min(100, (positionSeconds / durationSeconds) * 100) : 0}%`,
+                        backgroundColor: activeAccent.hex,
+                      }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-base font-mono font-bold text-slate-300">
+                    <span>{formatTime(positionSeconds)}</span>
+                    <span>{formatTime(durationSeconds)}</span>
+                  </div>
+                </div>
+              </>
+            )}
+
+            <div className="flex items-center justify-center gap-6 sm:gap-10 pt-4">
+              <button
+                type="button"
+                onClick={handlePrevTrack}
+                className="w-24 h-24 sm:w-28 sm:h-28 rounded-3xl bg-slate-900 border-2 border-slate-700 text-white flex items-center justify-center active:scale-95 shadow-2xl"
+              >
+                <SkipBack className="w-11 h-11" />
+              </button>
+
+              <button
+                type="button"
+                onClick={togglePlayPause}
+                className="w-32 h-32 sm:w-36 sm:h-36 rounded-[2rem] text-black flex items-center justify-center active:scale-95 shadow-2xl"
+                style={{ backgroundColor: activeAccent.hex }}
+              >
+                {isPlaying ? <Pause className="w-14 h-14 stroke-[2.5]" /> : <Play className="w-14 h-14 ml-1 stroke-[2.5]" />}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleNextTrack()}
+                className="w-24 h-24 sm:w-28 sm:h-28 rounded-3xl bg-slate-900 border-2 border-slate-700 text-white flex items-center justify-center active:scale-95 shadow-2xl"
+              >
+                <SkipForward className="w-11 h-11" />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-center gap-4">
+            <button
+              type="button"
+              onClick={handleToggleAttenuation}
+              className={`px-6 py-4 rounded-2xl text-sm font-bold border flex items-center gap-2 ${
+                isAttenuated
+                  ? 'bg-amber-400 text-black border-amber-300'
+                  : 'bg-[#0b1120] text-slate-200 border-slate-800'
+              }`}
+            >
+              <VolumeX className="w-5 h-5" />
+              {isAttenuated ? 'Un-Duck Volume' : 'Talk Duck (-20dB)'}
+            </button>
+            <button
+              type="button"
+              onClick={handleStartVoiceSearch}
+              className="px-6 py-4 rounded-2xl text-sm font-bold bg-[#0b1120] border border-slate-800 text-white flex items-center gap-2"
+            >
+              <Mic className="w-5 h-5" style={{ color: activeAccent.hex }} />
+              Voice Command
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* PERSISTENT STICKY MINI-PLAYER (Hidden on Player view & on xl Dual-Pane Library view) */}
       {activeTab !== 'player' && currentTrack && (
-        <StickyMiniPlayer
-          currentTrack={currentTrack}
-          isPlaying={isPlaying}
-          positionSeconds={positionSeconds}
-          durationSeconds={durationSeconds}
-          onTogglePlayPause={togglePlayPause}
-          onNextTrack={() => handleNextTrack()}
-          onOpenPlayer={() => {
-            triggerHaptic();
-            setActiveTab('player');
-          }}
-          accentHex={activeAccent.hex}
-          coverUrl={coverArtUrls[currentTrack.id]}
-        />
+        <div className={dualPaneCockpit && activeTab === 'library' ? 'xl:hidden' : ''}>
+          <StickyMiniPlayer
+            currentTrack={currentTrack}
+            isPlaying={isPlaying}
+            positionSeconds={positionSeconds}
+            durationSeconds={durationSeconds}
+            onTogglePlayPause={togglePlayPause}
+            onNextTrack={() => handleNextTrack()}
+            onOpenPlayer={() => {
+              triggerHaptic();
+              setActiveTab('player');
+            }}
+            accentHex={activeAccent.hex}
+            coverUrl={coverArtUrls[currentTrack.id]}
+          />
+        </div>
       )}
 
       {/* UP-NEXT PLAY QUEUE SLIDE-OVER DRAWER */}
@@ -5238,8 +8006,38 @@ export default function App() {
         onDeletePlaylist={handleDeletePlaylist}
         onPlayPlaylist={handlePlayPlaylist}
         onAddTrackToPlaylist={handleAddTrackToPlaylist}
+        onExportM3u8={handleExportPlaylistM3u8}
+        onImportM3u8File={handleImportM3u8File}
+        onSyncPlaylistsCloud={handleSyncPlaylistsCloud}
+        isSyncingPlaylists={isSyncingPlaylists}
+        isLoggedIn={isLoggedIn}
         trackToAdd={trackForPlaylist}
         accentHex={activeAccent.hex}
+      />
+
+      {/* DRAGGABLE FLOATING TRANSLUCENT COCKPIT PiP AUDIO BAR */}
+      <FloatingCockpitBar
+        visible={floatingMiniBarOpen}
+        title={currentTrack?.title || 'Ready to Play'}
+        artist={currentTrack?.artist || 'Zentryx Music'}
+        coverUrl={currentTrack ? coverArtUrls[currentTrack.id] : undefined}
+        isPlaying={isPlaying}
+        isDucked={isAttenuated}
+        surroundBadge={
+          dspSettings.surroundMode !== 'off'
+            ? SURROUND_MODES[dspSettings.surroundMode]?.shortLabel
+            : undefined
+        }
+        accentHex={activeAccent.hex}
+        onTogglePlayPause={togglePlayPause}
+        onPrev={handlePrevTrack}
+        onNext={() => handleNextTrack()}
+        onToggleDuck={handleToggleAttenuation}
+        onExpandPlayer={() => {
+          triggerHaptic();
+          setActiveTab('player');
+        }}
+        onClose={() => setFloatingMiniBarOpen(false)}
       />
 
       {/* PWA OFFLINE INDICATOR */}

@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
+    "build:apk": "node scripts/build-android-apk.mjs",
+    "sync:apk": "node scripts/build-android-apk.mjs --if-changed",
     "start": "tsx server.ts",
     "preview": "vite preview --port=3000 --host=0.0.0.0",
     "clean": "rm -rf dist server.js",
