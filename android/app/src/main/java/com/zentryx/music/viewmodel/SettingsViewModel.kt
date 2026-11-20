@@ -93,6 +93,19 @@ class SettingsViewModel @Inject constructor(
     val mountedUsbVolumes: StateFlow<List<String>> = usbVolumeMonitor.mountedVolumes
     val usbEventMessage: StateFlow<String?> = usbVolumeMonitor.lastEventMessage
 
+    val storageSummary: StateFlow<String> = combine(
+        storageLocation,
+        customDownloadLabel,
+        customDownloadUri,
+        mountedUsbVolumes
+    ) { loc, label, uri, _ ->
+        runCatching {
+            downloadManager.getActiveStorageSummary(loc, label, uri)
+        }.getOrElse { "App Internal Flash (fallback)" }
+    }
+        .flowOn(ioDispatcher)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "Checking storage…")
+
     // SWC Controls & Interactive Key Learner
     val swcLongPressAction: StateFlow<String> = settingsPreferences.swcLongPressActionFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "SEEK_15S")
@@ -459,6 +472,10 @@ class SettingsViewModel @Inject constructor(
         _backupStatusMessage.value = null
     }
 
+    fun reportStatusMessage(message: String) {
+        _backupStatusMessage.value = message
+    }
+
     fun updateDspSettings(settings: DspSettings) {
         if (settings.selectedPresetId != dspSettings.value.selectedPresetId) {
             playerManager.markManualPresetOverrideForCurrentTrack()
@@ -466,6 +483,8 @@ class SettingsViewModel @Inject constructor(
         dspAudioEngine.updateSettings(settings)
     }
 
+    fun selectSurroundMode(mode: SurroundMode) = dspAudioEngine.selectSurroundMode(mode)
+    fun cycleRoutePreset(route: AudioOutputRoute) = dspAudioEngine.cycleRoutePreset(route)
     fun saveCustomDspPreset(name: String) = dspAudioEngine.saveCustomPreset(name)
     fun deleteCustomDspPreset(presetId: String) = dspAudioEngine.deleteCustomPreset(presetId)
     fun toggleCompareSlot() = dspAudioEngine.toggleCompareSlot()

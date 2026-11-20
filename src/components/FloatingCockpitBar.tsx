@@ -15,6 +15,7 @@ import { CrossfadeAlbumArt } from './CrossfadeAlbumArt';
 
 interface FloatingCockpitBarProps {
   visible: boolean;
+  trackId?: string;
   title: string;
   artist: string;
   coverUrl?: string;
@@ -32,6 +33,7 @@ interface FloatingCockpitBarProps {
 
 export const FloatingCockpitBar: React.FC<FloatingCockpitBarProps> = ({
   visible,
+  trackId,
   title,
   artist,
   coverUrl,
@@ -125,7 +127,7 @@ export const FloatingCockpitBar: React.FC<FloatingCockpitBarProps> = ({
           <CrossfadeAlbumArt
             src={coverUrl}
             alt={title || 'Cover'}
-            trackKey={title}
+            trackKey={trackId || title}
             durationMs={300}
             className="w-full h-full"
             fallback={<Disc3 className="w-5 h-5 text-slate-500" />}

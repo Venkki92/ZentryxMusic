@@ -350,4 +350,98 @@ class CarDspAudioProcessorTest {
             assertTrue("$mode should generate active wide stereo spatial field (diffSum=$diffSum)", diffSum > 100_000L)
         }
     }
+
+    @Test
+    fun `pcm float decoder input is processed by surround 3d instead of bypassed`() {
+        val sampleRate = 48000
+        val frames = 1600
+        val p = CarDspAudioProcessor()
+        val configured = p.configure(AudioFormat(sampleRate, 2, C.ENCODING_PCM_FLOAT))
+        assertEquals(C.ENCODING_PCM_16BIT, configured.encoding)
+        assertTrue("CarDspAudioProcessor must report active PCM configuration", p.isPcmConfigured)
+
+        p.updateSettings(
+            DspSettings(
+                dspEnabled = true,
+                hpfCutoffHz = HpfCutoffHz.OFF,
+                roadNoiseEqEnabled = false,
+                surroundMode = SurroundMode.LOGIC7_SURROUND,
+                surroundIntensity = 80,
+                centerCoherence = 50,
+                peakLimiterCeilingDb = -0.5f
+            )
+        )
+        p.flush()
+
+        val floatInput = ByteBuffer.allocateDirect(frames * 8).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until frames) {
+            val phase = sin(2.0 * PI * 1100.0 * i / sampleRate).toFloat()
+            floatInput.putFloat(0.45f * phase)
+            floatInput.putFloat(0.10f * phase)
+        }
+        floatInput.flip()
+
+        p.queueInput(floatInput)
+        val out = p.getOutput().order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(frames * 4, out.remaining())
+
+        var diffSum = 0L
+        for (i in 0 until frames) {
+            val l = out.getShort().toInt()
+            val r = out.getShort().toInt()
+            if (i >= frames / 2) diffSum += abs(l - r)
+        }
+        assertTrue("PCM_FLOAT Logic 7 output must be active and spatially wide (diffSum=$diffSum)", diffSum > 100_000L)
+        assertTrue("Effective surround width should exceed 100% (was ${p.activeEffectiveWidthPercent}%)", p.activeEffectiveWidthPercent > 100)
+    }
+
+    @Test
+    fun `all surround matrix modes measurably widen stereo image compared to stereo direct`() {
+        val sampleRate = 48000
+        val frames = 2400
+
+        fun measureSideDiff(mode: SurroundMode): Long {
+            val p = CarDspAudioProcessor()
+            p.configure(AudioFormat(sampleRate, 2, C.ENCODING_PCM_16BIT))
+            p.updateSettings(
+                DspSettings(
+                    dspEnabled = true,
+                    hpfCutoffHz = HpfCutoffHz.OFF,
+                    roadNoiseEqEnabled = false,
+                    surroundMode = mode,
+                    surroundIntensity = 80,
+                    centerCoherence = 40,
+                    virtualHeight = 60,
+                    stereoWidthPercent = 100,
+                    peakLimiterCeilingDb = 0f
+                )
+            )
+            p.flush()
+            val input = buildStereoPcmBuffer(frames, sampleRate, 1350.0, 9000, 3000)
+            p.queueInput(input)
+            val out = p.getOutput().order(ByteOrder.LITTLE_ENDIAN)
+            var diffSum = 0L
+            for (i in 0 until frames) {
+                val l = out.getShort().toInt()
+                val r = out.getShort().toInt()
+                if (i >= frames / 2) diffSum += abs(l - r)
+            }
+            return diffSum
+        }
+
+        val directDiff = measureSideDiff(SurroundMode.OFF)
+        for (mode in listOf(
+            SurroundMode.LOGIC7_SURROUND,
+            SurroundMode.CONCERT_HALL,
+            SurroundMode.DOLBY_PRO_LOGIC_II,
+            SurroundMode.DOLBY_ATMOS_VIRTUAL,
+            SurroundMode.VIRTUAL_SURROUND_360
+        )) {
+            val modeDiff = measureSideDiff(mode)
+            assertTrue(
+                "$mode side energy ($modeDiff) should measurably exceed Stereo Direct ($directDiff)",
+                modeDiff > directDiff
+            )
+        }
+    }
 }

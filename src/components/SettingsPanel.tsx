@@ -66,6 +66,7 @@ import {
   AdaptiveDspDelta,
   AdaptiveEvaluationState,
   CabinMicStatus,
+  calculateNoiseGainCalibrationDelta,
 } from '../utils/adaptiveCabinProfile';
 
 export interface SettingsPanelProps {
@@ -120,6 +121,8 @@ export interface SettingsPanelProps {
   // Theme & Live GPS Status
   cockpitThemeMode: 'auto' | 'night' | 'day';
   onChangeThemeMode: (mode: 'auto' | 'night' | 'day') => void;
+  dynamicAmbientGlow: boolean;
+  onToggleDynamicAmbientGlow: (enabled: boolean) => void;
   gpsStatus: 'active' | 'waiting' | 'denied' | 'unavailable' | 'off';
   onRequestGpsRefresh: () => void;
 
@@ -292,6 +295,8 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
   cockpitThemeMode,
   onChangeThemeMode,
+  dynamicAmbientGlow,
+  onToggleDynamicAmbientGlow,
   gpsStatus,
   onRequestGpsRefresh,
 
@@ -425,6 +430,16 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     [onBuildRoadtripPlan, roadtripHours, roadtripPool]
   );
 
+  const adaptiveCalibration = React.useMemo(
+    () =>
+      calculateNoiseGainCalibrationDelta(
+        cabinMicStatus === 'active' ? cabinNoiseDb : null,
+        adaptiveCabinConfig,
+        adaptiveDspDelta
+      ),
+    [cabinMicStatus, cabinNoiseDb, adaptiveCabinConfig, adaptiveDspDelta]
+  );
+
   React.useEffect(() => {
     onListeningSwcChange?.(listeningAction !== null);
     if (!listeningAction) return;
@@ -505,13 +520,61 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <UserCheck className="w-4 h-4" style={{ color: accentHex }} />
             <span>Driver Cockpit Profiles</span>
           </div>
-          <button
-            type="button"
-            onClick={() => onSaveCurrentToDriverProfile(activeDriverProfileId)}
-            className="min-h-[34px] px-3 py-1 rounded-lg text-[11px] font-bold bg-black/60 border border-slate-700 text-slate-200 hover:text-white active:scale-95 transition-transform"
-          >
-            Save Current Tune to Active Slot
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Compact Real-Time Cabin Noise ↔ DSP Gain Calibration Delta Readout */}
+            <button
+              type="button"
+              onClick={() => setActiveCategory('acoustics')}
+              title="Real-time delta between cabin noise rise and adaptive DSP gain compensation. Click to calibrate."
+              className="min-h-[34px] px-2.5 py-1 rounded-lg bg-black/60 border border-slate-800 hover:border-slate-700 flex items-center gap-1.5 text-[11px] font-mono tabular-nums transition-colors"
+            >
+              <span
+                className="w-1.5 h-1.5 rounded-full shrink-0"
+                style={{
+                  backgroundColor:
+                    adaptiveCalibration.status === 'balanced'
+                      ? accentHex
+                      : adaptiveCalibration.status === 'under_compensated'
+                        ? '#f59e0b'
+                        : adaptiveCalibration.status === 'over_compensated'
+                          ? '#38bdf8'
+                          : '#64748b',
+                }}
+              />
+              <span className="text-slate-400">Noise↔DSP Δ</span>
+              <span
+                className="font-bold"
+                style={{
+                  color:
+                    adaptiveCalibration.status === 'balanced'
+                      ? accentHex
+                      : adaptiveCalibration.status === 'under_compensated'
+                        ? '#f59e0b'
+                        : adaptiveCalibration.status === 'over_compensated'
+                          ? '#38bdf8'
+                          : '#cbd5e1',
+                }}
+              >
+                {adaptiveCalibration.deltaDb !== null
+                  ? `${adaptiveCalibration.deltaDb > 0 ? '+' : ''}${adaptiveCalibration.deltaDb.toFixed(1)} dB`
+                  : adaptiveCabinConfig.enabled
+                    ? `${adaptiveCalibration.appliedGainDb > 0 ? '+' : ''}${adaptiveCalibration.appliedGainDb.toFixed(1)} dB`
+                    : 'Off'}
+              </span>
+              {adaptiveCabinConfig.enabled && (
+                <span className="hidden md:inline text-[10px] text-slate-500">
+                  · {adaptiveCalibration.hint}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => onSaveCurrentToDriverProfile(activeDriverProfileId)}
+              className="min-h-[34px] px-3 py-1 rounded-lg text-[11px] font-bold bg-black/60 border border-slate-700 text-slate-200 hover:text-white active:scale-95 transition-transform"
+            >
+              Save Current Tune to Active Slot
+            </button>
+          </div>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
           {driverProfiles.map((profile) => {
@@ -841,6 +904,32 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                     </button>
                   );
                 })}
+              </div>
+
+              <div className="pt-3 mt-3 border-t border-slate-800/70 flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-sm font-bold text-white">Dynamic Album Art Ambient Glow</div>
+                  <div className="text-xs text-slate-400">
+                    Extracts the dominant hue from the current cover art to subtly tint player edge glow and seekbar with automatic WCAG contrast clamping.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={dynamicAmbientGlow}
+                  aria-label="Toggle Dynamic Album Art Ambient Glow"
+                  onClick={() => onToggleDynamicAmbientGlow(!dynamicAmbientGlow)}
+                  className={`w-14 h-8 rounded-full p-1 transition-colors shrink-0 ${
+                    dynamicAmbientGlow ? '' : 'bg-slate-700'
+                  }`}
+                  style={dynamicAmbientGlow ? { backgroundColor: accentHex } : {}}
+                >
+                  <div
+                    className={`w-6 h-6 rounded-full bg-black transition-transform duration-150 ${
+                      dynamicAmbientGlow ? 'translate-x-6' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
               </div>
             </div>
           </div>

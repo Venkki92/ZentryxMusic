@@ -5,13 +5,32 @@ import react from '@vitejs/plugin-react';
 import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
 import {
+  AUDIO_FILE_EXTENSION_RE,
+  WEBDAV_CHUNK_MAX_RETRIES,
+  computeRetryBackoffMs,
   handleAndroidApkDownloadRequest,
   handleAndroidApkRebuildRequest,
   handleAndroidApkStatusRequest,
   handleAudioStreamRequest,
   handleDiagnosticsClearRequest,
   handleDiagnosticsLogsRequest,
+  isRetryableProxyError,
+  shouldRetryChunkRequest,
 } from './serverProxy.ts';
+
+const WEBDAV_PROXY_TARGET = 'https://cloud.zentryx.bg';
+
+type RetryableProxyReq = {
+  method?: string;
+  url?: string;
+  destroyed?: boolean;
+  headers?: Record<string, string | string[] | undefined>;
+  once?: (event: string, listener: () => void) => void;
+  __webdavRetryCount?: number;
+  __webdavRetryTimer?: ReturnType<typeof setTimeout>;
+  __webdavClientAborted?: boolean;
+  __webdavCloseHooked?: boolean;
+};
 
 const diagnosticsApiPlugin = {
   name: 'diagnostics-api-plugin',
@@ -94,8 +113,7 @@ export default defineConfig(() => {
           navigateFallbackDenylist: [/^\/api\//, /\.apk$/i],
         },
         devOptions: {
-          enabled: true,
-          type: 'classic',
+          enabled: false,
         },
       }),
     ],
@@ -105,6 +123,8 @@ export default defineConfig(() => {
       },
     },
     server: {
+      // Allow AI Studio / Cloud Run preview proxy hostnames (Vite 6+/8+ blocks unknown Host headers with 403 by default)
+      allowedHosts: true,
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modify—file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
@@ -112,7 +132,7 @@ export default defineConfig(() => {
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
       proxy: {
         '/api/nextcloud': {
-          target: 'https://cloud.zentryx.bg',
+          target: WEBDAV_PROXY_TARGET,
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api\/nextcloud/, ''),
           secure: true,
@@ -120,6 +140,18 @@ export default defineConfig(() => {
           proxyTimeout: 300000,
           configure: (proxy) => {
             proxy.on('proxyReq', (proxyReq, req) => {
+              const r = req as unknown as RetryableProxyReq;
+              if (!r.__webdavCloseHooked && typeof r.once === 'function') {
+                r.__webdavCloseHooked = true;
+                r.once('close', () => {
+                  r.__webdavClientAborted = true;
+                  if (r.__webdavRetryTimer) {
+                    clearTimeout(r.__webdavRetryTimer);
+                    r.__webdavRetryTimer = undefined;
+                  }
+                });
+              }
+
               // 1. Robust Authentication extraction: handle query param ?auth= or incoming Authorization header
               if (proxyReq.path) {
                 const queryIndex = proxyReq.path.indexOf('?');
@@ -146,7 +178,7 @@ export default defineConfig(() => {
               // Strip Range on HEAD requests: Nextcloud SabreDAV crashes with HTTP 500 when Range is present on HEAD!
               if (req.method === 'HEAD') {
                 proxyReq.removeHeader('range');
-              } else if (req.url && /\.(mp3|flac|m4a|aac|ogg|opus|wav|wma|m4b|alac|aiff)(\?|$)/i.test(req.url)) {
+              } else if (req.url && AUDIO_FILE_EXTENSION_RE.test(req.url)) {
                 // Audio stream: cap chunk to <= 8 MiB so responses never exceed Cloud Run 32 MiB GFE limit
                 const MAX_CHUNK = 8 * 1024 * 1024;
                 const clientRange = req.headers && req.headers.range;
@@ -198,7 +230,7 @@ export default defineConfig(() => {
               proxyReq.removeHeader('sec-fetch-dest');
 
               // 6. Strip conditional caching headers on audio streams so Nextcloud never returns 0-byte 304 Not Modified
-              if (req.url && /\.(mp3|flac|m4a|aac|ogg|opus|wav|wma|m4b|alac|aiff)(\?|$)/i.test(req.url)) {
+              if (req.url && AUDIO_FILE_EXTENSION_RE.test(req.url)) {
                 proxyReq.removeHeader('if-none-match');
                 proxyReq.removeHeader('if-modified-since');
               }
@@ -207,12 +239,17 @@ export default defineConfig(() => {
               try {
                 const authPresent = Boolean(proxyReq.getHeader('authorization'));
                 const rangeHeader = proxyReq.getHeader('range') || 'none';
-                const logLine = `[${new Date().toISOString()}] REQ ${req.method} ${req.url} -> cloud.zentryx.bg${proxyReq.path} (Auth: ${authPresent ? 'PRESENT' : 'MISSING'}, Range: ${rangeHeader})\n`;
+                const retryAttempt = r.__webdavRetryCount || 0;
+                const retryTag = retryAttempt > 0 ? `, Retry: ${retryAttempt}/${WEBDAV_CHUNK_MAX_RETRIES}` : '';
+                const logLine = `[${new Date().toISOString()}] REQ ${req.method} ${req.url} -> cloud.zentryx.bg${proxyReq.path} (Auth: ${authPresent ? 'PRESENT' : 'MISSING'}, Range: ${rangeHeader}${retryTag})\n`;
                 fs.appendFileSync('/tmp/proxy.log', logLine);
               } catch {}
             });
 
             proxy.on('proxyRes', (proxyRes, req) => {
+              const r = req as unknown as RetryableProxyReq;
+              const retries = r.__webdavRetryCount || 0;
+
               // Ensure cross-origin framing and streaming headers
               delete proxyRes.headers['x-frame-options'];
               delete proxyRes.headers['content-security-policy'];
@@ -244,7 +281,10 @@ export default defineConfig(() => {
               proxyRes.headers['access-control-allow-methods'] =
                 'GET, HEAD, POST, PUT, DELETE, PROPFIND, OPTIONS';
               proxyRes.headers['access-control-expose-headers'] =
-                'Content-Range, Content-Length, Accept-Ranges, Content-Type, ETag, Last-Modified';
+                'Content-Range, Content-Length, Accept-Ranges, Content-Type, ETag, Last-Modified, X-Zentryx-Proxy-Retries';
+              if (retries > 0) {
+                proxyRes.headers['x-zentryx-proxy-retries'] = String(retries);
+              }
 
               // Explicitly signal range support to HTML5 audio players for smooth seeking
               if (!proxyRes.headers['accept-ranges']) {
@@ -257,7 +297,8 @@ export default defineConfig(() => {
                 const ctype = proxyRes.headers['content-type'] || 'unknown';
                 const crange = proxyRes.headers['content-range'] || 'none';
                 const clen = proxyRes.headers['content-length'] || 'unknown';
-                const logLine = `[${new Date().toISOString()}] RES ${status} ${req.method} ${req.url} (Type: ${ctype}, Range: ${crange}, Len: ${clen})\n`;
+                const recoveryTag = retries > 0 ? `, Recovered after ${retries} retries` : '';
+                const logLine = `[${new Date().toISOString()}] RES ${status} ${req.method} ${req.url} (Type: ${ctype}, Range: ${crange}, Len: ${clen}${recoveryTag})\n`;
                 fs.appendFileSync('/tmp/proxy.log', logLine);
 
                 // If error status (>= 400), capture body chunk to log
@@ -276,13 +317,82 @@ export default defineConfig(() => {
             });
 
             proxy.on('error', (err, req, res: any) => {
+              const r = req as unknown as RetryableProxyReq;
+              const currentAttempt = r.__webdavRetryCount || 0;
+              const rangeHeader =
+                typeof req.headers?.range === 'string'
+                  ? req.headers.range
+                  : Array.isArray(req.headers?.range)
+                    ? req.headers.range[0]
+                    : undefined;
+
+              const canRetry = shouldRetryChunkRequest({
+                method: req.method,
+                url: req.url,
+                rangeHeader,
+                attempt: currentAttempt,
+                maxRetries: WEBDAV_CHUNK_MAX_RETRIES,
+                headersSent: Boolean(res && res.headersSent),
+                responseEnded: Boolean(res && res.writableEnded),
+                clientDisconnected: Boolean(r.__webdavClientAborted || req.destroyed),
+                error: err,
+              });
+
+              if (canRetry) {
+                const nextAttempt = currentAttempt + 1;
+                r.__webdavRetryCount = nextAttempt;
+                const delayMs = computeRetryBackoffMs(nextAttempt);
+                const errCode = (err as NodeJS.ErrnoException).code || err.message;
+                console.warn(
+                  `[Nextcloud WebDAV Proxy Retry ${nextAttempt}/${WEBDAV_CHUNK_MAX_RETRIES} in ${delayMs}ms]:`,
+                  errCode,
+                  req.url
+                );
+                try {
+                  fs.appendFileSync(
+                    '/tmp/proxy.log',
+                    `[${new Date().toISOString()}] PROXY CHUNK RETRY ${nextAttempt}/${WEBDAV_CHUNK_MAX_RETRIES} in ${delayMs}ms (${errCode}) on ${req.method} ${req.url}\n`
+                  );
+                } catch {}
+
+                r.__webdavRetryTimer = setTimeout(() => {
+                  r.__webdavRetryTimer = undefined;
+                  if (r.__webdavClientAborted || req.destroyed || res?.headersSent || res?.writableEnded) {
+                    return;
+                  }
+                  proxy.web(req, res, {
+                    target: WEBDAV_PROXY_TARGET,
+                    changeOrigin: true,
+                    secure: true,
+                    timeout: 300000,
+                    proxyTimeout: 300000,
+                  });
+                }, delayMs);
+                return;
+              }
+
               console.warn('[Nextcloud WebDAV Proxy Notice]:', err.message);
               try {
-                fs.appendFileSync('/tmp/proxy.log', `[${new Date().toISOString()}] PROXY SOCKET ERROR: ${err.message} on ${req.method} ${req.url}\n`);
+                fs.appendFileSync(
+                  '/tmp/proxy.log',
+                  `[${new Date().toISOString()}] PROXY SOCKET ERROR (after ${currentAttempt} retries): ${err.message} on ${req.method} ${req.url}\n`
+                );
               } catch {}
-              if (res && typeof res.writeHead === 'function' && !res.headersSent) {
-                res.writeHead(502, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: 'Proxy communication error', message: err.message }));
+              if (res && typeof res.writeHead === 'function' && !res.headersSent && !res.writableEnded) {
+                res.writeHead(502, {
+                  'Content-Type': 'application/json',
+                  'Retry-After': '2',
+                  'X-Zentryx-Proxy-Retries': String(currentAttempt),
+                });
+                res.end(
+                  JSON.stringify({
+                    error: 'Proxy communication error',
+                    message: err.message,
+                    code: (err as NodeJS.ErrnoException).code || 'PROXY_ERROR',
+                    retriesAttempted: currentAttempt,
+                    retryable: isRetryableProxyError(err),
+                  })
+                );
               }
             });
           }

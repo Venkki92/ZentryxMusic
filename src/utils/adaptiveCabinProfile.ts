@@ -113,11 +113,24 @@ export interface AdaptiveDspDelta {
   vocalTiltDb: number;
 }
 
+export const ZERO_ADAPTIVE_DELTA: AdaptiveDspDelta = {
+  profileId: 'quiet',
+  gainDb: 0,
+  balanceDelta: 0,
+  faderDelta: 0,
+  bassTiltDb: 0,
+  vocalTiltDb: 0,
+};
+
 export interface AdaptiveEvaluationState {
   activeProfile: AdaptiveCabinProfileId;
   pendingProfile: AdaptiveCabinProfileId | null;
   pendingSinceMs: number;
   triggerReason: 'disabled' | 'idle' | 'microphone' | 'speed' | 'hybrid';
+  /** Low-pass & slew-filtered vehicle speed (km/h) to prevent GPS jitter during acceleration */
+  smoothedSpeedKmH: number;
+  /** Timestamp of the previous evaluation tick for time-constant smoothing */
+  lastEvaluatedAtMs: number;
 }
 
 export const INITIAL_ADAPTIVE_STATE: AdaptiveEvaluationState = {
@@ -125,6 +138,8 @@ export const INITIAL_ADAPTIVE_STATE: AdaptiveEvaluationState = {
   pendingProfile: null,
   pendingSinceMs: 0,
   triggerReason: 'idle',
+  smoothedSpeedKmH: 0,
+  lastEvaluatedAtMs: 0,
 };
 
 const SENSITIVITY_SCALE: Record<AdaptiveCabinSensitivity, number> = {
@@ -137,6 +152,177 @@ const SPEED_HYSTERESIS_KMH = 7;
 const NOISE_HYSTERESIS_DB = 3.5;
 const ESCALATE_DWELL_MS = 1400;
 const DEESCALATE_DWELL_MS = 3200;
+
+// Speed low-pass & acceleration slew limits (prevents GPS spikes & hard-accel gain jitter)
+const MAX_ACCEL_KMH_PER_SEC = 18;
+const MAX_DECEL_KMH_PER_SEC = 28;
+const SPEED_ACCEL_TAU_SEC = 1.4;
+const SPEED_DECEL_TAU_SEC = 1.8;
+
+// DSP parameter ramp time-constants & slew-rate ceilings
+const GAIN_ATTACK_TAU_SEC = 1.2;
+const GAIN_RELEASE_TAU_SEC = 2.2;
+const MAX_GAIN_SLEW_UP_DB_PER_SEC = 1.25;
+const MAX_GAIN_SLEW_DOWN_DB_PER_SEC = 0.9;
+const MAX_STAGE_SLEW_PER_SEC = 10;
+const MAX_TILT_SLEW_DB_PER_SEC = 1.0;
+
+/**
+ * Smooths raw GPS vehicle speed using an asymmetric continuous-time exponential moving average (EMA)
+ * bounded by physical acceleration/deceleration slew limits.
+ * Eliminates GPS multipath spikes and rapid threshold oscillation during acceleration.
+ */
+export function smoothSpeedSample(
+  prevSmoothedKmH: number,
+  rawSpeedKmH: number,
+  dtMs: number,
+  isInitialSample = false
+): number {
+  const safeRaw = Number.isFinite(rawSpeedKmH) && rawSpeedKmH > 0 ? Math.min(300, rawSpeedKmH) : 0;
+  const safePrev = Number.isFinite(prevSmoothedKmH) && prevSmoothedKmH > 0 ? prevSmoothedKmH : 0;
+
+  if (isInitialSample || dtMs <= 0) {
+    return Math.round(safeRaw * 10) / 10;
+  }
+
+  const dtSec = Math.min(10, dtMs / 1000);
+  const delta = safeRaw - safePrev;
+  if (Math.abs(delta) < 0.15) {
+    return Math.round(safeRaw * 10) / 10;
+  }
+
+  const tau = delta >= 0 ? SPEED_ACCEL_TAU_SEC : SPEED_DECEL_TAU_SEC;
+  const alpha = 1 - Math.exp(-dtSec / tau);
+  const emaStep = delta * alpha;
+  const maxStep = (delta >= 0 ? MAX_ACCEL_KMH_PER_SEC : MAX_DECEL_KMH_PER_SEC) * dtSec;
+  const clampedStep = Math.max(-maxStep, Math.min(maxStep, emaStep));
+  let next = safePrev + clampedStep;
+
+  if (Math.abs(safeRaw - next) < 0.15) {
+    next = safeRaw;
+  }
+  let rounded = Math.round(Math.max(0, next) * 10) / 10;
+  if (rounded === safePrev && maxStep >= 0.1) {
+    const nudged = Math.round((safePrev + Math.sign(delta) * 0.1) * 10) / 10;
+    rounded = delta > 0 ? Math.min(safeRaw, nudged) : Math.max(safeRaw, nudged);
+  }
+  return Math.max(0, rounded);
+}
+
+function rampScalar(
+  current: number,
+  target: number,
+  dtSec: number,
+  tauUp: number,
+  tauDown: number,
+  maxRateUp: number,
+  maxRateDown: number,
+  snapEpsilon: number,
+  precisionScale: number
+): number {
+  const diff = target - current;
+  if (Math.abs(diff) <= snapEpsilon) {
+    return target;
+  }
+  const increasing = Math.abs(target) > Math.abs(current) || (current === 0 && target !== 0);
+  const tau = increasing ? tauUp : tauDown;
+  const maxRate = increasing ? maxRateUp : maxRateDown;
+
+  const alpha = 1 - Math.exp(-dtSec / tau);
+  const emaStep = diff * alpha;
+  const maxStep = maxRate * dtSec;
+  const clampedStep = Math.max(-maxStep, Math.min(maxStep, emaStep));
+  const rawNext = current + clampedStep;
+
+  if (Math.abs(target - rawNext) <= snapEpsilon) {
+    return target;
+  }
+  let rounded = Math.round(rawNext * precisionScale) / precisionScale;
+  const quantum = 1 / precisionScale;
+  if (rounded === current && maxStep >= quantum) {
+    const nudged = Math.round((current + Math.sign(diff) * quantum) * precisionScale) / precisionScale;
+    rounded = diff > 0 ? Math.min(target, nudged) : Math.max(target, nudged);
+  }
+  return rounded;
+}
+
+/**
+ * Smoothly ramps DSP gain, balance, fader, and spectral tilt deltas toward target values
+ * using asymmetric time-constant smoothing + hard slew-rate limits (dB/sec).
+ */
+export function smoothAdaptiveDspDelta(
+  current: AdaptiveDspDelta,
+  target: AdaptiveDspDelta,
+  dtMs: number
+): AdaptiveDspDelta {
+  if (dtMs <= 0) {
+    return { ...current, profileId: target.profileId };
+  }
+  const dtSec = Math.min(5, dtMs / 1000);
+
+  return {
+    profileId: target.profileId,
+    gainDb: rampScalar(
+      current.gainDb,
+      target.gainDb,
+      dtSec,
+      GAIN_ATTACK_TAU_SEC,
+      GAIN_RELEASE_TAU_SEC,
+      MAX_GAIN_SLEW_UP_DB_PER_SEC,
+      MAX_GAIN_SLEW_DOWN_DB_PER_SEC,
+      0.05,
+      10
+    ),
+    balanceDelta: Math.round(
+      rampScalar(
+        current.balanceDelta,
+        target.balanceDelta,
+        dtSec,
+        GAIN_ATTACK_TAU_SEC,
+        GAIN_RELEASE_TAU_SEC,
+        MAX_STAGE_SLEW_PER_SEC,
+        MAX_STAGE_SLEW_PER_SEC * 0.85,
+        0.5,
+        1
+      )
+    ),
+    faderDelta: Math.round(
+      rampScalar(
+        current.faderDelta,
+        target.faderDelta,
+        dtSec,
+        GAIN_ATTACK_TAU_SEC,
+        GAIN_RELEASE_TAU_SEC,
+        MAX_STAGE_SLEW_PER_SEC,
+        MAX_STAGE_SLEW_PER_SEC * 0.85,
+        0.5,
+        1
+      )
+    ),
+    bassTiltDb: rampScalar(
+      current.bassTiltDb,
+      target.bassTiltDb,
+      dtSec,
+      GAIN_ATTACK_TAU_SEC,
+      GAIN_RELEASE_TAU_SEC,
+      MAX_TILT_SLEW_DB_PER_SEC,
+      MAX_TILT_SLEW_DB_PER_SEC * 0.8,
+      0.05,
+      10
+    ),
+    vocalTiltDb: rampScalar(
+      current.vocalTiltDb,
+      target.vocalTiltDb,
+      dtSec,
+      GAIN_ATTACK_TAU_SEC,
+      GAIN_RELEASE_TAU_SEC,
+      MAX_TILT_SLEW_DB_PER_SEC,
+      MAX_TILT_SLEW_DB_PER_SEC * 0.8,
+      0.05,
+      10
+    ),
+  };
+}
 
 export function sanitizeAdaptiveCabinConfig(raw: unknown): AdaptiveCabinConfig {
   if (!raw || typeof raw !== 'object') {
@@ -228,8 +414,8 @@ function classifyByNoise(
 }
 
 /**
- * Hysteresis + dwell-time state machine that evaluates live cabin dB and GPS km/h
- * and returns the next active acoustic profile without rapid flickering.
+ * Hysteresis + dwell-time + speed-smoothed state machine that evaluates live cabin dB
+ * and GPS km/h and returns the next active acoustic profile without rapid flickering.
  */
 export function evaluateAdaptiveCabinState(
   prevState: AdaptiveEvaluationState,
@@ -246,15 +432,26 @@ export function evaluateAdaptiveCabinState(
       pendingProfile: null,
       pendingSinceMs: 0,
       triggerReason: 'disabled',
+      smoothedSpeedKmH: 0,
+      lastEvaluatedAtMs: 0,
     };
   }
+
+  const isInitialSample = prevState.lastEvaluatedAtMs <= 0;
+  const dtMs = isInitialSample ? 0 : Math.max(0, inputs.nowMs - prevState.lastEvaluatedAtMs);
+  const smoothedSpeedKmH = smoothSpeedSample(
+    prevState.smoothedSpeedKmH ?? 0,
+    inputs.speedKmH,
+    dtMs,
+    isInitialSample
+  );
 
   const currentRank = ADAPTIVE_CABIN_PROFILES[prevState.activeProfile].rank;
   const useMic = config.source === 'microphone' || config.source === 'hybrid';
   const useSpeed = config.source === 'speed' || config.source === 'hybrid';
 
   const micProfile = useMic ? classifyByNoise(inputs.cabinNoiseDb, currentRank, config) : 'quiet';
-  const speedProfile = useSpeed ? classifyBySpeed(inputs.speedKmH, currentRank, config) : 'quiet';
+  const speedProfile = useSpeed ? classifyBySpeed(smoothedSpeedKmH, currentRank, config) : 'quiet';
 
   const micRank = ADAPTIVE_CABIN_PROFILES[micProfile].rank;
   const speedRank = ADAPTIVE_CABIN_PROFILES[speedProfile].rank;
@@ -282,6 +479,8 @@ export function evaluateAdaptiveCabinState(
       pendingProfile: null,
       pendingSinceMs: 0,
       triggerReason: reason,
+      smoothedSpeedKmH,
+      lastEvaluatedAtMs: inputs.nowMs,
     };
   }
 
@@ -294,6 +493,8 @@ export function evaluateAdaptiveCabinState(
       pendingProfile: targetProfile,
       pendingSinceMs: inputs.nowMs,
       triggerReason: prevState.triggerReason,
+      smoothedSpeedKmH,
+      lastEvaluatedAtMs: inputs.nowMs,
     };
   }
 
@@ -304,28 +505,27 @@ export function evaluateAdaptiveCabinState(
       pendingProfile: null,
       pendingSinceMs: 0,
       triggerReason: reason,
+      smoothedSpeedKmH,
+      lastEvaluatedAtMs: inputs.nowMs,
     };
   }
 
-  return prevState;
+  return {
+    ...prevState,
+    smoothedSpeedKmH,
+    lastEvaluatedAtMs: inputs.nowMs,
+  };
 }
 
 /**
- * Computes exact DSP gain, balance, fader, and spectral tilt deltas for the active profile.
+ * Computes exact target DSP gain, balance, fader, and spectral tilt deltas for the active profile.
  */
 export function calculateAdaptiveDspDelta(
   profileId: AdaptiveCabinProfileId,
   config: AdaptiveCabinConfig
 ): AdaptiveDspDelta {
   if (!config.enabled || profileId === 'quiet') {
-    return {
-      profileId: 'quiet',
-      gainDb: 0,
-      balanceDelta: 0,
-      faderDelta: 0,
-      bassTiltDb: 0,
-      vocalTiltDb: 0,
-    };
+    return { ...ZERO_ADAPTIVE_DELTA };
   }
 
   const spec = ADAPTIVE_CABIN_PROFILES[profileId];
@@ -354,38 +554,142 @@ export function calculateAdaptiveDspDelta(
 }
 
 /**
- * Non-destructively overlays adaptive cabin gain, balance/fader, and bass/vocal tilt onto
+ * Non-destructively overlays smoothed adaptive cabin gain, balance/fader, and bass/vocal tilt onto
  * the user's base DspSettings without mutating or persisting over their manual tune.
+ * Uses fine 0.1 dB / 1-unit resolution so ramped transitions glide without audible stair-stepping.
  */
 export function applyAdaptiveCabinOverlay(
   base: DspSettings,
   delta: AdaptiveDspDelta
 ): DspSettings {
   if (
-    delta.profileId === 'quiet' ||
-    (delta.gainDb === 0 && delta.balanceDelta === 0 && delta.faderDelta === 0)
+    delta.gainDb === 0 &&
+    delta.balanceDelta === 0 &&
+    delta.faderDelta === 0 &&
+    delta.bassTiltDb === 0 &&
+    delta.vocalTiltDb === 0
   ) {
     return base;
   }
 
   const nextBands = [...base.bands16] as DspSettings['bands16'];
   if (delta.bassTiltDb > 0) {
-    nextBands[0] = clampNumber(nextBands[0] + delta.bassTiltDb * 0.85, -12, 12, 0.5);
-    nextBands[1] = clampNumber(nextBands[1] + delta.bassTiltDb, -12, 12, 0.5);
-    nextBands[2] = clampNumber(nextBands[2] + delta.bassTiltDb * 0.55, -12, 12, 0.5);
+    nextBands[0] = clampNumber(nextBands[0] + delta.bassTiltDb * 0.85, -12, 12, 0.1);
+    nextBands[1] = clampNumber(nextBands[1] + delta.bassTiltDb, -12, 12, 0.1);
+    nextBands[2] = clampNumber(nextBands[2] + delta.bassTiltDb * 0.55, -12, 12, 0.1);
   }
   if (delta.vocalTiltDb > 0) {
-    nextBands[6] = clampNumber(nextBands[6] + delta.vocalTiltDb * 0.6, -12, 12, 0.5);
-    nextBands[7] = clampNumber(nextBands[7] + delta.vocalTiltDb, -12, 12, 0.5);
-    nextBands[8] = clampNumber(nextBands[8] + delta.vocalTiltDb * 0.7, -12, 12, 0.5);
+    nextBands[6] = clampNumber(nextBands[6] + delta.vocalTiltDb * 0.6, -12, 12, 0.1);
+    nextBands[7] = clampNumber(nextBands[7] + delta.vocalTiltDb, -12, 12, 0.1);
+    nextBands[8] = clampNumber(nextBands[8] + delta.vocalTiltDb * 0.7, -12, 12, 0.1);
   }
 
   return {
     ...base,
-    preampDb: clampNumber(base.preampDb + delta.gainDb, -12, 6, 0.5),
-    balance: clampNumber(base.balance + delta.balanceDelta, -100, 100, 5),
-    fader: clampNumber(base.fader + delta.faderDelta, -100, 100, 5),
+    preampDb: clampNumber(base.preampDb + delta.gainDb, -12, 6, 0.1),
+    balance: clampNumber(base.balance + delta.balanceDelta, -100, 100, 1),
+    fader: clampNumber(base.fader + delta.faderDelta, -100, 100, 1),
     bands16: nextBands,
+  };
+}
+
+export type CalibrationBalanceStatus =
+  | 'standby'
+  | 'speed_only'
+  | 'quiet_floor'
+  | 'balanced'
+  | 'under_compensated'
+  | 'over_compensated';
+
+export interface NoiseGainCalibrationDelta {
+  /** Measured cabin noise relative to configured moderate baseline (dB SPL), or null if mic inactive. */
+  noiseAboveFloorDb: number | null;
+  /** Currently applied smoothed DSP preamp gain boost (dB). */
+  appliedGainDb: number;
+  /** Real-time delta between cabin noise above baseline and applied DSP gain: (noise - floor) - gain. */
+  deltaDb: number | null;
+  /** Effective perceived cabin noise floor offset (cabinNoiseDb - appliedGainDb) when mic is active. */
+  effectiveNoiseDb: number | null;
+  status: CalibrationBalanceStatus;
+  hint: string;
+}
+
+/**
+ * Computes the live calibration delta between measured cabin noise (relative to the configured
+ * moderate trigger floor) and the currently applied smoothed DSP gain compensation.
+ */
+export function calculateNoiseGainCalibrationDelta(
+  cabinNoiseDb: number | null,
+  config: AdaptiveCabinConfig,
+  activeDelta: AdaptiveDspDelta
+): NoiseGainCalibrationDelta {
+  const appliedGainDb = Math.round(activeDelta.gainDb * 10) / 10;
+  const hasValidMic = cabinNoiseDb !== null && Number.isFinite(cabinNoiseDb);
+
+  if (!config.enabled) {
+    return {
+      noiseAboveFloorDb: hasValidMic ? Math.round((cabinNoiseDb - config.noiseModerateDb) * 10) / 10 : null,
+      appliedGainDb: 0,
+      deltaDb: null,
+      effectiveNoiseDb: hasValidMic ? Math.round(cabinNoiseDb * 10) / 10 : null,
+      status: 'standby',
+      hint: 'Adaptive Off',
+    };
+  }
+
+  if (config.source === 'speed' || !hasValidMic) {
+    return {
+      noiseAboveFloorDb: null,
+      appliedGainDb,
+      deltaDb: null,
+      effectiveNoiseDb: null,
+      status: config.source === 'speed' ? 'speed_only' : 'standby',
+      hint: config.source === 'speed' ? 'Speed Only' : 'Mic Standby',
+    };
+  }
+
+  const noiseAboveFloorDb = Math.round((cabinNoiseDb - config.noiseModerateDb) * 10) / 10;
+  const deltaDb = Math.round((noiseAboveFloorDb - appliedGainDb) * 10) / 10;
+  const effectiveNoiseDb = Math.round((cabinNoiseDb - appliedGainDb) * 10) / 10;
+
+  if (noiseAboveFloorDb < 0 && appliedGainDb <= 0.1) {
+    return {
+      noiseAboveFloorDb,
+      appliedGainDb,
+      deltaDb,
+      effectiveNoiseDb,
+      status: 'quiet_floor',
+      hint: 'Below Trigger',
+    };
+  }
+  if (deltaDb <= -2.0 && appliedGainDb > 0.1) {
+    return {
+      noiseAboveFloorDb,
+      appliedGainDb,
+      deltaDb,
+      effectiveNoiseDb,
+      status: 'over_compensated',
+      hint: 'Gain High',
+    };
+  }
+  if (deltaDb >= 10.0) {
+    return {
+      noiseAboveFloorDb,
+      appliedGainDb,
+      deltaDb,
+      effectiveNoiseDb,
+      status: 'under_compensated',
+      hint: 'Raise Gain',
+    };
+  }
+
+  return {
+    noiseAboveFloorDb,
+    appliedGainDb,
+    deltaDb,
+    effectiveNoiseDb,
+    status: 'balanced',
+    hint: 'Calibrated',
   };
 }
 

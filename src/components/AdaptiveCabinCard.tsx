@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Mic, Gauge, Sliders, ChevronDown, ChevronUp, ShieldAlert } from 'lucide-react';
+import { Mic, Gauge, Sliders, ChevronDown, ChevronUp, ShieldAlert, Activity } from 'lucide-react';
 import {
   ADAPTIVE_CABIN_PROFILES,
   ADAPTIVE_PROFILE_ORDER,
@@ -10,6 +10,7 @@ import {
   AdaptiveDspDelta,
   AdaptiveEvaluationState,
   CabinMicStatus,
+  calculateNoiseGainCalibrationDelta,
 } from '../utils/adaptiveCabinProfile';
 
 interface AdaptiveCabinCardProps {
@@ -62,7 +63,27 @@ export const AdaptiveCabinCard: React.FC<AdaptiveCabinCardProps> = ({
   const pendingSpec = evalState.pendingProfile ? ADAPTIVE_CABIN_PROFILES[evalState.pendingProfile] : null;
   const noiseBarPercent =
     cabinNoiseDb !== null ? Math.max(4, Math.min(100, ((cabinNoiseDb - 32) / 62) * 100)) : 0;
-  const speedBarPercent = Math.max(0, Math.min(100, (currentSpeedKmH / Math.max(140, config.speedHighKmH + 20)) * 100));
+  const displaySpeedKmH =
+    config.enabled && evalState.lastEvaluatedAtMs > 0 ? evalState.smoothedSpeedKmH : currentSpeedKmH;
+  const speedBarPercent = Math.max(0, Math.min(100, (displaySpeedKmH / Math.max(140, config.speedHighKmH + 20)) * 100));
+  const calibration = calculateNoiseGainCalibrationDelta(
+    micStatus === 'active' ? cabinNoiseDb : null,
+    config,
+    activeDelta
+  );
+  // Map calibration delta (-12 dB .. +16 dB) to 0..100% bar marker (0 dB sits at ~43%)
+  const deltaMarkerPercent =
+    calibration.deltaDb !== null
+      ? Math.max(4, Math.min(96, ((calibration.deltaDb + 12) / 28) * 100))
+      : 43;
+  const deltaToneColor =
+    calibration.status === 'balanced'
+      ? accentHex
+      : calibration.status === 'under_compensated'
+        ? '#f59e0b'
+        : calibration.status === 'over_compensated'
+          ? '#38bdf8'
+          : '#94a3b8';
 
   const updateField = <K extends keyof AdaptiveCabinConfig>(key: K, value: AdaptiveCabinConfig[K]) => {
     onChangeConfig((prev) => {
@@ -197,7 +218,9 @@ export const AdaptiveCabinCard: React.FC<AdaptiveCabinCardProps> = ({
               >
                 {config.source === 'microphone'
                   ? 'Speed Bypassed'
-                  : `${Math.round(currentSpeedKmH)} km/h`}
+                  : config.enabled && evalState.lastEvaluatedAtMs > 0 && Math.abs(currentSpeedKmH - displaySpeedKmH) >= 2
+                    ? `${Math.round(displaySpeedKmH)} km/h (raw ${Math.round(currentSpeedKmH)})`
+                    : `${Math.round(displaySpeedKmH)} km/h`}
               </span>
             </div>
             <div className="w-full h-2 bg-slate-900 rounded-full overflow-hidden">
@@ -214,6 +237,64 @@ export const AdaptiveCabinCard: React.FC<AdaptiveCabinCardProps> = ({
               <span>Hwy {config.speedHighwayKmH}</span>
               <span>High {config.speedHighKmH} km/h</span>
             </div>
+          </div>
+        </div>
+
+        {/* Real-Time Noise ↔ DSP Gain Calibration Delta Indicator */}
+        <div
+          className="px-3.5 py-2.5 rounded-xl bg-black/50 border border-slate-800/90 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+          aria-live="polite"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <Activity className="w-3.5 h-3.5 shrink-0" style={{ color: deltaToneColor }} />
+            <span className="text-[11px] font-semibold text-slate-300 whitespace-nowrap">
+              Calibration Δ
+            </span>
+            <span
+              className="text-xs font-mono font-bold tabular-nums whitespace-nowrap"
+              style={{ color: deltaToneColor }}
+            >
+              {calibration.deltaDb !== null
+                ? `${formatSigned(calibration.deltaDb, ' dB')}`
+                : calibration.status === 'speed_only'
+                  ? `DSP ${formatSigned(calibration.appliedGainDb, ' dB')}`
+                  : '—'}
+            </span>
+            <span className="text-[11px] text-slate-500 truncate">
+              {calibration.noiseAboveFloorDb !== null
+                ? `(${formatSigned(calibration.noiseAboveFloorDb)} dB noise vs ${formatSigned(calibration.appliedGainDb)} dB gain)`
+                : calibration.status === 'speed_only'
+                  ? '(GPS speed mode)'
+                  : config.enabled
+                    ? '(waiting for cabin mic)'
+                    : '(enable to calibrate)'}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2.5 shrink-0">
+            <div
+              className="relative w-24 h-1.5 bg-slate-900 rounded-full overflow-hidden border border-slate-800"
+              title="Calibration balance: left = DSP gain exceeds noise, center = balanced, right = noise exceeds gain"
+            >
+              <div
+                className="absolute top-0 bottom-0 w-px bg-slate-600"
+                style={{ left: '43%' }}
+                aria-hidden="true"
+              />
+              <div
+                className="absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full transition-[left] duration-200"
+                style={{
+                  left: `calc(${deltaMarkerPercent}% - 4px)`,
+                  backgroundColor: deltaToneColor,
+                }}
+              />
+            </div>
+            <span
+              className="text-[10px] font-mono font-bold uppercase tracking-wider whitespace-nowrap"
+              style={{ color: deltaToneColor }}
+            >
+              {calibration.hint}
+            </span>
           </div>
         </div>
 

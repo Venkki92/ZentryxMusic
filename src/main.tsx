@@ -52,6 +52,31 @@ class AppErrorBoundary extends React.Component<
   }
 }
 
+if (import.meta.env.DEV && typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+  navigator.serviceWorker
+    .getRegistrations()
+    .then((registrations) => {
+      let unregistered = false;
+      registrations.forEach((reg) => {
+        const scriptUrl = reg.active?.scriptURL || reg.installing?.scriptURL || reg.waiting?.scriptURL || '';
+        if (scriptUrl.includes('dev-sw')) {
+          unregistered = true;
+          reg.unregister().catch(() => {});
+        }
+      });
+      if (unregistered && typeof caches !== 'undefined') {
+        caches.keys().then((keys) => {
+          keys.forEach((key) => {
+            if (key.includes('workbox-precache')) {
+              caches.delete(key).catch(() => {});
+            }
+          });
+        }).catch(() => {});
+      }
+    })
+    .catch(() => {});
+}
+
 createRoot(document.getElementById('root')!).render(
   <AppErrorBoundary>
     <App />

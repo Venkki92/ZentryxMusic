@@ -105,6 +105,7 @@ class SettingsPreferences @Inject constructor(
         private val KEY_DRIVER_PROFILES_JSON = stringPreferencesKey("driver_profiles_json")
         private val KEY_ACTIVE_DRIVER_PROFILE_ID = stringPreferencesKey("active_driver_profile_id")
         private val KEY_SWC_CUSTOM_KEYMAP_JSON = stringPreferencesKey("swc_custom_keymap_json")
+        private val KEY_CRUISING_SORT_BY_GENRE = booleanPreferencesKey("cruising_sort_by_genre")
     }
 
     val accentColorFlow: Flow<MbuxAccentColor> = context.settingsDataStore.data.map { prefs ->
@@ -195,6 +196,7 @@ class SettingsPreferences @Inject constructor(
     val driverProfilesJsonFlow: Flow<String?> = context.settingsDataStore.data.map { it[KEY_DRIVER_PROFILES_JSON] }
     val activeDriverProfileIdFlow: Flow<String> = context.settingsDataStore.data.map { it[KEY_ACTIVE_DRIVER_PROFILE_ID] ?: "driver_venki" }
     val swcCustomKeyMapJsonFlow: Flow<String?> = context.settingsDataStore.data.map { it[KEY_SWC_CUSTOM_KEYMAP_JSON] }
+    val cruisingSortByGenreFlow: Flow<Boolean> = context.settingsDataStore.data.map { it[KEY_CRUISING_SORT_BY_GENRE] ?: true }
 
     suspend fun setAccentColor(accent: MbuxAccentColor) = context.settingsDataStore.edit { it[KEY_ACCENT_COLOR] = accent.name }
     suspend fun setDuckingEnabled(enabled: Boolean) = context.settingsDataStore.edit { it[KEY_DUCKING_ENABLED] = enabled }
@@ -326,6 +328,7 @@ class SettingsPreferences @Inject constructor(
     suspend fun saveDriverProfilesJson(json: String) = context.settingsDataStore.edit { it[KEY_DRIVER_PROFILES_JSON] = json }
     suspend fun setActiveDriverProfileId(id: String) = context.settingsDataStore.edit { it[KEY_ACTIVE_DRIVER_PROFILE_ID] = id }
     suspend fun saveSwcCustomKeyMapJson(json: String) = context.settingsDataStore.edit { it[KEY_SWC_CUSTOM_KEYMAP_JSON] = json }
+    suspend fun setCruisingSortByGenre(enabled: Boolean) = context.settingsDataStore.edit { it[KEY_CRUISING_SORT_BY_GENRE] = enabled }
 
     /**
      * Exports non-secret settings & DSP curve state as a portable JSON backup string.
@@ -364,6 +367,7 @@ class SettingsPreferences @Inject constructor(
             put("autoPlayOnBluetooth", prefs?.get(KEY_AUTO_PLAY_ON_BLUETOOTH) ?: true)
             put("duckOnReverseGear", prefs?.get(KEY_DUCK_ON_REVERSE_GEAR) ?: true)
             put("globalAudioSessionAttach", prefs?.get(KEY_GLOBAL_AUDIO_SESSION_ATTACH) ?: false)
+            put("cruisingSortByGenre", prefs?.get(KEY_CRUISING_SORT_BY_GENRE) ?: true)
             put("activeDriverProfileId", prefs?.get(KEY_ACTIVE_DRIVER_PROFILE_ID) ?: "driver_venki")
             prefs?.get(KEY_DRIVER_PROFILES_JSON)?.let { put("driverProfilesJson", it) }
             prefs?.get(KEY_SWC_CUSTOM_KEYMAP_JSON)?.let { put("swcCustomKeyMapJson", it) }
@@ -406,6 +410,7 @@ class SettingsPreferences @Inject constructor(
                 if (obj.has("autoPlayOnBluetooth")) prefs[KEY_AUTO_PLAY_ON_BLUETOOTH] = obj.optBoolean("autoPlayOnBluetooth", true)
                 if (obj.has("duckOnReverseGear")) prefs[KEY_DUCK_ON_REVERSE_GEAR] = obj.optBoolean("duckOnReverseGear", true)
                 if (obj.has("globalAudioSessionAttach")) prefs[KEY_GLOBAL_AUDIO_SESSION_ATTACH] = obj.optBoolean("globalAudioSessionAttach", false)
+                if (obj.has("cruisingSortByGenre")) prefs[KEY_CRUISING_SORT_BY_GENRE] = obj.optBoolean("cruisingSortByGenre", true)
                 obj.optString("activeDriverProfileId").takeIf { it.isNotBlank() }?.let { prefs[KEY_ACTIVE_DRIVER_PROFILE_ID] = it }
                 obj.optString("driverProfilesJson").takeIf { it.isNotBlank() }?.let { prefs[KEY_DRIVER_PROFILES_JSON] = it }
                 obj.optString("swcCustomKeyMapJson").takeIf { it.isNotBlank() }?.let { prefs[KEY_SWC_CUSTOM_KEYMAP_JSON] = it }

@@ -140,6 +140,7 @@ import {
   TrackPlayStat,
   buildSmartMixTracks,
   SmartMixType,
+  summarizeMixGenres,
 } from './utils/carConvenience';
 import { AudioVisualizer } from './components/AudioVisualizer';
 import { QueueDrawer } from './components/QueueDrawer';
@@ -150,18 +151,23 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { LazyColumn } from './components/LazyColumn';
 import { LazyAlbumArt } from './components/LazyAlbumArt';
 import { CrossfadeAlbumArt } from './components/CrossfadeAlbumArt';
+import { CockpitHudEvent, CockpitHudKind, CockpitHudOverlay } from './components/CockpitHudOverlay';
+import { AmbientArtPalette, extractAmbientPaletteFromImageUrl } from './utils/albumArtColor';
 import { PWAInstallButton, AndroidApkDownloadButton, OfflineIndicator } from './components/PWAComponents';
 import { buildTrackIndexMap } from './utils/mediatekOptimization';
 import {
   AdaptiveCabinConfig,
+  AdaptiveDspDelta,
   AdaptiveEvaluationState,
   CabinMicStatus,
   DEFAULT_ADAPTIVE_CABIN_CONFIG,
   INITIAL_ADAPTIVE_STATE,
+  ZERO_ADAPTIVE_DELTA,
   applyAdaptiveCabinOverlay,
   calculateAdaptiveDspDelta,
   evaluateAdaptiveCabinState,
   sanitizeAdaptiveCabinConfig,
+  smoothAdaptiveDspDelta,
   startCabinMicNoiseMonitor,
 } from './utils/adaptiveCabinProfile';
 import {
@@ -518,13 +524,10 @@ export default function App() {
   const [cabinNoiseDb, setCabinNoiseDb] = useState<number | null>(null);
   const [cabinMicStatus, setCabinMicStatus] = useState<CabinMicStatus>('off');
   const [adaptiveCabinState, setAdaptiveCabinState] = useState<AdaptiveEvaluationState>(INITIAL_ADAPTIVE_STATE);
+  const [adaptiveDspDelta, setAdaptiveDspDelta] = useState<AdaptiveDspDelta>(ZERO_ADAPTIVE_DELTA);
   const latestCabinNoiseRef = useRef<number | null>(null);
   const latestSpeedKmHRef = useRef<number>(0);
-
-  const adaptiveDspDelta = useMemo(
-    () => calculateAdaptiveDspDelta(adaptiveCabinState.activeProfile, adaptiveCabinConfig),
-    [adaptiveCabinState.activeProfile, adaptiveCabinConfig]
-  );
+  const adaptiveStateRef = useRef<AdaptiveEvaluationState>(INITIAL_ADAPTIVE_STATE);
 
   const effectiveDspSettings = useMemo(
     () => applyAdaptiveCabinOverlay(dspSettings, adaptiveDspDelta),
@@ -544,13 +547,22 @@ export default function App() {
   const [gpsStatus, setGpsStatus] = useState<'active' | 'waiting' | 'denied' | 'unavailable' | 'off'>('waiting');
   const [gpsPollNonce, setGpsPollNonce] = useState<number>(0);
 
-  // Cockpit Touch Gestures
+  // Cockpit Touch Gestures & Artwork HUD Confirmation Overlay
   const [enableSwipeGestures, setEnableSwipeGestures] = useState<boolean>(() => {
     return localStorage.getItem('zentryx_gestures') !== 'false';
   });
-  const [gestureNotice, setGestureNotice] = useState<string | null>(null);
+  const [cockpitHudEvent, setCockpitHudEvent] = useState<CockpitHudEvent | null>(null);
+  const hudTimerRef = useRef<number | null>(null);
+  const hudSeqRef = useRef<number>(1);
+  const lastVolumeHapticAtRef = useRef<number>(0);
   const touchStartXRef = useRef<number | null>(null);
   const touchStartYRef = useRef<number | null>(null);
+
+  // Dynamic Ambient Glow from Current Album Art
+  const [dynamicAmbientGlow, setDynamicAmbientGlow] = useState<boolean>(() => {
+    return localStorage.getItem('zentryx_dynamic_ambient_glow') !== 'false';
+  });
+  const [artAmbientPalette, setArtAmbientPalette] = useState<AmbientArtPalette | null>(null);
 
   // Cockpit Day / Night Theme Mode
   const [cockpitThemeMode, setCockpitThemeMode] = useState<'auto' | 'night' | 'day'>(() => {
@@ -713,6 +725,12 @@ export default function App() {
   });
   const lastRecordedPlayTrackIdRef = useRef<string | null>(null);
   const [libraryScrollRequest, setLibraryScrollRequest] = useState<{ index: number; nonce: number } | null>(null);
+  const [activeSmartMix, setActiveSmartMix] = useState<SmartMixType | null>(null);
+  const [cruisingOptionsOpen, setCruisingOptionsOpen] = useState<boolean>(false);
+  const [cruisingSortByGenre, setCruisingSortByGenre] = useState<boolean>(() => {
+    return localStorage.getItem('zentryx_cruising_sort_by_genre') !== 'false';
+  });
+  const [cruisingReshuffleCount, setCruisingReshuffleCount] = useState<number>(0);
 
   // General Headunit UI Usability Features
   const [dualPaneCockpit, setDualPaneCockpit] = useState<boolean>(() => {
@@ -1079,6 +1097,7 @@ export default function App() {
   }, [currentTrack, isPlaying, positionSeconds, durationSeconds, coverArtUrls]);
 
   const handleCycleSurroundMode = () => {
+    triggerHaptic('toggle');
     const order: SurroundModeId[] = [
       'off',
       'logic7_surround',
@@ -1091,7 +1110,9 @@ export default function App() {
     setDspSettings((prev) => {
       const idx = order.indexOf(prev.surroundMode ?? 'off');
       const nextMode = order[(idx + 1) % order.length];
-      setStatusMessage(`Surround Mode: ${SURROUND_MODES[nextMode].label}`);
+      const modeLabel = SURROUND_MODES[nextMode].label;
+      showCockpitHud('surround', 'Surround Mode', modeLabel);
+      setStatusMessage(`Surround Mode: ${modeLabel}`);
       setTimeout(() => setStatusMessage(null), 2200);
       return {
         ...prev,
@@ -1120,7 +1141,11 @@ export default function App() {
       } else if (swcAction === 'favorite') {
         if (currentTrack) toggleFavorite(currentTrack.id);
       } else if (swcAction === 'cruising_mix') {
-        handlePlaySmartMix('cruising');
+        handlePlaySmartMix('cruising', {
+          reshuffle: true,
+          sortByGenre: cruisingSortByGenre,
+          fullLibrary: true,
+        });
       } else if (swcAction === 'drive_mode') {
         setIsDriveModeOpen((d) => !d);
       } else if (swcAction === 'cycle_surround') {
@@ -1208,7 +1233,7 @@ export default function App() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [positionSeconds, durationSeconds, isPlaying, currentTrackIndex, queue, swcBindings, swcLongPressBindings, currentTrack]);
+  }, [positionSeconds, durationSeconds, isPlaying, currentTrackIndex, queue, swcBindings, swcLongPressBindings, currentTrack, cruisingSortByGenre]);
 
   // Helpers: Format Seconds and Bytes
   const formatTime = (secs: number) => {
@@ -2523,14 +2548,49 @@ export default function App() {
     return { buffer: complete.buffer, status: 206, statusText: 'Partial Content (Multi-chunk Joined)' };
   };
 
-  // Haptic touch feedback
-  const triggerHaptic = () => {
+  // Haptic touch feedback with distinct tactile patterns for driving eyes-free
+  const triggerHaptic = (pattern: 'tap' | 'confirm' | 'step' | 'toggle' = 'tap') => {
     try {
       if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
-        navigator.vibrate(20);
+        if (pattern === 'step') {
+          navigator.vibrate(10);
+        } else if (pattern === 'confirm') {
+          navigator.vibrate(24);
+        } else if (pattern === 'toggle') {
+          navigator.vibrate([14, 26, 18]);
+        } else {
+          navigator.vibrate(16);
+        }
       }
     } catch {}
   };
+
+  // Non-intrusive artwork-centered HUD confirmation feedback
+  const showCockpitHud = useCallback(
+    (
+      kind: CockpitHudKind,
+      label: string,
+      detail?: string,
+      levelPercent?: number,
+      durationMs = 1450
+    ) => {
+      if (hudTimerRef.current !== null) {
+        window.clearTimeout(hudTimerRef.current);
+      }
+      setCockpitHudEvent({
+        id: ++hudSeqRef.current,
+        kind,
+        label,
+        detail,
+        levelPercent,
+      });
+      hudTimerRef.current = window.setTimeout(() => {
+        setCockpitHudEvent(null);
+        hudTimerRef.current = null;
+      }, durationMs);
+    },
+    []
+  );
 
   // Fullscreen Kiosk toggle
   const toggleFullscreen = () => {
@@ -4066,7 +4126,7 @@ export default function App() {
 
   const togglePlayPause = async () => {
     if (!currentTrack) return;
-    triggerHaptic();
+    triggerHaptic('confirm');
 
     if (isPlaying) {
       if (webAudioSourceRef.current) {
@@ -4077,7 +4137,9 @@ export default function App() {
         audioRef.current.pause();
       }
       setIsPlaying(false);
+      showCockpitHud('pause', 'Paused', currentTrack.title);
     } else {
+      showCockpitHud('play', 'Playing', currentTrack.title);
       // 1. Direct HTML5 Audio element resume (preserves currentTime in place without resetting)
       if (
         audioRef.current &&
@@ -4141,42 +4203,52 @@ export default function App() {
 
   const handleNextTrack = (withCrossfadeRamp = false) => {
     if (queue.length === 0) return;
-    triggerHaptic();
+    triggerHaptic('confirm');
     if (withCrossfadeRamp && crossfadeSeconds > 0) {
       triggerCrossfadeIncomingRamp(crossfadeSeconds);
     } else {
       setCrossfadeGain(1);
     }
     if (repeatMode === 'ONE' && currentTrack) {
+      showCockpitHud('next', 'Repeating Track', currentTrack.title);
       startAudioPlayback(currentTrack);
       return;
     }
 
     const nextIdx = resolveNextIndex(queue.length, currentTrackIndex, shuffle, repeatMode);
     if (nextIdx !== -1) {
+      showCockpitHud('next', 'Next Track', queue[nextIdx]?.title);
       playTrackAtIndex(nextIdx);
     }
   };
 
   const handlePrevTrack = () => {
     if (queue.length === 0) return;
-    triggerHaptic();
+    triggerHaptic('confirm');
     const prevIdx = resolvePreviousIndex(queue.length, currentTrackIndex, positionSeconds);
     if (prevIdx === currentTrackIndex) {
       if (audioRef.current && !isWebAudioActive) {
         audioRef.current.currentTime = 0;
       }
       setPositionSeconds(0);
+      showCockpitHud('prev', 'Restart Track', currentTrack?.title);
     } else {
+      showCockpitHud('prev', 'Previous Track', queue[prevIdx]?.title);
       playTrackAtIndex(prevIdx);
     }
   };
 
   // Attenuation / "Talk" mode toggle (-20dB)
   const handleToggleAttenuation = () => {
-    triggerHaptic();
+    triggerHaptic('toggle');
     setIsAttenuated((prev) => {
       const next = !prev;
+      showCockpitHud(
+        next ? 'duck' : 'volume',
+        next ? 'Talk Duck Active' : 'Volume Restored',
+        next ? '-20 dB Attenuation' : `${isMuted ? 0 : volume}%`,
+        next ? undefined : isMuted ? 0 : volume
+      );
       setStatusMessage(next ? 'Cockpit Attenuation Active (-20 dB)' : 'Volume Restored');
       setTimeout(() => setStatusMessage(null), 2000);
       return next;
@@ -4364,10 +4436,7 @@ export default function App() {
   const handleTouchStart = (e: React.TouchEvent) => {
     if (!enableSwipeGestures) return;
     if (e.touches.length === 2) {
-      triggerHaptic();
       togglePlayPause();
-      setGestureNotice(isPlaying ? '⏸ PAUSE' : '▶ PLAY');
-      setTimeout(() => setGestureNotice(null), 1500);
       return;
     }
     if (e.touches.length === 1) {
@@ -4382,15 +4451,11 @@ export default function App() {
     const deltaY = e.changedTouches[0].clientY - touchStartYRef.current;
 
     if (Math.abs(deltaX) > 60 && Math.abs(deltaY) < 60) {
-      triggerHaptic();
       if (deltaX < 0) {
         handleNextTrack();
-        setGestureNotice('⏭ NEXT TRACK');
       } else {
         handlePrevTrack();
-        setGestureNotice('⏮ PREVIOUS TRACK');
       }
-      setTimeout(() => setGestureNotice(null), 1500);
     }
     touchStartXRef.current = null;
     touchStartYRef.current = null;
@@ -4805,28 +4870,63 @@ export default function App() {
     };
   }, [adaptiveCabinConfig.enabled, adaptiveCabinConfig.source]);
 
-  // Automated Cabin Noise & Speed Profile State Machine Evaluator
+  // Automated Cabin Noise & Speed Profile State Machine + Slew-Limited Gain Smoothing Evaluator
   useEffect(() => {
     if (!adaptiveCabinConfig.enabled) {
-      setAdaptiveCabinState({
+      const disabledState: AdaptiveEvaluationState = {
         ...INITIAL_ADAPTIVE_STATE,
         triggerReason: 'disabled',
-      });
+      };
+      adaptiveStateRef.current = disabledState;
+      setAdaptiveCabinState(disabledState);
+      setAdaptiveDspDelta(ZERO_ADAPTIVE_DELTA);
       return;
     }
 
+    let lastTickMs = Date.now();
     const tick = () => {
-      setAdaptiveCabinState((prev) =>
-        evaluateAdaptiveCabinState(prev, adaptiveCabinConfig, {
-          cabinNoiseDb: latestCabinNoiseRef.current,
-          speedKmH: latestSpeedKmHRef.current,
-          nowMs: Date.now(),
-        })
-      );
+      const nowMs = Date.now();
+      const dtMs = Math.max(50, nowMs - lastTickMs);
+      lastTickMs = nowMs;
+
+      const nextState = evaluateAdaptiveCabinState(adaptiveStateRef.current, adaptiveCabinConfig, {
+        cabinNoiseDb: latestCabinNoiseRef.current,
+        speedKmH: latestSpeedKmHRef.current,
+        nowMs,
+      });
+      adaptiveStateRef.current = nextState;
+      setAdaptiveCabinState((prev) => {
+        if (
+          prev.activeProfile === nextState.activeProfile &&
+          prev.pendingProfile === nextState.pendingProfile &&
+          prev.triggerReason === nextState.triggerReason &&
+          (prev.lastEvaluatedAtMs > 0) === (nextState.lastEvaluatedAtMs > 0) &&
+          Math.abs(prev.smoothedSpeedKmH - nextState.smoothedSpeedKmH) < 0.5
+        ) {
+          return prev;
+        }
+        return nextState;
+      });
+
+      const targetDelta = calculateAdaptiveDspDelta(nextState.activeProfile, adaptiveCabinConfig);
+      setAdaptiveDspDelta((prevDelta) => {
+        const nextDelta = smoothAdaptiveDspDelta(prevDelta, targetDelta, dtMs);
+        if (
+          nextDelta.profileId === prevDelta.profileId &&
+          nextDelta.gainDb === prevDelta.gainDb &&
+          nextDelta.balanceDelta === prevDelta.balanceDelta &&
+          nextDelta.faderDelta === prevDelta.faderDelta &&
+          nextDelta.bassTiltDb === prevDelta.bassTiltDb &&
+          nextDelta.vocalTiltDb === prevDelta.vocalTiltDb
+        ) {
+          return prevDelta;
+        }
+        return nextDelta;
+      });
     };
 
     tick();
-    const id = window.setInterval(tick, 400);
+    const id = window.setInterval(tick, 200);
     return () => window.clearInterval(id);
   }, [adaptiveCabinConfig]);
 
@@ -4974,6 +5074,11 @@ export default function App() {
       }
       setDspSettings((prev) => {
         const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (next.surroundMode !== prev.surroundMode) {
+          triggerHaptic('toggle');
+          const label = SURROUND_MODES[next.surroundMode ?? 'off']?.label || 'Direct Stereo';
+          showCockpitHud('surround', 'Surround Mode', label);
+        }
         if (activeCompareSlot === 'B') {
           setSlotBDspSnapshot(next);
           try {
@@ -4985,8 +5090,63 @@ export default function App() {
         return next;
       });
     },
-    [currentTrack?.id, activeCompareSlot]
+    [currentTrack?.id, activeCompareSlot, showCockpitHud]
   );
+
+  // Persist Dynamic Album Art Ambient Glow setting & extract WCAG-clamped palette from current artwork
+  useEffect(() => {
+    try {
+      localStorage.setItem('zentryx_dynamic_ambient_glow', dynamicAmbientGlow ? 'true' : 'false');
+    } catch {}
+  }, [dynamicAmbientGlow]);
+
+  const activeCoverUrl = currentTrack ? coverArtUrls[currentTrack.id] : undefined;
+
+  useEffect(() => {
+    if (!dynamicAmbientGlow || !activeCoverUrl) {
+      setArtAmbientPalette(null);
+      return;
+    }
+
+    let cancelled = false;
+    extractAmbientPaletteFromImageUrl(activeCoverUrl).then((palette) => {
+      if (!cancelled) {
+        setArtAmbientPalette(palette);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [dynamicAmbientGlow, activeCoverUrl]);
+
+  // Clean up HUD auto-dismiss timer on unmount
+  useEffect(() => {
+    return () => {
+      if (hudTimerRef.current !== null) {
+        window.clearTimeout(hudTimerRef.current);
+      }
+    };
+  }, []);
+
+  const playerAccent = useMemo(() => {
+    if (dynamicAmbientGlow && artAmbientPalette) {
+      return artAmbientPalette;
+    }
+    return {
+      hex: activeAccent.hex,
+      border: activeAccent.border,
+      glowStrong: `${activeAccent.hex}24`,
+      glowSoft: `${activeAccent.hex}0e`,
+      textOnAccent: '#020617' as const,
+      contrastOnDark: 8,
+    };
+  }, [dynamicAmbientGlow, artAmbientPalette, activeAccent]);
+
+  const progressPercent = useMemo(() => {
+    if (!durationSeconds || durationSeconds <= 0) return 0;
+    return Math.max(0, Math.min(100, (positionSeconds / durationSeconds) * 100));
+  }, [positionSeconds, durationSeconds]);
 
   // Speed Auto-Engage Drive Mode HUD
   useEffect(() => {
@@ -5175,33 +5335,131 @@ export default function App() {
     return () => clearInterval(interval);
   }, [isPlaying, idleScreensaverSeconds]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem('zentryx_cruising_sort_by_genre', cruisingSortByGenre ? 'true' : 'false');
+    } catch {
+      // ignore storage errors
+    }
+  }, [cruisingSortByGenre]);
+
+  const smartMixOverview = useMemo(() => {
+    const genreSummary = summarizeMixGenres(tracks);
+    let recentCount = 0;
+    let mostPlayedCount = 0;
+    let favoritesCount = 0;
+    let unheardCount = 0;
+    for (let i = 0; i < tracks.length; i++) {
+      const id = tracks[i].id;
+      const stat = playStats[id];
+      if ((stat?.lastPlayedAt || 0) > 0) recentCount++;
+      if ((stat?.playCount || 0) > 0) mostPlayedCount++;
+      else unheardCount++;
+      if (favorites.has(id)) favoritesCount++;
+    }
+    return {
+      totalCount: tracks.length,
+      recentCount,
+      mostPlayedCount,
+      favoritesCount,
+      deepCutsCount: unheardCount > 0 ? Math.min(tracks.length, Math.max(unheardCount, Math.min(tracks.length, 40))) : tracks.length,
+      genreSummary,
+    };
+  }, [tracks, playStats, favorites]);
+
   // Smart Mixes & One-Tap Jump to Playing Track Handlers
-  const handlePlaySmartMix = (mixType: SmartMixType) => {
+  const handlePlaySmartMix = (
+    mixType: SmartMixType,
+    options?: { reshuffle?: boolean; sortByGenre?: boolean; fullLibrary?: boolean }
+  ) => {
     triggerHaptic();
-    const mixTracks = buildSmartMixTracks(tracks, mixType, playStats, favorites, 40);
+    const shouldSortByGenre = options?.sortByGenre ?? cruisingSortByGenre;
+    const isReshuffle = Boolean(options?.reshuffle);
+    const useFullLibrary =
+      mixType === 'cruising' && (options?.fullLibrary ?? true);
+    const limit = useFullLibrary
+      ? Math.max(tracks.length, 1)
+      : mixType === 'favorites_radio'
+        ? Math.max(tracks.length, 40)
+        : 40;
+
+    const genreAwareMix =
+      mixType === 'cruising' || mixType === 'deep_cuts' || mixType === 'favorites_radio';
+
+    const mixTracks = buildSmartMixTracks(
+      tracks,
+      mixType,
+      playStats,
+      favorites,
+      limit,
+      {
+        reshuffle: isReshuffle || mixType === 'deep_cuts' || mixType === 'favorites_radio',
+        sortByGenre: genreAwareMix ? shouldSortByGenre : false,
+      }
+    );
+
     if (mixTracks.length === 0) {
       setStatusMessage(
         mixType === 'recent'
           ? 'No recently played tracks yet. Start listening to build history!'
           : mixType === 'most_played'
-          ? 'No play counts recorded yet.'
-          : 'No tracks available for Cruising Mix.'
+            ? 'No play counts recorded yet.'
+            : mixType === 'favorites_radio'
+              ? 'No favorite tracks yet. Tap the heart icon on songs to build Favorites Radio!'
+              : 'No tracks available for this Smart Mix.'
       );
       setTimeout(() => setStatusMessage(null), 3000);
       return;
     }
+
     const labels: Record<SmartMixType, string> = {
       cruising: 'Cruising Mix',
+      deep_cuts: 'Deep Cuts',
+      favorites_radio: 'Favorites Radio',
       recent: 'Recently Played Mix',
       most_played: 'Most Played Mix',
     };
+
+    // Keep sequential playback in exact sorted genre order when sortByGenre is active
+    if (genreAwareMix && shouldSortByGenre) {
+      setShuffle(false);
+    }
+
+    setActiveSmartMix(mixType);
+    if (mixType === 'cruising' && isReshuffle) {
+      setCruisingReshuffleCount((c) => c + 1);
+    }
+
+    const mixGenres = genreAwareMix && shouldSortByGenre ? summarizeMixGenres(mixTracks) : null;
+
     setQueue(mixTracks);
     setCurrentTrackIndex(0);
     setPositionSeconds(0);
     startAudioPlayback(mixTracks[0]);
     setActiveTab('player');
-    setStatusMessage(`${labels[mixType]} started (${mixTracks.length} tracks)`);
-    setTimeout(() => setStatusMessage(null), 3000);
+
+    if (mixType === 'cruising' && isReshuffle) {
+      const detail =
+        shouldSortByGenre && mixGenres
+          ? `${mixTracks.length} tracks · ${mixGenres.genreCount} genres (A–Z)`
+          : `${mixTracks.length} tracks · Full Shuffle`;
+      showCockpitHud('shuffle', 'Cruising Mix Reshuffled', detail);
+      setStatusMessage(
+        `Cruising Mix reshuffled (${mixTracks.length} tracks${
+          shouldSortByGenre && mixGenres
+            ? ` · sorted across ${mixGenres.genreCount} genres`
+            : ''
+        })`
+      );
+    } else {
+      const detail =
+        genreAwareMix && shouldSortByGenre && mixGenres
+          ? `${mixTracks.length} tracks · ${mixGenres.genreCount} genres (A–Z)`
+          : `${mixTracks.length} tracks`;
+      showCockpitHud(genreAwareMix ? 'shuffle' : 'play', labels[mixType], detail);
+      setStatusMessage(`${labels[mixType]} started (${detail})`);
+    }
+    setTimeout(() => setStatusMessage(null), 3200);
   };
 
   const handleJumpToPlayingTrack = () => {
@@ -5617,27 +5875,38 @@ export default function App() {
               <div
                 onTouchStart={handleTouchStart}
                 onTouchEnd={handleTouchEnd}
-                className={`headunit-player-card border rounded-3xl p-6 sm:p-8 shadow-2xl relative overflow-hidden ${
+                className={`headunit-player-card border rounded-3xl p-6 sm:p-8 shadow-2xl relative overflow-hidden transition-[border-color,box-shadow] duration-500 ${
                   isDaylightCockpit ? 'bg-[#162033]' : 'bg-[#0b1120]'
                 }`}
-                style={{ borderColor: activeAccent.border }}
+                style={{
+                  borderColor: playerAccent.border,
+                  boxShadow: `0 22px 50px rgba(0,0,0,0.65), 0 0 42px ${playerAccent.glowSoft}`,
+                }}
               >
-                {/* Floating Gesture Notice (Swipe Left/Right, 2-Finger Tap) */}
-                {gestureNotice && (
-                  <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 px-4 py-2 rounded-2xl bg-black/90 border border-slate-700 text-white font-extrabold text-xs tracking-wider shadow-2xl flex items-center gap-2 animate-in fade-in zoom-in-95 duration-150">
-                    <Sparkles className="w-4 h-4" style={{ color: activeAccent.hex }} />
-                    <span>{gestureNotice}</span>
-                  </div>
-                )}
+                {/* Dynamic Ambient Album Art Glow Wash (GPU-composited, pointer-events-none) */}
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0 transition-opacity duration-500"
+                  style={{
+                    background: `radial-gradient(circle at 22% 48%, ${playerAccent.glowStrong} 0%, ${playerAccent.glowSoft} 44%, transparent 74%)`,
+                    opacity: dynamicAmbientGlow ? 1 : 0.45,
+                  }}
+                />
 
-                <div className="headunit-player-grid grid grid-cols-1 md:grid-cols-12 gap-8 items-center">
+                <div className="headunit-player-grid relative z-10 grid grid-cols-1 md:grid-cols-12 gap-8 items-center">
                   {/* Left Pane (5/12): Album Art with Embedded ID3 Support or Real Audio Visualizer */}
                   <div className="md:col-span-5 flex flex-col items-center justify-center text-center">
                     {isVisualizerOpen ? (
-                      <div className="headunit-artwork-box w-64 h-64 sm:w-72 sm:h-72 rounded-3xl bg-gradient-to-b from-[#101726] to-[#05080f] border-2 border-slate-700/80 p-2 shadow-[inset_0_1px_4px_rgba(255,255,255,0.15),0_12px_30px_rgba(0,0,0,0.85)] relative flex flex-col justify-center overflow-hidden">
+                      <div
+                        className="headunit-artwork-box w-64 h-64 sm:w-72 sm:h-72 rounded-3xl bg-gradient-to-b from-[#101726] to-[#05080f] border-2 p-2 shadow-[inset_0_1px_4px_rgba(255,255,255,0.15),0_12px_30px_rgba(0,0,0,0.85)] relative flex flex-col justify-center overflow-hidden transition-[border-color,box-shadow] duration-500"
+                        style={{
+                          borderColor: playerAccent.border,
+                          boxShadow: `inset 0 1px 4px rgba(255,255,255,0.12), 0 14px 34px rgba(0,0,0,0.85), 0 0 28px ${playerAccent.glowSoft}`,
+                        }}
+                      >
                         <AudioVisualizer
                           isPlaying={isPlaying}
-                          accentHex={activeAccent.hex}
+                          accentHex={playerAccent.hex}
                           analyserNode={activeAnalyserNode}
                           trackTitle={currentTrack?.title}
                           trackArtist={currentTrack?.artist}
@@ -5660,17 +5929,25 @@ export default function App() {
                             setScreensaverActive(false);
                           }}
                         />
+                        <CockpitHudOverlay
+                          event={cockpitHudEvent}
+                          accentHex={playerAccent.hex}
+                          size="artwork"
+                        />
                       </div>
                     ) : (
                       <div
-                        className="headunit-artwork-box w-64 h-64 sm:w-72 sm:h-72 rounded-3xl bg-gradient-to-b from-[#131d33] to-[#070b14] border flex flex-col items-center justify-center shadow-2xl relative overflow-hidden group"
-                        style={{ borderColor: activeAccent.border }}
+                        className="headunit-artwork-box w-64 h-64 sm:w-72 sm:h-72 rounded-3xl bg-gradient-to-b from-[#131d33] to-[#070b14] border flex flex-col items-center justify-center shadow-2xl relative overflow-hidden group transition-[border-color,box-shadow] duration-500"
+                        style={{
+                          borderColor: playerAccent.border,
+                          boxShadow: `0 18px 40px rgba(0,0,0,0.75), 0 0 32px ${playerAccent.glowStrong}`,
+                        }}
                       >
                         <CrossfadeAlbumArt
                           src={currentTrack ? coverArtUrls[currentTrack.id] : null}
                           alt={currentTrack?.title || 'Album Artwork'}
                           trackKey={currentTrack?.id}
-                          durationMs={300}
+                          durationMs={350}
                           className="w-full h-full"
                           imgClassName="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105"
                           fallback={
@@ -5732,6 +6009,13 @@ export default function App() {
                             )}
                           </div>
                         )}
+
+                        {/* Centered Artwork HUD Confirmation Overlay */}
+                        <CockpitHudOverlay
+                          event={cockpitHudEvent}
+                          accentHex={playerAccent.hex}
+                          size="artwork"
+                        />
                       </div>
                     )}
 
@@ -5782,16 +6066,22 @@ export default function App() {
                       {currentTrack && (
                         <button
                           onClick={() => {
-                            triggerHaptic();
+                            const willFavorite = !favorites.has(currentTrack.id);
+                            triggerHaptic('toggle');
                             toggleFavorite(currentTrack.id);
+                            showCockpitHud(
+                              'favorite',
+                              willFavorite ? 'Saved to Favorites' : 'Removed Favorite',
+                              currentTrack.title
+                            );
                           }}
                           className="p-2 rounded-xl border border-slate-800 bg-slate-900/60 hover:border-slate-700 transition-all active:scale-95"
-                          style={{ color: favorites.has(currentTrack.id) ? activeAccent.hex : '#64748b' }}
+                          style={{ color: favorites.has(currentTrack.id) ? playerAccent.hex : '#64748b' }}
                           title={favorites.has(currentTrack.id) ? 'Remove Favorite' : 'Add Favorite'}
                         >
                           <Heart
                             className="w-4 h-4"
-                            fill={favorites.has(currentTrack.id) ? activeAccent.hex : 'none'}
+                            fill={favorites.has(currentTrack.id) ? playerAccent.hex : 'none'}
                           />
                         </button>
                       )}
@@ -5933,21 +6223,33 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* High-Contrast In-Car Seekbar */}
+                    {/* High-Contrast In-Car Seekbar with Dynamic Album Art Progress Fill */}
                     <div className="space-y-2">
-                      <input
-                        type="range"
-                        min={0}
-                        max={durationSeconds || 100}
-                        value={positionSeconds}
-                        onChange={(e) => {
-                          const newPos = Number(e.target.value);
-                          seekTo(newPos);
-                        }}
-                        className="w-full h-2.5 bg-slate-800 rounded-lg cursor-pointer"
-                        style={{ accentColor: activeAccent.hex }}
-                      />
-                      <div className="flex justify-between text-xs text-slate-300 font-mono font-semibold">
+                      <div className="relative h-6 flex items-center">
+                        <div className="w-full h-2.5 rounded-full bg-slate-800/95 overflow-hidden border border-slate-700/50">
+                          <div
+                            className="h-full rounded-full transition-[background-color,box-shadow] duration-500"
+                            style={{
+                              width: `${progressPercent}%`,
+                              backgroundColor: playerAccent.hex,
+                              boxShadow: `0 0 14px ${playerAccent.glowStrong}`,
+                            }}
+                          />
+                        </div>
+                        <input
+                          type="range"
+                          aria-label="Track seek position"
+                          min={0}
+                          max={durationSeconds || 100}
+                          value={positionSeconds}
+                          onChange={(e) => {
+                            const newPos = Number(e.target.value);
+                            seekTo(newPos);
+                          }}
+                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                        />
+                      </div>
+                      <div className="flex justify-between text-xs text-slate-300 font-mono tabular-nums font-semibold">
                         <span>{formatTime(positionSeconds)}</span>
                         <span>{formatTime(durationSeconds)}</span>
                       </div>
@@ -5958,11 +6260,13 @@ export default function App() {
                       {/* Shuffle Button (48px) */}
                       <button
                         onClick={() => {
-                          triggerHaptic();
-                          setShuffle(!shuffle);
+                          const nextShuffle = !shuffle;
+                          triggerHaptic('toggle');
+                          setShuffle(nextShuffle);
+                          showCockpitHud('shuffle', nextShuffle ? 'Shuffle On' : 'Shuffle Off');
                         }}
                         className="w-12 h-12 rounded-2xl bg-black/50 border border-slate-800 hover:border-slate-700 flex items-center justify-center transition-all active:scale-95 shadow shrink-0"
-                        style={shuffle ? { color: activeAccent.hex, borderColor: activeAccent.hex } : { color: '#64748b' }}
+                        style={shuffle ? { color: playerAccent.hex, borderColor: playerAccent.hex } : { color: '#64748b' }}
                         title={shuffle ? 'Shuffle Active' : 'Shuffle Off'}
                       >
                         <Shuffle className="w-5 h-5" />
@@ -5972,7 +6276,7 @@ export default function App() {
                       {isPodcastMode && (
                         <button
                           onClick={() => {
-                            triggerHaptic();
+                            triggerHaptic('step');
                             seekTo(Math.max(0, positionSeconds - 15));
                           }}
                           className="w-12 h-12 rounded-2xl bg-slate-900 border border-slate-700 hover:border-slate-500 text-white flex flex-col items-center justify-center transition-all active:scale-95 shadow shrink-0"
@@ -5999,10 +6303,11 @@ export default function App() {
                         onClick={togglePlayPause}
                         className={`${
                           driverSafeActive ? 'w-24 h-24 ring-2 ring-white/40' : 'w-20 h-20'
-                        } rounded-3xl text-black flex items-center justify-center transition-all shadow-2xl active:scale-95 shrink-0`}
+                        } rounded-3xl flex items-center justify-center transition-all duration-300 shadow-2xl active:scale-95 shrink-0`}
                         style={{
-                          backgroundColor: activeAccent.hex,
-                          boxShadow: `0 0 30px ${activeAccent.hex}44`,
+                          backgroundColor: playerAccent.hex,
+                          color: playerAccent.textOnAccent,
+                          boxShadow: `0 0 30px ${playerAccent.glowStrong}`,
                         }}
                         title={isPlaying ? 'Pause (Space / Steering)' : 'Play (Space / Steering)'}
                       >
@@ -6024,7 +6329,7 @@ export default function App() {
                       {isPodcastMode && (
                         <button
                           onClick={() => {
-                            triggerHaptic();
+                            triggerHaptic('step');
                             seekTo(Math.min(durationSeconds, positionSeconds + 30));
                           }}
                           className="w-12 h-12 rounded-2xl bg-slate-900 border border-slate-700 hover:border-slate-500 text-white flex flex-col items-center justify-center transition-all active:scale-95 shadow shrink-0"
@@ -6038,11 +6343,20 @@ export default function App() {
                       {/* Repeat Mode (48px) */}
                       <button
                         onClick={() => {
-                          triggerHaptic();
-                          setRepeatMode(repeatMode === 'OFF' ? 'ALL' : repeatMode === 'ALL' ? 'ONE' : 'OFF');
+                          const nextRepeat = repeatMode === 'OFF' ? 'ALL' : repeatMode === 'ALL' ? 'ONE' : 'OFF';
+                          triggerHaptic('toggle');
+                          setRepeatMode(nextRepeat);
+                          showCockpitHud(
+                            'repeat',
+                            nextRepeat === 'OFF'
+                              ? 'Repeat Off'
+                              : nextRepeat === 'ALL'
+                                ? 'Repeat All'
+                                : 'Repeat Track'
+                          );
                         }}
                         className="w-12 h-12 rounded-2xl bg-black/50 border border-slate-800 hover:border-slate-700 flex items-center justify-center transition-all active:scale-95 shadow relative shrink-0"
-                        style={repeatMode !== 'OFF' ? { color: activeAccent.hex, borderColor: activeAccent.hex } : { color: '#64748b' }}
+                        style={repeatMode !== 'OFF' ? { color: playerAccent.hex, borderColor: playerAccent.hex } : { color: '#64748b' }}
                         title={`Repeat Mode: ${repeatMode}`}
                       >
                         <Repeat className="w-5 h-5" />
@@ -6058,27 +6372,48 @@ export default function App() {
                     <div className="flex items-center gap-3 pt-1">
                       <button
                         onClick={() => {
-                          triggerHaptic();
-                          setIsMuted(!isMuted);
+                          const nextMuted = !isMuted;
+                          triggerHaptic('toggle');
+                          setIsMuted(nextMuted);
+                          showCockpitHud(
+                            nextMuted ? 'mute' : 'volume',
+                            nextMuted ? 'Audio Muted' : 'Volume Restored',
+                            nextMuted ? '0%' : `${volume}%`,
+                            nextMuted ? 0 : volume
+                          );
                         }}
-                        className="p-2 rounded-xl text-slate-400 hover:text-white transition-colors"
+                        className="p-2 rounded-xl text-slate-400 hover:text-white transition-colors active:scale-95"
                         title={isMuted ? 'Unmute' : 'Mute'}
                       >
                         {isMuted || volume === 0 ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
                       </button>
                       <input
                         type="range"
+                        aria-label="Master Volume"
                         min={0}
                         max={100}
                         value={isMuted ? 0 : volume}
                         onChange={(e) => {
-                          setVolume(Number(e.target.value));
+                          const nextVol = Number(e.target.value);
+                          setVolume(nextVol);
                           setIsMuted(false);
+                          const now = Date.now();
+                          if (now - lastVolumeHapticAtRef.current > 85) {
+                            lastVolumeHapticAtRef.current = now;
+                            triggerHaptic('step');
+                          }
+                          showCockpitHud(
+                            nextVol === 0 ? 'mute' : 'volume',
+                            nextVol === 0 ? 'Volume 0%' : 'Master Volume',
+                            `${nextVol}%`,
+                            nextVol,
+                            1150
+                          );
                         }}
                         className="w-full h-1.5 bg-slate-800 rounded-lg cursor-pointer"
-                        style={{ accentColor: activeAccent.hex }}
+                        style={{ accentColor: playerAccent.hex }}
                       />
-                      <span className="text-xs text-slate-300 font-mono font-bold w-12 text-right">
+                      <span className="text-xs text-slate-300 font-mono tabular-nums font-bold w-12 text-right">
                         {isMuted ? 'MUTE' : `${volume}%`}
                       </span>
 
@@ -6120,6 +6455,21 @@ export default function App() {
                   </button>
                 </div>
                 <div className="flex items-center gap-1.5 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handlePlaySmartMix('cruising', {
+                        reshuffle: true,
+                        sortByGenre: cruisingSortByGenre,
+                        fullLibrary: true,
+                      })
+                    }
+                    className="px-2.5 py-1 rounded-lg bg-black/50 border border-slate-800 hover:border-slate-600 text-[11px] font-semibold text-slate-200 flex items-center gap-1"
+                    title="Reshuffle whole Cruising Mix"
+                  >
+                    <RefreshCw className="w-3 h-3" style={{ color: activeAccent.hex }} />
+                    Cruising
+                  </button>
                   <button
                     type="button"
                     onClick={() => handlePlaySmartMix('recent')}
@@ -6190,12 +6540,15 @@ export default function App() {
           <div className={`w-full mx-auto ${dualPaneCockpit && currentTrack ? 'max-w-7xl grid grid-cols-1 xl:grid-cols-12 gap-6 items-start' : 'max-w-4xl'}`}>
             {dualPaneCockpit && currentTrack && (
               <aside
-                className="hidden xl:flex xl:col-span-5 flex-col bg-[#0b1120] border rounded-3xl p-5 shadow-2xl space-y-4 sticky top-20"
-                style={{ borderColor: activeAccent.border }}
+                className="hidden xl:flex xl:col-span-5 flex-col bg-[#0b1120] border rounded-3xl p-5 shadow-2xl space-y-4 sticky top-20 transition-[border-color,box-shadow] duration-500"
+                style={{
+                  borderColor: playerAccent.border,
+                  boxShadow: `0 20px 44px rgba(0,0,0,0.6), 0 0 32px ${playerAccent.glowSoft}`,
+                }}
               >
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-                    <Columns2 className="w-3.5 h-3.5" style={{ color: activeAccent.hex }} />
+                    <Columns2 className="w-3.5 h-3.5" style={{ color: playerAccent.hex }} />
                     Dual-Pane Cockpit
                   </span>
                   <div className="flex items-center gap-1.5">
@@ -6204,7 +6557,7 @@ export default function App() {
                       onClick={() => setIsStreamInspectorOpen(true)}
                       className="px-2 py-1 rounded-lg bg-black/50 border border-slate-800 text-[10px] font-mono text-slate-300 hover:text-white flex items-center gap-1"
                     >
-                      <Info className="w-3 h-3" style={{ color: activeAccent.hex }} />
+                      <Info className="w-3 h-3" style={{ color: playerAccent.hex }} />
                       {currentTrack.codec || 'AUDIO'}
                     </button>
                     <button
@@ -6218,17 +6571,20 @@ export default function App() {
                 </div>
                 <div className="flex items-center gap-4">
                   <div
-                    className="w-28 h-28 rounded-2xl bg-black/60 border flex items-center justify-center overflow-hidden shrink-0"
-                    style={{ borderColor: activeAccent.border }}
+                    className="w-28 h-28 rounded-2xl bg-black/60 border flex items-center justify-center overflow-hidden shrink-0 transition-[border-color,box-shadow] duration-500"
+                    style={{
+                      borderColor: playerAccent.border,
+                      boxShadow: `0 8px 24px ${playerAccent.glowSoft}`,
+                    }}
                   >
                     <CrossfadeAlbumArt
                       src={coverArtUrls[currentTrack.id]}
                       alt={currentTrack.title}
                       trackKey={currentTrack.id}
-                      durationMs={300}
+                      durationMs={350}
                       className="w-full h-full"
                       fallback={
-                        <Disc className={`w-12 h-12 ${isPlaying ? 'animate-spin' : ''}`} style={{ color: activeAccent.hex }} />
+                        <Disc className={`w-12 h-12 ${isPlaying ? 'animate-spin' : ''}`} style={{ color: playerAccent.hex }} />
                       }
                     />
                   </div>
@@ -6241,16 +6597,27 @@ export default function App() {
                   </div>
                 </div>
                 <div className="space-y-1">
-                  <input
-                    type="range"
-                    min={0}
-                    max={durationSeconds || 100}
-                    value={positionSeconds}
-                    onChange={(e) => seekTo(Number(e.target.value))}
-                    className="w-full h-2 bg-slate-800 rounded-lg cursor-pointer"
-                    style={{ accentColor: activeAccent.hex }}
-                  />
-                  <div className="flex justify-between text-[11px] font-mono text-slate-400">
+                  <div className="relative h-5 flex items-center">
+                    <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-[background-color] duration-500"
+                        style={{
+                          width: `${progressPercent}%`,
+                          backgroundColor: playerAccent.hex,
+                        }}
+                      />
+                    </div>
+                    <input
+                      type="range"
+                      aria-label="Track seek position"
+                      min={0}
+                      max={durationSeconds || 100}
+                      value={positionSeconds}
+                      onChange={(e) => seekTo(Number(e.target.value))}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                    />
+                  </div>
+                  <div className="flex justify-between text-[11px] font-mono tabular-nums text-slate-400">
                     <span>{formatTime(positionSeconds)}</span>
                     <span>{formatTime(durationSeconds)}</span>
                   </div>
@@ -6266,8 +6633,11 @@ export default function App() {
                   <button
                     type="button"
                     onClick={togglePlayPause}
-                    className="w-16 h-16 rounded-2xl text-black flex items-center justify-center shadow-lg active:scale-95"
-                    style={{ backgroundColor: activeAccent.hex }}
+                    className="w-16 h-16 rounded-2xl flex items-center justify-center shadow-lg active:scale-95 transition-colors duration-300"
+                    style={{
+                      backgroundColor: playerAccent.hex,
+                      color: playerAccent.textOnAccent,
+                    }}
                   >
                     {isPlaying ? <Pause className="w-7 h-7 stroke-[2.5]" /> : <Play className="w-7 h-7 ml-0.5 stroke-[2.5]" />}
                   </button>
@@ -6478,33 +6848,315 @@ export default function App() {
               </div>
             )}
 
-            {/* One-Tap Smart Mixes */}
+            {/* Upgraded Automotive Smart Mixes Deck */}
             {tracks.length > 0 && (
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mr-1">
-                  Smart Mixes:
-                </span>
-                <button
-                  onClick={() => handlePlaySmartMix('cruising')}
-                  className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#0b1120] hover:bg-slate-900 text-slate-200 border border-slate-800 hover:border-slate-600 flex items-center gap-1.5 transition-all active:scale-95"
-                >
-                  <Sparkles className="w-3.5 h-3.5" style={{ color: activeAccent.hex }} />
-                  Cruising Mix
-                </button>
-                <button
-                  onClick={() => handlePlaySmartMix('recent')}
-                  className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#0b1120] hover:bg-slate-900 text-slate-200 border border-slate-800 hover:border-slate-600 flex items-center gap-1.5 transition-all active:scale-95"
-                >
-                  <Clock className="w-3.5 h-3.5" style={{ color: activeAccent.hex }} />
-                  Recently Played
-                </button>
-                <button
-                  onClick={() => handlePlaySmartMix('most_played')}
-                  className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#0b1120] hover:bg-slate-900 text-slate-200 border border-slate-800 hover:border-slate-600 flex items-center gap-1.5 transition-all active:scale-95"
-                >
-                  <Activity className="w-3.5 h-3.5" style={{ color: activeAccent.hex }} />
-                  Most Played
-                </button>
+              <div className="bg-[#0b1120]/90 border border-slate-800/80 rounded-2xl p-3 space-y-2.5 shadow-lg">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-3.5 h-3.5" style={{ color: activeAccent.hex }} />
+                    <span className="text-[11px] font-bold uppercase tracking-[0.14em] text-slate-300">
+                      Smart Mixes
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-500">
+                      {smartMixOverview.totalCount} tracks · {smartMixOverview.genreSummary.genreCount}{' '}
+                      {smartMixOverview.genreSummary.genreCount === 1 ? 'genre' : 'genres'}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handlePlaySmartMix('cruising', {
+                        reshuffle: true,
+                        sortByGenre: cruisingSortByGenre,
+                        fullLibrary: true,
+                      })
+                    }
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700/80 flex items-center gap-1.5 transition-all active:scale-95"
+                    title="Immediately reshuffle the entire Cruising Mix"
+                  >
+                    <RefreshCw className="w-3 h-3" style={{ color: activeAccent.hex }} />
+                    Quick Reshuffle Cruising
+                  </button>
+                </div>
+
+                {/* 5 Smart Mix Tiles */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+                  {/* Cruising Mix Tile (opens Reshuffle & Genre-Sort options) */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic();
+                      setCruisingOptionsOpen((prev) => !prev);
+                    }}
+                    className={`text-left px-3 py-2.5 rounded-xl border transition-all active:scale-[0.98] flex flex-col justify-between gap-1 ${
+                      cruisingOptionsOpen || activeSmartMix === 'cruising'
+                        ? 'bg-slate-900/95 border-slate-500 shadow-md'
+                        : 'bg-[#070b15] hover:bg-slate-900/80 border-slate-800 hover:border-slate-700'
+                    }`}
+                    style={
+                      cruisingOptionsOpen || activeSmartMix === 'cruising'
+                        ? { borderColor: activeAccent.hex }
+                        : undefined
+                    }
+                  >
+                    <div className="flex items-center justify-between gap-1.5 w-full">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <Sparkles className="w-3.5 h-3.5 shrink-0" style={{ color: activeAccent.hex }} />
+                        <span className="text-xs font-bold text-slate-100 truncate">Cruising Mix</span>
+                      </div>
+                      <span className="text-[10px] font-mono text-slate-400 shrink-0">
+                        {smartMixOverview.totalCount}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-1 text-[10px] text-slate-400">
+                      <span className="truncate">
+                        {cruisingSortByGenre ? 'Genre-sorted · Reshuffle' : 'Full library shuffle'}
+                      </span>
+                      <ChevronRight
+                        className={`w-3 h-3 shrink-0 transition-transform ${
+                          cruisingOptionsOpen ? 'rotate-90 text-slate-200' : 'text-slate-500'
+                        }`}
+                      />
+                    </div>
+                  </button>
+
+                  {/* Deep Cuts Tile */}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handlePlaySmartMix('deep_cuts', {
+                        reshuffle: true,
+                        sortByGenre: cruisingSortByGenre,
+                      })
+                    }
+                    className={`text-left px-3 py-2.5 rounded-xl border transition-all active:scale-[0.98] flex flex-col justify-between gap-1 ${
+                      activeSmartMix === 'deep_cuts'
+                        ? 'bg-slate-900/95 border-slate-500 shadow-md'
+                        : 'bg-[#070b15] hover:bg-slate-900/80 border-slate-800 hover:border-slate-700'
+                    }`}
+                    style={
+                      activeSmartMix === 'deep_cuts' ? { borderColor: activeAccent.hex } : undefined
+                    }
+                  >
+                    <div className="flex items-center justify-between gap-1.5 w-full">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <Compass className="w-3.5 h-3.5 shrink-0" style={{ color: activeAccent.hex }} />
+                        <span className="text-xs font-bold text-slate-100 truncate">Deep Cuts</span>
+                      </div>
+                      <span className="text-[10px] font-mono text-slate-400 shrink-0">
+                        {smartMixOverview.deepCutsCount}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 truncate">
+                      Unheard & least-played gems
+                    </span>
+                  </button>
+
+                  {/* Favorites Radio Tile */}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handlePlaySmartMix('favorites_radio', {
+                        reshuffle: true,
+                        sortByGenre: cruisingSortByGenre,
+                      })
+                    }
+                    className={`text-left px-3 py-2.5 rounded-xl border transition-all active:scale-[0.98] flex flex-col justify-between gap-1 ${
+                      smartMixOverview.favoritesCount === 0
+                        ? 'opacity-55 bg-[#070b15] border-slate-800/70'
+                        : activeSmartMix === 'favorites_radio'
+                          ? 'bg-slate-900/95 border-slate-500 shadow-md'
+                          : 'bg-[#070b15] hover:bg-slate-900/80 border-slate-800 hover:border-slate-700'
+                    }`}
+                    style={
+                      activeSmartMix === 'favorites_radio'
+                        ? { borderColor: activeAccent.hex }
+                        : undefined
+                    }
+                  >
+                    <div className="flex items-center justify-between gap-1.5 w-full">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <Heart className="w-3.5 h-3.5 shrink-0 text-rose-400" />
+                        <span className="text-xs font-bold text-slate-100 truncate">Favorites Radio</span>
+                      </div>
+                      <span className="text-[10px] font-mono text-slate-400 shrink-0">
+                        {smartMixOverview.favoritesCount}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 truncate">
+                      {smartMixOverview.favoritesCount > 0
+                        ? 'Starred tracks · shuffled'
+                        : 'Heart tracks to unlock'}
+                    </span>
+                  </button>
+
+                  {/* Recently Played Tile */}
+                  <button
+                    type="button"
+                    onClick={() => handlePlaySmartMix('recent')}
+                    className={`text-left px-3 py-2.5 rounded-xl border transition-all active:scale-[0.98] flex flex-col justify-between gap-1 ${
+                      smartMixOverview.recentCount === 0
+                        ? 'opacity-55 bg-[#070b15] border-slate-800/70'
+                        : activeSmartMix === 'recent'
+                          ? 'bg-slate-900/95 border-slate-500 shadow-md'
+                          : 'bg-[#070b15] hover:bg-slate-900/80 border-slate-800 hover:border-slate-700'
+                    }`}
+                    style={
+                      activeSmartMix === 'recent' ? { borderColor: activeAccent.hex } : undefined
+                    }
+                  >
+                    <div className="flex items-center justify-between gap-1.5 w-full">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <Clock className="w-3.5 h-3.5 shrink-0" style={{ color: activeAccent.hex }} />
+                        <span className="text-xs font-bold text-slate-100 truncate">Recently Played</span>
+                      </div>
+                      <span className="text-[10px] font-mono text-slate-400 shrink-0">
+                        {smartMixOverview.recentCount}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 truncate">
+                      {smartMixOverview.recentCount > 0
+                        ? 'Latest cabin history'
+                        : 'Start listening first'}
+                    </span>
+                  </button>
+
+                  {/* Most Played Tile */}
+                  <button
+                    type="button"
+                    onClick={() => handlePlaySmartMix('most_played')}
+                    className={`text-left px-3 py-2.5 rounded-xl border transition-all active:scale-[0.98] flex flex-col justify-between gap-1 ${
+                      smartMixOverview.mostPlayedCount === 0
+                        ? 'opacity-55 bg-[#070b15] border-slate-800/70'
+                        : activeSmartMix === 'most_played'
+                          ? 'bg-slate-900/95 border-slate-500 shadow-md'
+                          : 'bg-[#070b15] hover:bg-slate-900/80 border-slate-800 hover:border-slate-700'
+                    }`}
+                    style={
+                      activeSmartMix === 'most_played'
+                        ? { borderColor: activeAccent.hex }
+                        : undefined
+                    }
+                  >
+                    <div className="flex items-center justify-between gap-1.5 w-full">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <Activity className="w-3.5 h-3.5 shrink-0" style={{ color: activeAccent.hex }} />
+                        <span className="text-xs font-bold text-slate-100 truncate">Most Played</span>
+                      </div>
+                      <span className="text-[10px] font-mono text-slate-400 shrink-0">
+                        {smartMixOverview.mostPlayedCount}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 truncate">
+                      {smartMixOverview.mostPlayedCount > 0
+                        ? 'Top cockpit rotation'
+                        : 'No play counts yet'}
+                    </span>
+                  </button>
+                </div>
+
+                {/* Expanded Cruising Mix Controls: Full Reshuffle + Keep Sorted by Genre */}
+                {cruisingOptionsOpen && (
+                  <div className="rounded-xl bg-[#070b15] border border-slate-800/90 p-3 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handlePlaySmartMix('cruising', {
+                              reshuffle: false,
+                              sortByGenre: cruisingSortByGenre,
+                              fullLibrary: true,
+                            })
+                          }
+                          className="px-3.5 py-2 rounded-xl text-xs font-bold text-slate-950 flex items-center gap-1.5 transition-all active:scale-95 shadow-sm"
+                          style={{ backgroundColor: activeAccent.hex }}
+                        >
+                          <Play className="w-3.5 h-3.5 fill-current" />
+                          Play Cruising Mix
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handlePlaySmartMix('cruising', {
+                              reshuffle: true,
+                              sortByGenre: cruisingSortByGenre,
+                              fullLibrary: true,
+                            })
+                          }
+                          className="px-3.5 py-2 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white border border-slate-600 flex items-center gap-1.5 transition-all active:scale-95"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" style={{ color: activeAccent.hex }} />
+                          Reshuffle Whole Mix
+                          {cruisingReshuffleCount > 0 && (
+                            <span className="ml-0.5 text-[10px] font-mono text-slate-400">
+                              #{cruisingReshuffleCount}
+                            </span>
+                          )}
+                        </button>
+                      </div>
+
+                      {/* Keep Sorted by Genre Toggle */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          triggerHaptic();
+                          setCruisingSortByGenre((prev) => !prev);
+                        }}
+                        className={`px-3 py-2 rounded-xl text-xs font-semibold border flex items-center gap-2 transition-all active:scale-95 ${
+                          cruisingSortByGenre
+                            ? 'bg-slate-900/90 text-slate-100 border-slate-600'
+                            : 'bg-black/40 text-slate-400 border-slate-800 hover:text-slate-200'
+                        }`}
+                        style={
+                          cruisingSortByGenre ? { borderColor: activeAccent.hex } : undefined
+                        }
+                      >
+                        <span
+                          className={`w-3.5 h-3.5 rounded flex items-center justify-center border ${
+                            cruisingSortByGenre ? 'border-transparent text-slate-950' : 'border-slate-600'
+                          }`}
+                          style={
+                            cruisingSortByGenre ? { backgroundColor: activeAccent.hex } : undefined
+                          }
+                        >
+                          {cruisingSortByGenre && <Check className="w-2.5 h-2.5 stroke-[3]" />}
+                        </span>
+                        <span>Keep Sorted by Genre</span>
+                      </button>
+                    </div>
+
+                    {/* Genre Sequence Preview */}
+                    <div className="flex items-center gap-1.5 flex-wrap text-[11px] text-slate-400 pt-1 border-t border-slate-800/70">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mr-1">
+                        {cruisingSortByGenre ? 'Genre Flow (A–Z):' : 'Shuffle Mode:'}
+                      </span>
+                      {cruisingSortByGenre ? (
+                        <>
+                          {smartMixOverview.genreSummary.genres.slice(0, 8).map((entry, idx) => (
+                            <React.Fragment key={entry.genre}>
+                              {idx > 0 && <span className="text-slate-600">→</span>}
+                              <span className="px-2 py-0.5 rounded-md bg-slate-900 border border-slate-800 text-slate-200 font-medium">
+                                {entry.genre}{' '}
+                                <span className="font-mono text-slate-500">({entry.count})</span>
+                              </span>
+                            </React.Fragment>
+                          ))}
+                          {smartMixOverview.genreSummary.genres.length > 8 && (
+                            <span className="text-[10px] font-mono text-slate-500 ml-1">
+                              +{smartMixOverview.genreSummary.genres.length - 8} more
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <span className="text-slate-400">
+                          Full random order across all {smartMixOverview.totalCount} tracks (artist-declustered)
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -7280,6 +7932,8 @@ export default function App() {
 
             cockpitThemeMode={cockpitThemeMode}
             onChangeThemeMode={setCockpitThemeMode}
+            dynamicAmbientGlow={dynamicAmbientGlow}
+            onToggleDynamicAmbientGlow={setDynamicAmbientGlow}
             gpsStatus={gpsStatus}
             onRequestGpsRefresh={() => setGpsPollNonce((n) => n + 1)}
 
@@ -8139,10 +8793,20 @@ export default function App() {
 
       {/* DRIVE MODE SIMPLIFIED LARGE-TARGET HUD OVERLAY */}
       {isDriveModeOpen && (
-        <div className="fixed inset-0 z-[80] bg-[#020617] flex flex-col justify-between p-6 sm:p-10">
+        <div
+          className="fixed inset-0 z-[80] bg-[#020617] flex flex-col justify-between p-6 sm:p-10 overflow-hidden"
+          style={{
+            backgroundImage: `radial-gradient(circle at 50% 34%, ${playerAccent.glowSoft} 0%, transparent 65%)`,
+          }}
+        >
+          <CockpitHudOverlay
+            event={cockpitHudEvent}
+            accentHex={playerAccent.hex}
+            size="drive"
+          />
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <Car className="w-6 h-6" style={{ color: activeAccent.hex }} />
+              <Car className="w-6 h-6" style={{ color: playerAccent.hex }} />
               <span className="text-sm font-extrabold uppercase tracking-widest text-white">Drive Mode HUD</span>
               <span className="px-3 py-1 rounded-xl bg-[#0b1120] border border-slate-800 text-xs font-mono font-bold text-slate-200">
                 {currentGpsSpeed} km/h
@@ -8165,14 +8829,17 @@ export default function App() {
               <>
                 <div className="flex items-center gap-6">
                   <div
-                    className="w-28 h-28 sm:w-36 sm:h-36 rounded-3xl bg-[#0b1120] border-2 overflow-hidden shrink-0"
-                    style={{ borderColor: activeAccent.hex }}
+                    className="w-28 h-28 sm:w-36 sm:h-36 rounded-3xl bg-[#0b1120] border-2 overflow-hidden shrink-0 transition-[border-color,box-shadow] duration-500"
+                    style={{
+                      borderColor: playerAccent.hex,
+                      boxShadow: `0 0 28px ${playerAccent.glowStrong}`,
+                    }}
                   >
                     <CrossfadeAlbumArt
                       src={coverArtUrls[currentTrack.id]}
                       alt={currentTrack.title}
                       trackKey={currentTrack.id}
-                      durationMs={300}
+                      durationMs={350}
                       className="w-full h-full"
                       fallback={
                         <Disc className={`w-16 h-16 ${isPlaying ? 'animate-spin' : ''}`} style={{ color: activeAccent.hex }} />
@@ -8318,6 +8985,7 @@ export default function App() {
       {/* DRAGGABLE FLOATING TRANSLUCENT COCKPIT PiP AUDIO BAR */}
       <FloatingCockpitBar
         visible={floatingMiniBarOpen}
+        trackId={currentTrack?.id}
         title={currentTrack?.title || 'Ready to Play'}
         artist={currentTrack?.artist || 'Zentryx Music'}
         coverUrl={currentTrack ? coverArtUrls[currentTrack.id] : undefined}

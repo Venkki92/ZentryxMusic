@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
+import com.zentryx.music.download.DownloadFeedbackEvent
 import com.zentryx.music.download.DownloadManager
 import com.zentryx.music.dsp.AndroidDspAudioEngine
 import com.zentryx.music.dsp.AudioOutputRoute
@@ -19,7 +20,10 @@ import com.zentryx.music.models.ScanStatus
 import com.zentryx.music.models.ServerConfig
 import com.zentryx.music.models.Song
 import com.zentryx.music.network.webdav.ScanDiagnosticsState
+import com.zentryx.music.player.MixGenreSummary
 import com.zentryx.music.player.SettingsPreferences
+import com.zentryx.music.player.SmartMixEngine
+import com.zentryx.music.player.SmartMixType
 import com.zentryx.music.player.ZentryxPlayerManager
 import com.zentryx.music.repository.MusicRepository
 import com.zentryx.music.security.EncryptedDataStore
@@ -34,6 +38,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -191,6 +196,8 @@ class LibraryViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val batchProgress: StateFlow<Pair<Int, Int>?> = downloadManager.batchProgress
+    val activeDownloads: StateFlow<Map<String, Int>> = downloadManager.activeDownloads
+    val downloadFeedback: StateFlow<DownloadFeedbackEvent?> = downloadManager.downloadFeedback
 
     private val _isLocalScanning = MutableStateFlow(false)
     val isLocalScanning: StateFlow<Boolean> = _isLocalScanning.asStateFlow()
@@ -212,6 +219,27 @@ class LibraryViewModel @Inject constructor(
     val currentSpeedKmH: StateFlow<Float> = playerManager.currentSpeedKmH
     val isAttenuated: StateFlow<Boolean> = playerManager.isAttenuated
     val isMuted: StateFlow<Boolean> = playerManager.isMuted
+
+    // Smart Mixes & Genre-Sorted Cruising Shuffle
+    val cruisingSortByGenre: StateFlow<Boolean> = settingsPreferences.cruisingSortByGenreFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    private val _activeSmartMix = MutableStateFlow<SmartMixType?>(null)
+    val activeSmartMix: StateFlow<SmartMixType?> = _activeSmartMix.asStateFlow()
+
+    private val _cruisingReshuffleCount = MutableStateFlow(0)
+    val cruisingReshuffleCount: StateFlow<Int> = _cruisingReshuffleCount.asStateFlow()
+
+    val mixGenreSummary: StateFlow<MixGenreSummary> = allSongs
+        .map { songs -> SmartMixEngine.summarizeMixGenres(songs) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), MixGenreSummary(0, emptyList()))
+
+    val deepCutsCount: StateFlow<Int> = allSongs
+        .map { songs ->
+            val unheard = songs.count { it.playCount == 0 }
+            if (unheard > 0) minOf(songs.size, maxOf(unheard, minOf(songs.size, 40))) else songs.size
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
     private val _selectedTab = MutableStateFlow(LibraryTab.SONGS)
     val selectedTab: StateFlow<LibraryTab> = _selectedTab.asStateFlow()
@@ -314,6 +342,10 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
+    fun clearDownloadFeedback() {
+        downloadManager.clearFeedback()
+    }
+
     fun downloadAlbum(album: Album) {
         viewModelScope.launch {
             val albumSongs = musicRepository.getSongsByAlbum(album.name, album.artist).firstOrNull().orEmpty()
@@ -357,6 +389,55 @@ class LibraryViewModel @Inject constructor(
     fun setDualPaneCockpit(enabled: Boolean) {
         viewModelScope.launch {
             settingsPreferences.setDualPaneCockpit(enabled)
+        }
+    }
+
+    fun setCruisingSortByGenre(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsPreferences.setCruisingSortByGenre(enabled)
+        }
+    }
+
+    fun playSmartMix(
+        mixType: SmartMixType,
+        reshuffle: Boolean = false,
+        sortByGenre: Boolean? = null,
+        fullLibrary: Boolean = (mixType == SmartMixType.CRUISING),
+        onStarted: () -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val effectiveSort = sortByGenre ?: cruisingSortByGenre.value
+            val (trackCount, genreCount) = playerManager.playSmartMix(
+                mixType = mixType,
+                reshuffle = reshuffle,
+                sortByGenre = effectiveSort,
+                fullLibrary = fullLibrary
+            )
+            if (trackCount == 0) {
+                _playlistSyncMessage.value = when (mixType) {
+                    SmartMixType.RECENT -> "No recently played tracks yet. Start listening to build history!"
+                    SmartMixType.MOST_PLAYED -> "No play counts recorded yet."
+                    SmartMixType.FAVORITES_RADIO -> "No favorite tracks yet. Tap the heart icon on songs first!"
+                    else -> "No playable tracks available for ${mixType.label}."
+                }
+                return@launch
+            }
+            _activeSmartMix.value = mixType
+            if (mixType == SmartMixType.CRUISING && reshuffle) {
+                _cruisingReshuffleCount.value += 1
+                _playlistSyncMessage.value = if (effectiveSort && genreCount > 0) {
+                    "Cruising Mix reshuffled ($trackCount tracks · sorted across $genreCount genres)"
+                } else {
+                    "Cruising Mix reshuffled ($trackCount tracks · full random)"
+                }
+            } else {
+                _playlistSyncMessage.value = if (effectiveSort && genreCount > 0) {
+                    "${mixType.label} started ($trackCount tracks · $genreCount genres A–Z)"
+                } else {
+                    "${mixType.label} started ($trackCount tracks)"
+                }
+            }
+            onStarted()
         }
     }
 

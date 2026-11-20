@@ -1,6 +1,7 @@
 package com.zentryx.music.ui.components
 
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,15 +16,15 @@ import coil.request.ImageRequest
 import java.io.File
 
 /**
- * Transitions smoothly between album art images (or fallback placeholder) using a 300ms
- * crossfade animation whenever the active track's artwork changes.
+ * Transitions smoothly between album art images (or fallback placeholder) using a 350ms
+ * eased crossfade animation whenever the active track's artwork changes.
  */
 @Composable
 fun CrossfadeAlbumArt(
     artworkPath: String?,
     contentDescription: String?,
     modifier: Modifier = Modifier,
-    durationMillis: Int = 300,
+    durationMillis: Int = 350,
     fallback: @Composable () -> Unit
 ) {
     val context = LocalContext.current
@@ -33,7 +34,7 @@ fun CrossfadeAlbumArt(
 
     Crossfade(
         targetState = resolvedPath,
-        animationSpec = tween(durationMillis = durationMillis),
+        animationSpec = tween(durationMillis = durationMillis, easing = FastOutSlowInEasing),
         modifier = modifier,
         label = "albumArtCrossfade"
     ) { targetPath ->
@@ -45,7 +46,7 @@ fun CrossfadeAlbumArt(
                 val request = remember(targetPath) {
                     ImageRequest.Builder(context)
                         .data(File(targetPath))
-                        .crossfade(durationMillis)
+                        .crossfade(false)
                         .build()
                 }
                 AsyncImage(

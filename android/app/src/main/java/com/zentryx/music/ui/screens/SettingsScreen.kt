@@ -1,5 +1,6 @@
 package com.zentryx.music.ui.screens
 
+import android.Manifest
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -25,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -32,7 +34,11 @@ import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zentryx.music.BuildConfig
+import com.zentryx.music.dsp.AdaptiveCabinSource
+import com.zentryx.music.dsp.CabinMicMonitorStatus
+import com.zentryx.music.dsp.CalibrationBalanceStatus
 import com.zentryx.music.dsp.FACTORY_DSP_PRESETS
+import com.zentryx.music.dsp.calculateNoiseGainCalibrationDelta
 import com.zentryx.music.models.ScanStatus
 import com.zentryx.music.player.CockpitThemeMode
 import com.zentryx.music.player.GpsTelemetryStatus
@@ -79,9 +85,7 @@ fun SettingsScreen(
     val customDownloadUri by viewModel.customDownloadUri.collectAsStateWithLifecycle()
     val customDownloadLabel by viewModel.customDownloadLabel.collectAsStateWithLifecycle()
     val localSourceLabel by viewModel.localSourceLabel.collectAsStateWithLifecycle()
-    val storageSummary = remember(storageLocation, customDownloadLabel, customDownloadUri) {
-        viewModel.getStorageSummary(storageLocation, customDownloadLabel, customDownloadUri)
-    }
+    val storageSummary by viewModel.storageSummary.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
@@ -164,6 +168,19 @@ fun SettingsScreen(
     val dspSettings by viewModel.dspSettings.collectAsStateWithLifecycle()
     val customDspPresets by viewModel.customDspPresets.collectAsStateWithLifecycle()
     val activeOutputRoute by viewModel.activeOutputRoute.collectAsStateWithLifecycle()
+    val adaptiveConfig by viewModel.adaptiveCabinConfig.collectAsStateWithLifecycle()
+    val adaptiveState by viewModel.adaptiveEvaluationState.collectAsStateWithLifecycle()
+    val adaptiveDelta by viewModel.adaptiveDspDelta.collectAsStateWithLifecycle()
+    val cabinNoiseDb by viewModel.cabinNoiseDb.collectAsStateWithLifecycle()
+    val cabinMicStatus by viewModel.cabinMicStatus.collectAsStateWithLifecycle()
+
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            viewModel.onRecordAudioPermissionGranted()
+        }
+    }
 
     var showLogoutDialog by remember { mutableStateOf(false) }
     var swcLearnPressType by remember { mutableStateOf(SwcPressType.SHORT) }
@@ -316,6 +333,149 @@ fun SettingsScreen(
                     }
                 }
 
+                // Card 0B: Automated Cabin Noise & Speed Adaptive DSP Profile + Real-Time Noise↔DSP Δ
+                val calibration = calculateNoiseGainCalibrationDelta(cabinNoiseDb, adaptiveConfig, adaptiveDelta)
+                val deltaColor = when (calibration.status) {
+                    CalibrationBalanceStatus.BALANCED -> accentColor
+                    CalibrationBalanceStatus.UNDER_COMPENSATED -> Color(0xFFF59E0B)
+                    CalibrationBalanceStatus.OVER_COMPENSATED -> Color(0xFF38BDF8)
+                    else -> Color(0xFF94A3B8)
+                }
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = surfaceColor,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(
+                            1.dp,
+                            if (adaptiveConfig.enabled) accentColor.copy(alpha = 0.55f) else borderColor,
+                            RoundedCornerShape(12.dp)
+                        )
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(imageVector = Icons.Default.Tune, contentDescription = null, tint = accentColor, modifier = Modifier.size(18.dp))
+                                Column {
+                                    Text(
+                                        text = "ADAPTIVE CABIN DSP PROFILE",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = FontWeight.Black,
+                                            letterSpacing = 1.sp,
+                                            color = if (adaptiveConfig.enabled) accentColor else Color.White
+                                        )
+                                    )
+                                    Text(
+                                        text = if (adaptiveConfig.enabled) {
+                                            "${adaptiveState.activeProfile.label} · +${String.format(Locale.US, "%.1f", adaptiveDelta.gainDb)} dB · Bal ${if (adaptiveDelta.balanceDelta > 0) "+" else ""}${adaptiveDelta.balanceDelta}"
+                                        } else {
+                                            "Auto-adjusts DSP gain & cabin balance from mic noise or GPS speed"
+                                        },
+                                        fontSize = 10.sp,
+                                        color = Color(0xFF94A3B8),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            Switch(
+                                checked = adaptiveConfig.enabled,
+                                onCheckedChange = { enabled ->
+                                    viewModel.updateAdaptiveCabinConfig(adaptiveConfig.copy(enabled = enabled))
+                                },
+                                colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = accentColor)
+                            )
+                        }
+
+                        // Live Real-Time Calibration Delta Indicator (matching Web SettingsPanel)
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF0A0F1E),
+                            modifier = Modifier.fillMaxWidth().border(0.5.dp, borderColor, RoundedCornerShape(8.dp))
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                val deltaLabel = when {
+                                    calibration.deltaDb != null -> {
+                                        val dSign = if (calibration.deltaDb > 0f) "+" else ""
+                                        "Noise↔DSP Δ $dSign${String.format(Locale.US, "%.1f", calibration.deltaDb)} dB (DSP +${String.format(Locale.US, "%.1f", calibration.appliedGainDb)} dB)"
+                                    }
+                                    calibration.status == CalibrationBalanceStatus.SPEED_ONLY ->
+                                        "Noise↔DSP Δ · DSP +${String.format(Locale.US, "%.1f", calibration.appliedGainDb)} dB (Speed)"
+                                    else -> "Noise↔DSP Δ · Standby"
+                                }
+                                Text(
+                                    text = deltaLabel,
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    color = deltaColor,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = calibration.hint.uppercase(Locale.US),
+                                    fontSize = 9.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Black,
+                                    color = deltaColor
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                AdaptiveCabinSource.entries.forEach { src ->
+                                    FilterChip(
+                                        selected = adaptiveConfig.source == src,
+                                        onClick = { viewModel.updateAdaptiveCabinConfig(adaptiveConfig.copy(source = src)) },
+                                        label = { Text(src.label, fontSize = 9.sp) },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = accentColor.copy(alpha = 0.2f),
+                                            selectedLabelColor = accentColor
+                                        )
+                                    )
+                                }
+                            }
+                            if (adaptiveConfig.enabled && adaptiveConfig.source != AdaptiveCabinSource.SPEED && cabinMicStatus == CabinMicMonitorStatus.PERMISSION_REQUIRED) {
+                                OutlinedButton(
+                                    onClick = { micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Text("Allow Mic", fontSize = 9.sp, color = Color(0xFFF59E0B), fontWeight = FontWeight.Bold)
+                                }
+                            } else {
+                                TextButton(
+                                    onClick = onNavigateToDsp,
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Text("Calibrate →", fontSize = 10.sp, color = accentColor, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Card 1: Nextcloud Server Connection & Hardware Keystore Session
                 Surface(
                     shape = RoundedCornerShape(12.dp),
@@ -442,7 +602,10 @@ fun SettingsScreen(
                                 Text("OFFLINE STORAGE TARGET", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black, letterSpacing = 1.sp, color = Color.White))
                             }
                             OutlinedButton(
-                                onClick = { folderPickerLauncher.launch(null) },
+                                onClick = {
+                                    runCatching { folderPickerLauncher.launch(null) }
+                                        .onFailure { viewModel.reportStatusMessage("System folder picker unavailable on this headunit ROM") }
+                                },
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                                 modifier = Modifier.height(30.dp),
                                 shape = RoundedCornerShape(8.dp)
@@ -459,7 +622,8 @@ fun SettingsScreen(
                                     selected = isSelected,
                                     onClick = {
                                         if (key == "CUSTOM" && customDownloadUri.isNullOrBlank()) {
-                                            folderPickerLauncher.launch(null)
+                                            runCatching { folderPickerLauncher.launch(null) }
+                                                .onFailure { viewModel.reportStatusMessage("System folder picker unavailable on this headunit ROM") }
                                         } else {
                                             viewModel.setStorageLocation(key)
                                         }
@@ -921,7 +1085,10 @@ fun SettingsScreen(
                         }
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(
-                                onClick = { localMusicFolderLauncher.launch(null) },
+                                onClick = {
+                                    runCatching { localMusicFolderLauncher.launch(null) }
+                                        .onFailure { viewModel.reportStatusMessage("System folder picker unavailable on this headunit ROM") }
+                                },
                                 modifier = Modifier.weight(1f).height(36.dp),
                                 shape = RoundedCornerShape(8.dp)
                             ) {
@@ -952,7 +1119,10 @@ fun SettingsScreen(
                         }
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             OutlinedButton(
-                                onClick = { backupExportLauncher.launch("zentryx-tune.json") },
+                                onClick = {
+                                    runCatching { backupExportLauncher.launch("zentryx-tune.json") }
+                                        .onFailure { viewModel.reportStatusMessage("System file picker unavailable — use Cloud Save instead") }
+                                },
                                 modifier = Modifier.weight(1f).height(34.dp),
                                 contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                                 shape = RoundedCornerShape(8.dp)
@@ -960,7 +1130,10 @@ fun SettingsScreen(
                                 Text("Export .json", fontSize = 10.sp, color = Color.White)
                             }
                             OutlinedButton(
-                                onClick = { backupImportLauncher.launch(arrayOf("application/json", "*/*")) },
+                                onClick = {
+                                    runCatching { backupImportLauncher.launch(arrayOf("application/json", "*/*")) }
+                                        .onFailure { viewModel.reportStatusMessage("System file picker unavailable — use Cloud Restore instead") }
+                                },
                                 modifier = Modifier.weight(1f).height(34.dp),
                                 contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                                 shape = RoundedCornerShape(8.dp)

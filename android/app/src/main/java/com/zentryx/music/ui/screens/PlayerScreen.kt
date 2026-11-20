@@ -79,6 +79,8 @@ fun PlayerScreen(
     val swipeEnabled by viewModel.swipeGesturesEnabled.collectAsStateWithLifecycle()
     val idleScreensaverSec by viewModel.idleScreensaverSeconds.collectAsStateWithLifecycle()
     val playlists by viewModel.playlists.collectAsStateWithLifecycle()
+    val activeDownloads by viewModel.activeDownloads.collectAsStateWithLifecycle()
+    val downloadFeedback by viewModel.downloadFeedback.collectAsStateWithLifecycle()
 
     val accentColor = Color(accent.hexColor)
     val bgColor = MaterialTheme.colorScheme.background
@@ -120,6 +122,16 @@ fun PlayerScreen(
         if (swipeHudText != null) {
             delay(900L)
             swipeHudText = null
+        }
+    }
+
+    LaunchedEffect(downloadFeedback?.id) {
+        val fb = downloadFeedback
+        if (fb != null && fb.progressPercent == null) {
+            delay(3500L)
+            if (downloadFeedback?.id == fb.id) {
+                viewModel.clearDownloadFeedback()
+            }
         }
     }
 
@@ -251,13 +263,36 @@ fun PlayerScreen(
                             modifier = Modifier.size(21.dp)
                         )
                     }
-                    IconButton(onClick = { viewModel.downloadCurrentSong() }, modifier = Modifier.size(42.dp)) {
-                        Icon(
-                            imageVector = if (currentSong?.isDownloaded == true) Icons.Default.CheckCircle else Icons.Default.Download,
-                            contentDescription = "Download Offline",
-                            tint = if (currentSong?.isDownloaded == true) accentColor else Color.White,
-                            modifier = Modifier.size(21.dp)
-                        )
+                    val currentDownloadPct = currentSong?.id?.let { activeDownloads[it] }
+                    IconButton(
+                        onClick = { viewModel.downloadCurrentSong() },
+                        enabled = currentDownloadPct == null,
+                        modifier = Modifier.size(42.dp)
+                    ) {
+                        if (currentDownloadPct != null) {
+                            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(26.dp)) {
+                                CircularProgressIndicator(
+                                    progress = { (currentDownloadPct / 100f).coerceIn(0.05f, 1f) },
+                                    color = accentColor,
+                                    trackColor = Color(0xFF1E293B),
+                                    strokeWidth = 2.2.dp,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Text(
+                                    text = "$currentDownloadPct",
+                                    fontSize = 7.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = accentColor
+                                )
+                            }
+                        } else {
+                            Icon(
+                                imageVector = if (currentSong?.isDownloaded == true) Icons.Default.CheckCircle else Icons.Default.Download,
+                                contentDescription = "Download Offline",
+                                tint = if (currentSong?.isDownloaded == true) accentColor else Color.White,
+                                modifier = Modifier.size(21.dp)
+                            )
+                        }
                     }
                     IconButton(onClick = { showAddToPlaylistDialog = true }, modifier = Modifier.size(42.dp)) {
                         Icon(
@@ -325,6 +360,63 @@ fun PlayerScreen(
                         )
                         IconButton(onClick = { viewModel.clearError() }, modifier = Modifier.size(28.dp)) {
                             Icon(imageVector = Icons.Default.Close, contentDescription = "Dismiss", tint = Color.White, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+            }
+
+            val dlFeedback = downloadFeedback
+            if (dlFeedback != null) {
+                Surface(
+                    color = if (dlFeedback.isError) Color(0xFF7F1D1D) else accentColor.copy(alpha = 0.16f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                if (dlFeedback.progressPercent != null) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(14.dp),
+                                        color = accentColor,
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = if (dlFeedback.isError) Icons.Default.Warning else Icons.Default.CheckCircle,
+                                        contentDescription = null,
+                                        tint = if (dlFeedback.isError) Color(0xFFFCA5A5) else accentColor,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+                                Text(
+                                    text = dlFeedback.message,
+                                    color = if (dlFeedback.isError) Color.White else accentColor,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            IconButton(onClick = { viewModel.clearDownloadFeedback() }, modifier = Modifier.size(26.dp)) {
+                                Icon(imageVector = Icons.Default.Close, contentDescription = "Dismiss", tint = Color.White, modifier = Modifier.size(15.dp))
+                            }
+                        }
+                        val pct = dlFeedback.progressPercent
+                        if (pct != null) {
+                            LinearProgressIndicator(
+                                progress = { (pct / 100f).coerceIn(0f, 1f) },
+                                color = accentColor,
+                                trackColor = Color(0xFF1E293B),
+                                modifier = Modifier.fillMaxWidth().height(2.dp)
+                            )
                         }
                     }
                 }
@@ -407,7 +499,7 @@ fun PlayerScreen(
                                 CrossfadeAlbumArt(
                                     artworkPath = currentSong.artworkPath,
                                     contentDescription = currentSong.album,
-                                    durationMillis = 300,
+                                    durationMillis = 350,
                                     modifier = Modifier.fillMaxSize()
                                 ) {
                                     Icon(
@@ -806,6 +898,26 @@ fun PlayerScreen(
                             label = {
                                 val txt = sleepRemainingSec?.let { formatDuration(it * 1000L) } ?: "Sleep"
                                 Text(txt, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = accentColor.copy(alpha = 0.2f),
+                                selectedLabelColor = accentColor
+                            )
+                        )
+
+                        FilterChip(
+                            selected = dspSettings.dspEnabled && dspSettings.surroundMode != com.zentryx.music.dsp.SurroundMode.OFF,
+                            onClick = {
+                                val next = viewModel.cycleSurroundMode()
+                                swipeHudText = "3D: ${next.label.uppercase(Locale.US)}"
+                            },
+                            label = {
+                                Text(
+                                    text = dspSettings.surroundMode.shortLabel,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1
+                                )
                             },
                             colors = FilterChipDefaults.filterChipColors(
                                 selectedContainerColor = accentColor.copy(alpha = 0.2f),

@@ -161,7 +161,7 @@ class LocalMediaScanner @Inject constructor(
                 if (childName.startsWith(".")) continue
                 if (child.isDirectory) {
                     queue.add(child to "$relFolder/$childName")
-                } else if (AudioFormat.isSupported(childName)) {
+                } else if (AudioFormat.isSupported(childName) || com.zentryx.music.player.SongMediaItemConverter.isSongFilePath(childName)) {
                     val relativePath = "$relFolder/$childName"
                     val id = generateLocalId(relativePath)
                     if (!seenKeys.add(id)) continue
@@ -346,7 +346,7 @@ class LocalMediaScanner @Inject constructor(
                 if (child.isDirectory) {
                     if (name == "Android" || name == "LOST.DIR") continue
                     queue.add(Triple(child, "$relFolder/$name", depth + 1))
-                } else if (child.isFile && AudioFormat.isSupported(name) && child.canRead()) {
+                } else if (child.isFile && (AudioFormat.isSupported(name) || com.zentryx.music.player.SongMediaItemConverter.isSongFilePath(name)) && child.canRead()) {
                     val fileUri = Uri.fromFile(child)
                     val fileUriStr = fileUri.toString()
                     val baseTitle = name.substringBeforeLast('.').lowercase()
@@ -436,8 +436,29 @@ class LocalMediaScanner @Inject constructor(
             } catch (_: Throwable) {}
         }
 
+        var sniffedSongMime: String? = null
+        if (com.zentryx.music.player.SongMediaItemConverter.isSongFilePath(fileName) &&
+            contentUri.scheme == "file" &&
+            !contentUri.path.isNullOrBlank()
+        ) {
+            val parsed = com.zentryx.music.player.SongMediaItemConverter.inspectSongFile(File(contentUri.path!!))
+            sniffedSongMime = parsed.detectedMimeType
+            if (title == fileName.substringBeforeLast('.') && !parsed.embeddedTitle.isNullOrBlank()) {
+                title = parsed.embeddedTitle
+            }
+            if (artist == "Unknown Artist" && !parsed.embeddedArtist.isNullOrBlank()) {
+                artist = parsed.embeddedArtist
+            }
+            if (album == "Unknown Album" && !parsed.embeddedAlbum.isNullOrBlank()) {
+                album = parsed.embeddedAlbum
+            }
+        }
+
         val format = AudioFormat.fromExtension(fileName.substringAfterLast('.', ""))
-        val mime = fallbackMime ?: format?.mimeType ?: "audio/mpeg"
+        val mime = sniffedSongMime
+            ?: com.zentryx.music.player.SongMediaItemConverter.normalizeConcreteMimeType(fallbackMime)
+            ?: format?.mimeType
+            ?: "audio/mpeg"
 
         return SongEntity(
             id = id,

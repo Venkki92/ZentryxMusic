@@ -191,7 +191,7 @@ fun DriveModeHudDialog(
                         CrossfadeAlbumArt(
                             artworkPath = song?.artworkPath,
                             contentDescription = song?.album,
-                            durationMillis = 300,
+                            durationMillis = 350,
                             modifier = Modifier.fillMaxSize()
                         ) {
                             Icon(imageVector = Icons.Default.MusicNote, contentDescription = null, tint = accentColor, modifier = Modifier.size(48.dp))
@@ -413,7 +413,7 @@ fun StreamCodecInspectorDialog(
                 InspectorRow(
                     "Active DSP Pipeline",
                     if (!dspSettings.dspEnabled) "Bypassed (Bit-Direct)"
-                    else "$activePresetName • HPF ${if (dspSettings.hpfCutoffHz.hz > 0) "${dspSettings.hpfCutoffHz.hz}Hz" else "Off"} • Sub LPF ${if (dspSettings.subLpfHz > 0) "${dspSettings.subLpfHz}Hz${if (dspSettings.subPhaseInverted) " 180°" else ""}" else "Off"} • Ceiling ${dspSettings.peakLimiterCeilingDb} dBFS" +
+                    else "$activePresetName • ${dspSettings.surroundMode.label} • HPF ${if (dspSettings.hpfCutoffHz.hz > 0) "${dspSettings.hpfCutoffHz.hz}Hz" else "Off"} • Sub LPF ${if (dspSettings.subLpfHz > 0) "${dspSettings.subLpfHz}Hz${if (dspSettings.subPhaseInverted) " 180°" else ""}" else "Off"} • Ceiling ${dspSettings.peakLimiterCeilingDb} dBFS" +
                         if (dspSettings.monoFoldDown) " • MONO" else "",
                     accentColor
                 )

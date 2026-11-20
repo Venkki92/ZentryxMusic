@@ -502,21 +502,216 @@ export function recordTrackPlayStat(
   };
 }
 
-export type SmartMixType = 'recent' | 'most_played' | 'cruising';
+export type SmartMixType = 'recent' | 'most_played' | 'cruising' | 'deep_cuts' | 'favorites_radio';
+
+export interface SmartMixTrackLike {
+  id: string;
+  artist?: string;
+  title?: string;
+  album?: string;
+  genre?: string;
+  folderPath?: string;
+}
+
+export interface SmartMixBuildOptions {
+  /** Randomize track order (full reshuffle) instead of static deterministic ordering */
+  reshuffle?: boolean;
+  /** Group and sort tracks alphabetically by genre while shuffling inside each genre */
+  sortByGenre?: boolean;
+  /** Optional deterministic RNG [0, 1) for unit testing */
+  rng?: () => number;
+}
+
+const GENERIC_GENRE_VALUES = new Set([
+  '',
+  'unknown',
+  'unknown genre',
+  'other',
+  'none',
+  'misc',
+  'miscellaneous',
+  'undefined',
+  'null',
+  'n/a',
+]);
+
+const GENERIC_FOLDER_SEGMENTS = new Set([
+  '',
+  'music',
+  'audio',
+  'tracks',
+  'songs',
+  'local',
+  'downloads',
+  'download',
+  'root',
+  'webdav',
+  'remote.php',
+  'files',
+  'library',
+  'media',
+]);
+
+function toDisplayGenre(raw: string): string {
+  const cleaned = raw
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return 'Unclassified';
+  return cleaned
+    .split(' ')
+    .map((word) => {
+      if (word.length <= 4 && word === word.toUpperCase()) return word;
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(' ');
+}
 
 /**
- * Builds deterministic car-friendly Smart Mixes from local play statistics and favorites.
+ * Resolves a clean genre label for a track from its metadata tag, falling back to
+ * meaningful folder names (e.g. "Music/Synthwave/..." -> "Synthwave") or "Unclassified".
  */
-export function buildSmartMixTracks<
-  T extends { id: string; artist?: string; title?: string }
->(
+export function resolveTrackGenre(track: Pick<SmartMixTrackLike, 'genre' | 'folderPath'>): string {
+  const rawGenre = (track.genre || '').trim();
+  if (rawGenre && !GENERIC_GENRE_VALUES.has(rawGenre.toLowerCase())) {
+    return toDisplayGenre(rawGenre);
+  }
+
+  const folderPath = (track.folderPath || '').trim();
+  if (folderPath) {
+    const segments = folderPath
+      .split('/')
+      .map((s) => {
+        try {
+          return decodeURIComponent(s).trim();
+        } catch {
+          return s.trim();
+        }
+      })
+      .filter(Boolean);
+
+    // Prefer the most specific non-generic folder segment (e.g., WoW Radio/DKTN -> DKTN)
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const seg = segments[i];
+      if (!GENERIC_FOLDER_SEGMENTS.has(seg.toLowerCase())) {
+        return toDisplayGenre(seg);
+      }
+    }
+  }
+
+  return 'Unclassified';
+}
+
+function fisherYatesShuffle<T>(items: T[], rng: () => number): T[] {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    const tmp = arr[i];
+    arr[i] = arr[j];
+    arr[j] = tmp;
+  }
+  return arr;
+}
+
+function declusterByArtist<T extends { artist?: string }>(items: T[], limit: number): T[] {
+  const pool = [...items];
+  const result: T[] = [];
+  let lastArtist = '';
+
+  while (pool.length > 0 && result.length < limit) {
+    let pickIdx = pool.findIndex(
+      (item) => (item.artist || '').toLowerCase() !== lastArtist.toLowerCase()
+    );
+    if (pickIdx === -1) pickIdx = 0;
+    const [picked] = pool.splice(pickIdx, 1);
+    result.push(picked);
+    lastArtist = picked.artist || '';
+  }
+
+  return result;
+}
+
+/**
+ * Groups tracks by resolved genre (sorted A-Z with "Unclassified" last) and shuffles
+ * tracks cleanly inside each genre block while avoiding consecutive identical artists.
+ */
+export function sortAndShuffleTracksByGenre<T extends SmartMixTrackLike>(
+  tracks: T[],
+  rng: () => number = Math.random
+): T[] {
+  if (tracks.length <= 1) return [...tracks];
+
+  const groups = new Map<string, T[]>();
+  for (const track of tracks) {
+    const genre = resolveTrackGenre(track);
+    const bucket = groups.get(genre);
+    if (bucket) {
+      bucket.push(track);
+    } else {
+      groups.set(genre, [track]);
+    }
+  }
+
+  const sortedGenres = Array.from(groups.keys()).sort((a, b) => {
+    if (a === 'Unclassified' && b !== 'Unclassified') return 1;
+    if (b === 'Unclassified' && a !== 'Unclassified') return -1;
+    return a.localeCompare(b);
+  });
+
+  const result: T[] = [];
+  for (const genre of sortedGenres) {
+    const bucket = groups.get(genre) || [];
+    const shuffledBucket = fisherYatesShuffle(bucket, rng);
+    const spreadBucket = declusterByArtist(shuffledBucket, shuffledBucket.length);
+    result.push(...spreadBucket);
+  }
+  return result;
+}
+
+export interface MixGenreSummary {
+  genreCount: number;
+  genres: Array<{ genre: string; count: number }>;
+}
+
+/**
+ * Summarizes the ordered genre sequence present in a mix for Library preview chips.
+ */
+export function summarizeMixGenres<T extends Pick<SmartMixTrackLike, 'genre' | 'folderPath'>>(
+  tracks: T[]
+): MixGenreSummary {
+  const counts = new Map<string, number>();
+  for (const track of tracks) {
+    const genre = resolveTrackGenre(track);
+    counts.set(genre, (counts.get(genre) || 0) + 1);
+  }
+  const genres = Array.from(counts.entries())
+    .sort((a, b) => {
+      if (a[0] === 'Unclassified' && b[0] !== 'Unclassified') return 1;
+      if (b[0] === 'Unclassified' && a[0] !== 'Unclassified') return -1;
+      return a[0].localeCompare(b[0]);
+    })
+    .map(([genre, count]) => ({ genre, count }));
+
+  return {
+    genreCount: genres.length,
+    genres,
+  };
+}
+
+/**
+ * Builds car-friendly Smart Mixes from local play statistics, favorites, and genre metadata.
+ */
+export function buildSmartMixTracks<T extends SmartMixTrackLike>(
   tracks: T[],
   mixType: SmartMixType,
   stats: Record<string, TrackPlayStat>,
   favoriteIds: Set<string>,
-  limit = 40
+  limit = 40,
+  options: SmartMixBuildOptions = {}
 ): T[] {
   if (tracks.length === 0 || limit <= 0) return [];
+
+  const rng = options.rng ?? Math.random;
 
   if (mixType === 'recent') {
     return tracks
@@ -536,7 +731,43 @@ export function buildSmartMixTracks<
       .slice(0, limit);
   }
 
-  // 'cruising': weighted score combining favorites + play history + spread across artists
+  if (mixType === 'favorites_radio') {
+    const favTracks = tracks.filter((t) => favoriteIds.has(t.id));
+    if (favTracks.length === 0) return [];
+    if (options.sortByGenre) {
+      return sortAndShuffleTracksByGenre(favTracks, rng).slice(0, limit);
+    }
+    const ordered = options.reshuffle ? fisherYatesShuffle(favTracks, rng) : favTracks;
+    return declusterByArtist(ordered, limit);
+  }
+
+  if (mixType === 'deep_cuts') {
+    const byLeastPlayed = [...tracks].sort((a, b) => {
+      const countDiff = (stats[a.id]?.playCount || 0) - (stats[b.id]?.playCount || 0);
+      if (countDiff !== 0) return countDiff;
+      return (stats[a.id]?.lastPlayedAt || 0) - (stats[b.id]?.lastPlayedAt || 0);
+    });
+    const candidatePool = byLeastPlayed.slice(0, Math.min(tracks.length, Math.max(limit * 2, limit)));
+    if (options.sortByGenre) {
+      const picked = fisherYatesShuffle(candidatePool, rng).slice(0, limit);
+      return sortAndShuffleTracksByGenre(picked, rng);
+    }
+    const ordered = options.reshuffle ? fisherYatesShuffle(candidatePool, rng) : candidatePool;
+    return declusterByArtist(ordered, limit);
+  }
+
+  // 'cruising':
+  // When reshuffling the whole Cruising Mix, pull across the entire pool and keep tracks
+  // grouped & sorted by genre when sortByGenre is enabled.
+  if (options.reshuffle) {
+    const pool = tracks.length <= limit ? [...tracks] : fisherYatesShuffle(tracks, rng).slice(0, limit);
+    if (options.sortByGenre) {
+      return sortAndShuffleTracksByGenre(pool, rng);
+    }
+    return declusterByArtist(fisherYatesShuffle(pool, rng), limit);
+  }
+
+  // Default Cruising Mix: weighted score combining favorites + play history + spread across artists
   const scored = [...tracks].sort((a, b) => {
     const scoreA =
       (favoriteIds.has(a.id) ? 50 : 0) +
@@ -549,20 +780,23 @@ export function buildSmartMixTracks<
     return scoreB - scoreA;
   });
 
-  // De-cluster consecutive tracks by identical artist when alternatives exist
-  const pool = [...scored];
-  const result: T[] = [];
-  let lastArtist = '';
-
-  while (pool.length > 0 && result.length < limit) {
-    let pickIdx = pool.findIndex(
-      (item) => (item.artist || '').toLowerCase() !== lastArtist.toLowerCase()
-    );
-    if (pickIdx === -1) pickIdx = 0;
-    const [picked] = pool.splice(pickIdx, 1);
-    result.push(picked);
-    lastArtist = picked.artist || '';
+  const selected = declusterByArtist(scored, limit);
+  if (options.sortByGenre) {
+    // Keep genres grouped alphabetically while preserving score priority inside each genre
+    const groups = new Map<string, T[]>();
+    for (const track of selected) {
+      const genre = resolveTrackGenre(track);
+      const bucket = groups.get(genre);
+      if (bucket) bucket.push(track);
+      else groups.set(genre, [track]);
+    }
+    const sortedGenres = Array.from(groups.keys()).sort((a, b) => {
+      if (a === 'Unclassified' && b !== 'Unclassified') return 1;
+      if (b === 'Unclassified' && a !== 'Unclassified') return -1;
+      return a.localeCompare(b);
+    });
+    return sortedGenres.flatMap((genre) => declusterByArtist(groups.get(genre) || [], limit));
   }
 
-  return result;
+  return selected;
 }

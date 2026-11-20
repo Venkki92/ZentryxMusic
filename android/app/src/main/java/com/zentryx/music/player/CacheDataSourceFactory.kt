@@ -1,11 +1,15 @@
 package com.zentryx.music.player
 
 import android.content.Context
+import android.net.Uri
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.FileDataSource
+import androidx.media3.datasource.TransferListener
 import androidx.media3.datasource.cache.CacheDataSink
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
@@ -33,10 +37,10 @@ import javax.inject.Singleton
 import javax.net.ssl.SSLContext
 
 /**
- * Builds Media3 CacheDataSource with disk stream buffering and authenticated OkHttp calls.
- * Never embeds credentials in URLs; attaches HTTP Basic Auth via OkHttp interceptor.
- * Dynamically resolves pinned TOFU SSL fingerprints so fresh-device logins work immediately
- * without app restarts.
+ * Builds Media3 DataSource with scheme-aware routing:
+ * - http:// and https:// streams route through CacheDataSource (SimpleCache + authenticated TOFU OkHttp).
+ * - file://, content://, asset://, and local paths route directly through DefaultDataSource
+ *   (FileDataSource / ContentDataSource) so offline downloads & USB tracks play reliably without OkHttp.
  */
 @OptIn(UnstableApi::class)
 @Singleton
@@ -47,6 +51,21 @@ class CacheDataSourceFactory @Inject constructor(
 ) {
     companion object {
         private const val MAX_CACHE_SIZE_BYTES = 250L * 1024L * 1024L // 250 MB disk stream cache
+
+        fun isRemoteHttpScheme(scheme: String?): Boolean {
+            return scheme.equals("http", ignoreCase = true) ||
+                scheme.equals("https", ignoreCase = true)
+        }
+
+        fun isRemoteHttpUri(uri: Uri?): Boolean = isRemoteHttpScheme(uri?.scheme)
+
+        fun isOfflineBlobOrSongPath(uriString: String?): Boolean {
+            return SongMediaItemConverter.isOfflineBlobOrSongPath(uriString)
+        }
+
+        fun isOfflineBlobOrSongUri(uri: Uri?): Boolean {
+            return isOfflineBlobOrSongPath(uri?.toString())
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -95,6 +114,51 @@ class CacheDataSourceFactory @Inject constructor(
             chain.proceed(requestBuilder.build())
         }
 
+        val retryChunkInterceptor = Interceptor { chain ->
+            val request = chain.request()
+            val method = request.method.uppercase()
+            val isIdempotentChunk = method == "GET" || method == "HEAD"
+            if (!isIdempotentChunk) {
+                return@Interceptor chain.proceed(request)
+            }
+
+            val maxRetries = 3
+            val retryableStatuses = setOf(408, 429, 500, 502, 503, 504)
+            var attempt = 0
+            var lastException: java.io.IOException? = null
+
+            while (attempt <= maxRetries) {
+                if (chain.call().isCanceled()) {
+                    throw java.io.IOException("Stream request canceled")
+                }
+                try {
+                    val response = chain.proceed(request)
+                    if (response.code !in retryableStatuses || attempt == maxRetries) {
+                        return@Interceptor response
+                    }
+                    response.close()
+                } catch (ioe: java.io.IOException) {
+                    if (chain.call().isCanceled() || attempt == maxRetries) {
+                        throw ioe
+                    }
+                    lastException = ioe
+                }
+
+                attempt++
+                val baseDelayMs = 250L * (1L shl (attempt - 1))
+                val jitterMs = kotlin.random.Random.nextLong(0L, 120L)
+                val sleepMs = minOf(2500L, baseDelayMs + jitterMs)
+                try {
+                    Thread.sleep(sleepMs)
+                } catch (ie: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw lastException ?: java.io.IOException("Interrupted during chunk retry", ie)
+                }
+            }
+
+            throw lastException ?: java.io.IOException("Chunk stream failed after retries")
+        }
+
         val trustManager = TofuTrustManager(
             pinnedFingerprintProvider = { resolveConfig()?.sslCertificateFingerprint }
         )
@@ -105,17 +169,16 @@ class CacheDataSourceFactory @Inject constructor(
         return baseOkHttpClient.newBuilder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(25, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
             .followRedirects(true)
             .followSslRedirects(true)
             .addInterceptor(authInterceptor)
+            .addInterceptor(retryChunkInterceptor)
             .sslSocketFactory(sslContext.socketFactory, trustManager)
             .build()
     }
 
-    /**
-     * Creates the primary DataSource.Factory used by ExoPlayer.
-     */
-    fun createDataSourceFactory(): DataSource.Factory {
+    private fun buildCacheDataSourceFactory(): CacheDataSource.Factory {
         val streamClient = buildStreamOkHttpClient()
         val upstreamFactory = OkHttpDataSource.Factory(streamClient)
 
@@ -129,5 +192,73 @@ class CacheDataSourceFactory @Inject constructor(
                     .setFragmentSize(CacheDataSink.DEFAULT_FRAGMENT_SIZE)
             )
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+    }
+
+    /**
+     * Direct CacheDataSource instance for Tunnel Guard predictive HTTP pre-caching.
+     */
+    fun createCacheDataSource(): CacheDataSource {
+        return buildCacheDataSourceFactory().createDataSource()
+    }
+
+    /**
+     * Creates the primary scheme-routing DataSource.Factory used by ExoPlayer:
+     * - http:// and https:// -> CacheDataSource (SimpleCache + authenticated TOFU OkHttp)
+     * - .song/.audio files, idb://, zentryx-idb://, data: -> OfflineBlobDataSource
+     * - standard file://, content://, asset:// -> DefaultDataSource
+     */
+    fun createDataSourceFactory(): DataSource.Factory {
+        val remoteCacheFactory = buildCacheDataSourceFactory()
+        val offlineBlobFactory = OfflineBlobDataSource.Factory(context)
+        val localFactory = DefaultDataSource.Factory(context)
+
+        return DataSource.Factory {
+            SchemeRoutingDataSource(
+                remoteDataSource = remoteCacheFactory.createDataSource(),
+                offlineBlobDataSource = offlineBlobFactory.createDataSource(),
+                localDataSource = localFactory.createDataSource()
+            )
+        }
+    }
+
+    private class SchemeRoutingDataSource(
+        private val remoteDataSource: DataSource,
+        private val offlineBlobDataSource: DataSource,
+        private val localDataSource: DataSource
+    ) : DataSource {
+        private var activeDataSource: DataSource? = null
+
+        override fun addTransferListener(transferListener: TransferListener) {
+            remoteDataSource.addTransferListener(transferListener)
+            offlineBlobDataSource.addTransferListener(transferListener)
+            localDataSource.addTransferListener(transferListener)
+        }
+
+        override fun open(dataSpec: DataSpec): Long {
+            val uri = dataSpec.uri
+            val target = when {
+                isRemoteHttpUri(uri) -> remoteDataSource
+                isOfflineBlobOrSongUri(uri) -> offlineBlobDataSource
+                else -> localDataSource
+            }
+            activeDataSource = target
+            return target.open(dataSpec)
+        }
+
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            return activeDataSource?.read(buffer, offset, length) ?: -1
+        }
+
+        override fun getUri(): Uri? = activeDataSource?.uri
+
+        override fun getResponseHeaders(): Map<String, List<String>> {
+            return activeDataSource?.responseHeaders ?: emptyMap()
+        }
+
+        override fun close() {
+            val ds = activeDataSource
+            activeDataSource = null
+            ds?.close()
+        }
     }
 }

@@ -20,6 +20,8 @@ import androidx.media3.exoplayer.audio.AudioRendererEventListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
+import com.zentryx.music.download.DownloadManager
 import com.zentryx.music.dsp.AndroidDspAudioEngine
 import com.zentryx.music.dsp.AudioOutputRoute
 import com.zentryx.music.dsp.CarDspAudioProcessor
@@ -71,7 +73,9 @@ class ZentryxPlayerManager @Inject constructor(
     private val dspAudioEngine: AndroidDspAudioEngine,
     private val carDspAudioProcessor: CarDspAudioProcessor,
     private val fftCapturer: AudioFftCapturer,
-    private val musicRepositoryLazy: Lazy<MusicRepository>
+    private val musicRepositoryLazy: Lazy<MusicRepository>,
+    private val downloadManagerLazy: Lazy<DownloadManager>,
+    private val songMediaItemConverter: SongMediaItemConverter
 ) {
     companion object {
         fun replayGainDbToLinear(db: Float?): Float {
@@ -161,7 +165,9 @@ class ZentryxPlayerManager @Inject constructor(
         .build()
 
     val exoPlayer: ExoPlayer by lazy {
-        val mediaSourceFactory = DefaultMediaSourceFactory(context)
+        val extractorsFactory = DefaultExtractorsFactory()
+            .setConstantBitrateSeekingEnabled(true)
+        val mediaSourceFactory = DefaultMediaSourceFactory(context, extractorsFactory)
             .setDataSourceFactory(cacheDataSourceFactory.createDataSourceFactory())
 
         val renderersFactory = object : DefaultRenderersFactory(context) {
@@ -257,6 +263,40 @@ class ZentryxPlayerManager @Inject constructor(
                 }
             }
         }
+
+        playerScope.launch {
+            downloadManagerLazy.get().downloadStatusUpdates.collect { update ->
+                var changed = false
+                activeQueue = activeQueue.map { item ->
+                    if (item.id == update.songId) {
+                        changed = true
+                        item.copy(
+                            isDownloaded = update.isDownloaded,
+                            localFilePath = update.localFilePath
+                        )
+                    } else {
+                        item
+                    }
+                }.toMutableList()
+                val cur = _playbackState.value.currentSong
+                if (changed || cur?.id == update.songId) {
+                    _playbackState.update { state ->
+                        val updatedCurrent = if (state.currentSong?.id == update.songId) {
+                            state.currentSong.copy(
+                                isDownloaded = update.isDownloaded,
+                                localFilePath = update.localFilePath
+                            )
+                        } else {
+                            state.currentSong
+                        }
+                        state.copy(
+                            currentSong = updatedCurrent,
+                            queue = activeQueue.toList()
+                        )
+                    }
+                }
+            }
+        }
     }
 
     fun markManualPresetOverrideForCurrentTrack() {
@@ -312,14 +352,21 @@ class ZentryxPlayerManager @Inject constructor(
     private fun isLocallyAvailable(song: Song): Boolean {
         if (!song.isDownloaded || song.localFilePath.isNullOrBlank()) return false
         val path = song.localFilePath
-        return if (path.startsWith("content://")) {
-            try {
-                context.contentResolver.openAssetFileDescriptor(Uri.parse(path), "r")?.use { true } ?: false
-            } catch (_: Throwable) {
-                false
+        return when {
+            path.startsWith("content://", ignoreCase = true) -> {
+                try {
+                    context.contentResolver.openAssetFileDescriptor(Uri.parse(path), "r")?.use { true } ?: false
+                } catch (_: Throwable) {
+                    false
+                }
             }
-        } else {
-            File(path).exists()
+            path.startsWith("${SongMediaItemConverter.SCHEME_DATA}:", ignoreCase = true) -> true
+            path.startsWith("${SongMediaItemConverter.SCHEME_IDB}://", ignoreCase = true) ||
+                path.startsWith("${SongMediaItemConverter.SCHEME_ZENTRYX_IDB}://", ignoreCase = true) -> {
+                val trackId = SongMediaItemConverter.parseIndexedDbTrackId(path) ?: return false
+                AndroidIndexedDbBlobResolver(context).resolve(trackId) != null
+            }
+            else -> File(path.removePrefix("file://")).exists()
         }
     }
 
@@ -674,20 +721,76 @@ class ZentryxPlayerManager @Inject constructor(
 
     fun cycleEqPreset() = dspAudioEngine.cycleEqPreset()
 
-    fun startCruisingMix() {
+    fun startCruisingMix(reshuffle: Boolean = true, sortByGenre: Boolean? = null) {
         playerScope.launch {
-            val all = musicRepositoryLazy.get().getAllSongs().firstOrNull().orEmpty()
-                .filter { isSongPlayable(it) }
-            if (all.isEmpty()) return@launch
-            val favs = all.filter { it.isFavorite }.shuffled()
-            val unheard = all.filter { !it.isFavorite && it.playCount == 0 }.shuffled()
-            val others = all.filter { !it.isFavorite && it.playCount > 0 }.shuffled()
-            val mix = (favs + unheard + others).take(100)
-            if (mix.isNotEmpty()) {
-                setShuffleMode(true)
-                playSong(mix.first(), mix)
-            }
+            val effectiveSortByGenre = sortByGenre
+                ?: settingsPreferences.cruisingSortByGenreFlow.firstOrNull()
+                ?: true
+            playSmartMixInternal(
+                mixType = SmartMixType.CRUISING,
+                reshuffle = reshuffle,
+                sortByGenre = effectiveSortByGenre,
+                fullLibrary = true
+            )
         }
+    }
+
+    suspend fun playSmartMix(
+        mixType: SmartMixType,
+        reshuffle: Boolean = false,
+        sortByGenre: Boolean = true,
+        fullLibrary: Boolean = (mixType == SmartMixType.CRUISING)
+    ): Pair<Int, Int> {
+        return playSmartMixInternal(
+            mixType = mixType,
+            reshuffle = reshuffle,
+            sortByGenre = sortByGenre,
+            fullLibrary = fullLibrary
+        )
+    }
+
+    private suspend fun playSmartMixInternal(
+        mixType: SmartMixType,
+        reshuffle: Boolean,
+        sortByGenre: Boolean,
+        fullLibrary: Boolean
+    ): Pair<Int, Int> {
+        val all = musicRepositoryLazy.get().getAllSongs().firstOrNull().orEmpty()
+            .filter { isSongPlayable(it) }
+        if (all.isEmpty()) return 0 to 0
+
+        val genreAware = mixType == SmartMixType.CRUISING ||
+            mixType == SmartMixType.DEEP_CUTS ||
+            mixType == SmartMixType.FAVORITES_RADIO
+
+        val limit = when {
+            mixType == SmartMixType.CRUISING && fullLibrary -> all.size
+            mixType == SmartMixType.FAVORITES_RADIO -> maxOf(all.size, 40)
+            else -> 40
+        }
+
+        val mix = SmartMixEngine.buildSmartMixSongs(
+            songs = all,
+            mixType = mixType,
+            limit = limit,
+            reshuffle = reshuffle || mixType == SmartMixType.DEEP_CUTS || mixType == SmartMixType.FAVORITES_RADIO,
+            sortByGenre = if (genreAware) sortByGenre else false
+        )
+
+        if (mix.isEmpty()) return 0 to 0
+
+        // Keep sequential playback when genre-sorted so tracks flow cleanly genre-by-genre
+        if (genreAware && sortByGenre) {
+            setShuffleMode(false)
+        }
+        playSong(mix.first(), mix)
+
+        val genreCount = if (genreAware && sortByGenre) {
+            SmartMixEngine.summarizeMixGenres(mix).genreCount
+        } else {
+            0
+        }
+        return mix.size to genreCount
     }
 
     fun resumeOrStartOnBluetooth() {
@@ -831,8 +934,7 @@ class ZentryxPlayerManager @Inject constructor(
                 val nextSong = activeQueue[targetIdx]
                 if (isLocallyAvailable(nextSong)) continue
                 try {
-                    val dataSource = cacheDataSourceFactory.createDataSourceFactory().createDataSource()
-                    val cacheDs = dataSource as? androidx.media3.datasource.cache.CacheDataSource ?: continue
+                    val cacheDs = cacheDataSourceFactory.createCacheDataSource()
                     val dataSpec = DataSpec.Builder()
                         .setUri(Uri.parse(nextSong.fileUrl))
                         .setPosition(0L)
@@ -859,31 +961,7 @@ class ZentryxPlayerManager @Inject constructor(
     }
 
     fun buildMediaItem(song: Song): MediaItem {
-        val metadataBuilder = MediaMetadata.Builder()
-            .setTitle(song.title)
-            .setArtist(song.artist)
-            .setAlbumTitle(song.album)
-            .setIsBrowsable(false)
-            .setIsPlayable(true)
-            .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
-
-        if (song.artworkPath != null) {
-            metadataBuilder.setArtworkUri(Uri.parse(song.artworkPath))
-        }
-
-        val playbackUri = if (isLocallyAvailable(song)) {
-            val localPath = song.localFilePath!!
-            if (localPath.startsWith("content://")) Uri.parse(localPath) else Uri.fromFile(File(localPath))
-        } else {
-            Uri.parse(song.fileUrl)
-        }
-
-        return MediaItem.Builder()
-            .setMediaId(song.id)
-            .setUri(playbackUri)
-            .setMimeType(song.mimeType)
-            .setMediaMetadata(metadataBuilder.build())
-            .build()
+        return songMediaItemConverter.toMediaItem(song, isLocalAvailable = isLocallyAvailable(song))
     }
 
     private fun saveCurrentPosition() {

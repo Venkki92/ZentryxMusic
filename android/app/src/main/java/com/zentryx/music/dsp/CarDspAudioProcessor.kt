@@ -66,10 +66,15 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         private set
     @Volatile var activeChannelCount: Int = 2
         private set
+    @Volatile var isPcmConfigured: Boolean = false
+        private set
+    @Volatile var activeEffectiveWidthPercent: Int = 100
+        private set
 
     private var activeCoeffVersion: Int = -1
     private var sampleRateHz: Int = 44100
     private var channelCount: Int = 2
+    private var inputEncoding: Int = C.ENCODING_PCM_16BIT
 
     // Cascaded 2nd-order HPF state (stage 1 always on when hpfHz > 0; stage 2 when slope == 24)
     private var hpfB0 = 1.0; private var hpfB1 = 0.0; private var hpfB2 = 0.0; private var hpfA1 = 0.0; private var hpfA2 = 0.0
@@ -117,6 +122,7 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
     private var haasDelayRightSamples = 0
     private var l7CenterInjectGain = 0.0
     private var l7SideWetGain = 0.0
+    private var computedEffectiveWidth = 1.0f
 
     // Dolby Virtual Atmos / 360° Overhead Pinna Height Elevation Filter (7.2 kHz peaking)
     private var heightActive = false
@@ -173,13 +179,20 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
     }
 
     override fun onConfigure(inputAudioFormat: AudioFormat): AudioFormat {
-        if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT || inputAudioFormat.channelCount !in 1..2) {
+        val supportedEncoding = inputAudioFormat.encoding == C.ENCODING_PCM_16BIT ||
+            inputAudioFormat.encoding == C.ENCODING_PCM_FLOAT ||
+            inputAudioFormat.encoding == C.ENCODING_PCM_24BIT ||
+            inputAudioFormat.encoding == C.ENCODING_PCM_32BIT
+        if (!supportedEncoding || inputAudioFormat.channelCount !in 1..2) {
+            isPcmConfigured = false
             return AudioFormat.NOT_SET
         }
+        inputEncoding = inputAudioFormat.encoding
         sampleRateHz = inputAudioFormat.sampleRate.coerceAtLeast(8000)
         channelCount = inputAudioFormat.channelCount
         activeSampleRateHz = sampleRateHz
         activeChannelCount = channelCount
+        isPcmConfigured = true
 
         val stageSize = ((sampleRateHz * MAX_STAGE_DELAY_MS / 1000f).toInt() + 16).coerceAtLeast(256)
         if (delayBufferL.size < stageSize) {
@@ -197,7 +210,8 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         }
 
         recalculateCoefficients()
-        return inputAudioFormat
+        // Always output 16-bit PCM so DefaultAudioSink & Hardware DynamicsProcessing/Virtualizer stay active
+        return AudioFormat(sampleRateHz, channelCount, C.ENCODING_PCM_16BIT)
     }
 
     private fun recalculateCoefficients() {
@@ -279,9 +293,29 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         }
 
         // 4. Harman Logic 7 / Dolby Pro Logic II / Dolby Virtual Atmos / 360° Virtualizer Matrix
+        // Tuned to match Web Audio Surround 3D engine (dspAudioEngine.ts + dspConsole.ts)
+        val intensityNorm = surroundIntensity / 100.0
+        val coherenceNorm = centerCoherence / 100.0
+        val heightNorm = virtualHeight / 100.0
+
+        val baseWidthPct = when {
+            !dspEnabled -> 100f
+            monoFoldDown -> 0f
+            else -> stereoWidthPercent.toFloat()
+        }
+        val blendedWidthPct = if (dspEnabled && !monoFoldDown && surroundMode != SurroundMode.OFF) {
+            val modeDelta = (surroundMode.sideWidthTarget - 100f) * intensityNorm.toFloat()
+            (baseWidthPct + modeDelta).coerceIn(0f, 160f)
+        } else {
+            baseWidthPct
+        }
+        computedEffectiveWidth = blendedWidthPct / 100f
+        activeEffectiveWidthPercent = blendedWidthPct.roundToInt()
+
         if (surroundMode != SurroundMode.OFF && 2200.0 < sr * 0.45) {
+            // Center vocal coherence bandpass @ 2.2 kHz (Q = 0.9) scaled from centerBoostMaxDb
             val wMid = 2.0 * PI * 2200.0 / sr
-            val aMid = sin(wMid) / (2.0 * 1.0)
+            val aMid = sin(wMid) / (2.0 * 0.9)
             val a0Mid = 1.0 + aMid
             l7MidB0 = aMid / a0Mid
             l7MidB1 = 0.0
@@ -289,9 +323,11 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             l7MidA1 = (-2.0 * cos(wMid)) / a0Mid
             l7MidA2 = (1.0 - aMid) / a0Mid
 
+            // Side ambient extraction bandpass using mode's exact Hz and wide Q (0.42..0.70)
             val sideHz = surroundMode.sideBandpassHz.toDouble().coerceIn(800.0, sr * 0.35)
+            val sideQ = surroundMode.sideBandpassQ.toDouble().coerceIn(0.35, 1.5)
             val wSide = 2.0 * PI * sideHz / sr
-            val aSide = sin(wSide) / (2.0 * 0.62)
+            val aSide = sin(wSide) / (2.0 * sideQ)
             val a0Side = 1.0 + aSide
             l7SideB0 = aSide / a0Side
             l7SideB1 = 0.0
@@ -314,7 +350,7 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             }
 
             // Overhead Pinna Height Elevation Filter @ 7.2 kHz (Atmos 3D / Virtual 360)
-            val heightDb = (virtualHeight / 100.0) * surroundMode.heightWeight * 4.2
+            val heightDb = heightNorm * surroundMode.heightBoostMaxDb.toDouble()
             if (heightDb >= 0.1 && 7200.0 < sr * 0.45) {
                 heightActive = true
                 val aH = 10.0.pow(heightDb / 40.0)
@@ -334,11 +370,13 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             val maxHaas = haasSideBuffer.size - 1
             haasDelayLeftSamples = ((surroundMode.haasLeftMs / 1000f) * sampleRateHz).roundToInt().coerceIn(1, maxHaas)
             haasDelayRightSamples = ((surroundMode.haasRightMs / 1000f) * sampleRateHz).roundToInt().coerceIn(1, maxHaas)
-            l7CenterInjectGain = (centerCoherence / 100.0) * surroundMode.centerWeight * 0.42
-            l7SideWetGain = (surroundIntensity / 100.0) * surroundMode.sideWeight * 0.65
+
+            val centerBoostDb = coherenceNorm * surroundMode.centerBoostMaxDb.toDouble()
+            l7CenterInjectGain = if (centerBoostDb > 0.05) (10.0.pow(centerBoostDb / 20.0) - 1.0) else 0.0
+            l7SideWetGain = intensityNorm * surroundMode.sideWetScale.toDouble()
 
             xtcDelaySamples = (0.00055 * sampleRateHz).roundToInt().coerceIn(1, xtcBufferL.size - 1)
-            xtcGain = (surroundIntensity / 100.0) * surroundMode.crosstalkCancelGain.toDouble()
+            xtcGain = intensityNorm * surroundMode.crosstalkCancelGain.toDouble()
         } else {
             l7CenterInjectGain = 0.0
             l7SideWetGain = 0.0
@@ -355,6 +393,22 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         rightDelaySamples = ((rightDelayMs / 1000f) * sampleRateHz).roundToInt().coerceIn(0, maxIdx)
     }
 
+    private fun readSampleAsPcm16Double(buf: ByteBuffer): Double {
+        return when (inputEncoding) {
+            C.ENCODING_PCM_16BIT -> buf.getShort().toDouble()
+            C.ENCODING_PCM_FLOAT -> (buf.getFloat().toDouble().coerceIn(-1.5, 1.5)) * 32767.0
+            C.ENCODING_PCM_24BIT -> {
+                val b0 = buf.get().toInt() and 0xFF
+                val b1 = buf.get().toInt() and 0xFF
+                val b2 = buf.get().toInt() // signed high byte
+                val sample24 = (b2 shl 16) or (b1 shl 8) or b0
+                sample24.toDouble() / 256.0
+            }
+            C.ENCODING_PCM_32BIT -> buf.getInt().toDouble() / 65536.0
+            else -> buf.getShort().toDouble()
+        }
+    }
+
     override fun queueInput(inputBuffer: ByteBuffer) {
         val remaining = inputBuffer.remaining()
         if (remaining == 0) return
@@ -363,6 +417,24 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             recalculateCoefficients()
         }
 
+        val bytesPerInputSample = when (inputEncoding) {
+            C.ENCODING_PCM_16BIT -> 2
+            C.ENCODING_PCM_24BIT -> 3
+            C.ENCODING_PCM_FLOAT, C.ENCODING_PCM_32BIT -> 4
+            else -> 2
+        }
+        val inFrameSize = channelCount * bytesPerInputSample
+        val frameCount = remaining / inFrameSize
+        if (frameCount <= 0) {
+            inputBuffer.position(inputBuffer.limit())
+            return
+        }
+
+        val outBytes = frameCount * channelCount * 2
+        val outBuffer = replaceOutputBuffer(outBytes)
+        outBuffer.order(ByteOrder.LITTLE_ENDIAN)
+        val inRo = inputBuffer.asReadOnlyBuffer().order(ByteOrder.LITTLE_ENDIAN)
+
         val rg = replayGainLinear
         val useReplayGain = abs(rg - 1.0f) >= 0.005f
         val useSubStage = dspEnabled && (subPhaseInverted || subLpfHz > 0 || abs(subTrimDb) >= 0.1f || subDelaySamples > 0)
@@ -370,34 +442,24 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         val useSurround = dspEnabled && channelCount == 2 && !monoFoldDown &&
             surroundMode != SurroundMode.OFF &&
             (l7CenterInjectGain > 0.002 || l7SideWetGain > 0.002 || heightActive || xtcGain > 0.002)
+        val effectiveWidth = computedEffectiveWidth
         val useLimiterClamp = dspEnabled && peakLimiterCeilingDb < -0.05f
         val useDsp = dspEnabled &&
             (hpfHz > 0 || leftDelaySamples > 0 || rightDelaySamples > 0 ||
-                stereoWidthPercent != 100 || monoFoldDown || useSubStage ||
+                abs(effectiveWidth - 1.0f) > 0.005f || monoFoldDown || useSubStage ||
                 useRoadNoise || useSurround || useLimiterClamp)
 
-        val outBuffer = replaceOutputBuffer(remaining)
-        outBuffer.order(ByteOrder.LITTLE_ENDIAN)
-        val inRo = inputBuffer.asReadOnlyBuffer().order(ByteOrder.LITTLE_ENDIAN)
-
-        if (!useDsp && !useReplayGain) {
+        if (!useDsp && !useReplayGain && inputEncoding == C.ENCODING_PCM_16BIT) {
             outBuffer.put(inRo)
             inputBuffer.position(inputBuffer.limit())
             outBuffer.flip()
             return
         }
 
-        val frameSize = channelCount * 2
-        val frameCount = remaining / frameSize
         val useHpf = dspEnabled && hpfHz > 0
         val useLr4 = crossoverSlopeDb >= 24
         val useSubDelay = subDelaySamples > 0
         val useDelay = dspEnabled && (leftDelaySamples > 0 || rightDelaySamples > 0)
-        val effectiveWidth = when {
-            !dspEnabled -> 1.0f
-            monoFoldDown -> 0.0f
-            else -> stereoWidthPercent / 100f
-        }
         val bufLen = delayBufferL.size
         val subBufLen = subDelayBufferL.size
         val haasLen = haasSideBuffer.size
@@ -405,8 +467,8 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
 
         if (channelCount == 2) {
             for (f in 0 until frameCount) {
-                var l = inRo.getShort().toDouble() * rg
-                var r = inRo.getShort().toDouble() * rg
+                var l = readSampleAsPcm16Double(inRo) * rg
+                var r = readSampleAsPcm16Double(inRo) * rg
 
                 if (useHpf) {
                     var yL = hpfB0 * l + hpfB1 * hpf1X1L + hpfB2 * hpf1X2L - hpfA1 * hpf1Y1L - hpfA2 * hpf1Y2L
@@ -483,7 +545,8 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
 
                 if (useSurround) {
                     val midIn = (l + r) * 0.5
-                    val sideIn = (l - r) * 0.5
+                    // Full (L - R) difference extraction matching Web Audio Surround Matrix
+                    val sideIn = l - r
 
                     val midBp = l7MidB0 * midIn + l7MidB1 * l7MidX1 + l7MidB2 * l7MidX2 - l7MidA1 * l7MidY1 - l7MidA2 * l7MidY2
                     l7MidX2 = l7MidX1; l7MidX1 = midIn; l7MidY2 = l7MidY1; l7MidY1 = midBp
@@ -530,7 +593,7 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
                     r = outR
                 }
 
-                if (effectiveWidth != 1.0f) {
+                if (abs(effectiveWidth - 1.0f) > 0.005f) {
                     val mid = (l + r) * 0.5
                     val side = (l - r) * 0.5 * effectiveWidth
                     l = mid + side
@@ -556,7 +619,7 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             }
         } else {
             for (f in 0 until frameCount) {
-                var m = inRo.getShort().toDouble() * rg
+                var m = readSampleAsPcm16Double(inRo) * rg
                 if (useHpf) {
                     var yM = hpfB0 * m + hpfB1 * hpf1X1L + hpfB2 * hpf1X2L - hpfA1 * hpf1Y1L - hpfA2 * hpf1Y2L
                     hpf1X2L = hpf1X1L; hpf1X1L = m; hpf1Y2L = hpf1Y1L; hpf1Y1L = yM

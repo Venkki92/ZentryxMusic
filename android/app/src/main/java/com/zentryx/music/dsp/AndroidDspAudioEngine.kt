@@ -166,7 +166,7 @@ class AndroidDspAudioEngine @Inject constructor(
                 activeProfile = AdaptiveCabinProfile.QUIET,
                 triggerReason = "disabled"
             )
-            if (_adaptiveDspDelta.value.profile != AdaptiveCabinProfile.QUIET) {
+            if (_adaptiveDspDelta.value != AdaptiveDspDelta()) {
                 _adaptiveDspDelta.value = AdaptiveDspDelta()
                 applyEffectiveDsp(_dspSettings.value)
             }
@@ -181,28 +181,35 @@ class AndroidDspAudioEngine @Inject constructor(
 
         if (adaptiveEvalJob?.isActive != true) {
             adaptiveEvalJob = scope.launch {
+                var lastTickMs = System.currentTimeMillis()
                 while (isActive) {
+                    val nowMs = System.currentTimeMillis()
+                    val dtMs = (nowMs - lastTickMs).coerceAtLeast(50L)
+                    lastTickMs = nowMs
+
                     val cfg = _adaptiveCabinConfig.value
                     val nextState = evaluateAdaptiveCabinState(
                         prevState = _adaptiveEvaluationState.value,
                         config = cfg,
                         cabinNoiseDb = cabinNoiseMonitor.cabinNoiseDb.value,
                         speedKmH = currentVehicleSpeedKmH,
-                        nowMs = System.currentTimeMillis()
+                        nowMs = nowMs
                     )
                     _adaptiveEvaluationState.value = nextState
-                    val nextDelta = calculateAdaptiveDspDelta(nextState.activeProfile, cfg)
-                    if (nextDelta != _adaptiveDspDelta.value) {
-                        _adaptiveDspDelta.value = nextDelta
+                    val targetDelta = calculateAdaptiveDspDelta(nextState.activeProfile, cfg)
+                    val smoothedDelta = smoothAdaptiveDspDelta(_adaptiveDspDelta.value, targetDelta, dtMs)
+                    if (smoothedDelta != _adaptiveDspDelta.value) {
+                        _adaptiveDspDelta.value = smoothedDelta
                         applyEffectiveDsp(_dspSettings.value)
                     }
-                    delay(400L)
+                    delay(200L)
                 }
             }
         } else {
-            val nextDelta = calculateAdaptiveDspDelta(_adaptiveEvaluationState.value.activeProfile, config)
-            if (nextDelta != _adaptiveDspDelta.value) {
-                _adaptiveDspDelta.value = nextDelta
+            val targetDelta = calculateAdaptiveDspDelta(_adaptiveEvaluationState.value.activeProfile, config)
+            val smoothedDelta = smoothAdaptiveDspDelta(_adaptiveDspDelta.value, targetDelta, 200L)
+            if (smoothedDelta != _adaptiveDspDelta.value) {
+                _adaptiveDspDelta.value = smoothedDelta
                 applyEffectiveDsp(_dspSettings.value)
             }
         }
@@ -313,11 +320,42 @@ class AndroidDspAudioEngine @Inject constructor(
         updateSettings(applyPresetToDsp(_dspSettings.value, preset))
     }
 
+    val isPcmProcessorConfigured: Boolean
+        get() = carDspAudioProcessor.isPcmConfigured
+
+    val activeSampleRateHz: Int
+        get() = carDspAudioProcessor.activeSampleRateHz
+
+    val activeEffectiveWidthPercent: Int
+        get() = carDspAudioProcessor.activeEffectiveWidthPercent
+
+    fun selectSurroundMode(mode: SurroundMode) {
+        val current = _dspSettings.value
+        updateSettings(
+            current.copy(
+                dspEnabled = true,
+                surroundMode = mode,
+                monoFoldDown = if (mode != SurroundMode.OFF) false else current.monoFoldDown
+            )
+        )
+    }
+
+    fun cycleRoutePreset(route: AudioOutputRoute) {
+        val current = _dspSettings.value
+        val allPresets = FACTORY_DSP_PRESETS + _customPresets.value
+        if (allPresets.isEmpty()) return
+        val assignedId = current.devicePresetMap[route.id] ?: "flat"
+        val idx = allPresets.indexOfFirst { it.id == assignedId }
+        val nextPreset = allPresets[(idx + 1) % allPresets.size]
+        val updatedMap = current.devicePresetMap.toMutableMap().apply { put(route.id, nextPreset.id) }
+        updateSettings(current.copy(devicePresetMap = updatedMap))
+    }
+
     fun cycleSurroundMode(): SurroundMode {
         val modes = SurroundMode.entries
         val cur = _dspSettings.value.surroundMode
         val next = modes[(modes.indexOf(cur) + 1) % modes.size]
-        updateSettings(_dspSettings.value.copy(dspEnabled = true, surroundMode = next))
+        selectSurroundMode(next)
         return next
     }
 

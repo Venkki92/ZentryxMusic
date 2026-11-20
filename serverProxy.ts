@@ -7,6 +7,90 @@ import type { IncomingMessage, ServerResponse } from 'http';
 
 export const ALLOWED_NEXTCLOUD_HOST = 'cloud.zentryx.bg';
 const MAX_CHUNK_BYTES = 8 * 1024 * 1024; // 8 MiB chunks
+export const AUDIO_FILE_EXTENSION_RE = /\.(mp3|flac|m4a|aac|ogg|opus|wav|wma|m4b|alac|aiff)(\?|$)/i;
+export const WEBDAV_CHUNK_MAX_RETRIES = 3;
+export const WEBDAV_CHUNK_BASE_DELAY_MS = 350;
+export const WEBDAV_CHUNK_MAX_DELAY_MS = 2500;
+export const WEBDAV_UPSTREAM_TIMEOUT_MS = 20000;
+
+const RETRYABLE_ERROR_CODES = new Set([
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ECONNABORTED',
+  'EPIPE',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ERR_SOCKET_CLOSED',
+  'UND_ERR_SOCKET',
+]);
+
+const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+export function isChunkProxyRequest(method?: string, url?: string, rangeHeader?: string): boolean {
+  const upperMethod = (method || 'GET').toUpperCase();
+  if (upperMethod !== 'GET' && upperMethod !== 'HEAD') return false;
+  if (rangeHeader && /bytes=/i.test(rangeHeader)) return true;
+  if (url && AUDIO_FILE_EXTENSION_RE.test(url)) return true;
+  return false;
+}
+
+export function isRetryableProxyError(err: NodeJS.ErrnoException | Error | null | undefined): boolean {
+  if (!err) return false;
+  const code = (err as NodeJS.ErrnoException).code;
+  if (code && RETRYABLE_ERROR_CODES.has(code)) return true;
+  const msg = (err.message || '').toLowerCase();
+  return (
+    msg.includes('socket hang up') ||
+    msg.includes('timeout') ||
+    msg.includes('timed out') ||
+    msg.includes('econnreset') ||
+    msg.includes('network') ||
+    msg.includes('tls') ||
+    msg.includes('client network socket disconnected')
+  );
+}
+
+export function isRetryableUpstreamStatus(statusCode?: number): boolean {
+  return typeof statusCode === 'number' && RETRYABLE_HTTP_STATUSES.has(statusCode);
+}
+
+export function computeRetryBackoffMs(
+  attempt: number,
+  baseDelayMs = WEBDAV_CHUNK_BASE_DELAY_MS,
+  maxDelayMs = WEBDAV_CHUNK_MAX_DELAY_MS,
+  jitterFraction = 0.2,
+  randomFn: () => number = Math.random
+): number {
+  const safeAttempt = Math.max(1, Math.floor(attempt));
+  const expDelay = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, safeAttempt - 1));
+  const jitterRange = expDelay * Math.max(0, Math.min(0.5, jitterFraction));
+  const jitter = (randomFn() * 2 - 1) * jitterRange;
+  return Math.max(50, Math.round(expDelay + jitter));
+}
+
+export function shouldRetryChunkRequest(params: {
+  method?: string;
+  url?: string;
+  rangeHeader?: string;
+  attempt: number;
+  maxRetries?: number;
+  headersSent: boolean;
+  responseEnded: boolean;
+  clientDisconnected: boolean;
+  error?: NodeJS.ErrnoException | Error | null;
+  statusCode?: number;
+}): boolean {
+  const maxRetries = params.maxRetries ?? WEBDAV_CHUNK_MAX_RETRIES;
+  if (params.attempt >= maxRetries) return false;
+  if (params.headersSent || params.responseEnded || params.clientDisconnected) return false;
+  if (!isChunkProxyRequest(params.method, params.url, params.rangeHeader)) return false;
+  if (params.error && isRetryableProxyError(params.error)) return true;
+  if (params.statusCode !== undefined && isRetryableUpstreamStatus(params.statusCode)) return true;
+  return false;
+}
 
 function appendProxyLog(line: string): void {
   try {
@@ -97,85 +181,182 @@ export function handleAudioStreamRequest(req: IncomingMessage, res: ServerRespon
       headers['If-Range'] = String(req.headers['if-range']);
     }
 
-    appendProxyLog(
-      `AUDIO_STREAM ${req.method} -> ${ALLOWED_NEXTCLOUD_HOST}${upstreamPath} (Auth: ${
-        headers['Authorization'] ? 'PRESENT' : 'MISSING'
-      }, Range: ${headers['Range'] || 'none'})`
-    );
+    let clientDisconnected = false;
+    let activeUpstreamReq: ReturnType<typeof https.request> | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const upstreamReq = https.request(
-      {
-        hostname: ALLOWED_NEXTCLOUD_HOST,
-        port: 443,
-        path: upstreamPath,
-        method: req.method || 'GET',
-        headers,
-      },
-      (upstreamRes) => {
-        const statusCode = upstreamRes.statusCode || 200;
-        res.statusCode = statusCode;
+    const cleanupOnClientClose = () => {
+      if (!res.writableEnded) {
+        clientDisconnected = true;
+        if (retryTimer) {
+          clearTimeout(retryTimer);
+          retryTimer = null;
+        }
+        if (activeUpstreamReq && !activeUpstreamReq.destroyed) {
+          activeUpstreamReq.destroy();
+        }
+      }
+    };
+    res.once('close', cleanupOnClientClose);
 
-        if (statusCode >= 400) {
-          res.setHeader('Content-Type', upstreamRes.headers['content-type'] || 'text/plain');
+    const dispatchAttempt = (attempt: number) => {
+      if (clientDisconnected || res.writableEnded) return;
+
+      const retryLabel = attempt > 0 ? `, Retry: ${attempt}/${WEBDAV_CHUNK_MAX_RETRIES}` : '';
+      appendProxyLog(
+        `AUDIO_STREAM ${req.method} -> ${ALLOWED_NEXTCLOUD_HOST}${upstreamPath} (Auth: ${
+          headers['Authorization'] ? 'PRESENT' : 'MISSING'
+        }, Range: ${headers['Range'] || 'none'}${retryLabel})`
+      );
+
+      let settled = false;
+      const scheduleRetry = (reason: string, err?: Error | null, statusCode?: number): boolean => {
+        if (settled) return false;
+        const canRetry = shouldRetryChunkRequest({
+          method: req.method,
+          url: upstreamPath,
+          rangeHeader: headers['Range'],
+          attempt,
+          maxRetries: WEBDAV_CHUNK_MAX_RETRIES,
+          headersSent: res.headersSent,
+          responseEnded: res.writableEnded,
+          clientDisconnected: clientDisconnected || req.destroyed,
+          error: err,
+          statusCode,
+        });
+        if (!canRetry) return false;
+
+        settled = true;
+        const nextAttempt = attempt + 1;
+        const delayMs = computeRetryBackoffMs(nextAttempt);
+        appendProxyLog(
+          `AUDIO_STREAM CHUNK RETRY ${nextAttempt}/${WEBDAV_CHUNK_MAX_RETRIES} in ${delayMs}ms (${reason}) on ${upstreamPath}`
+        );
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          dispatchAttempt(nextAttempt);
+        }, delayMs);
+        return true;
+      };
+
+      const upstreamReq = https.request(
+        {
+          hostname: ALLOWED_NEXTCLOUD_HOST,
+          port: 443,
+          path: upstreamPath,
+          method: req.method || 'GET',
+          headers,
+          timeout: WEBDAV_UPSTREAM_TIMEOUT_MS,
+        },
+        (upstreamRes) => {
+          const statusCode = upstreamRes.statusCode || 200;
+
+          if (statusCode >= 400) {
+            if (scheduleRetry(`HTTP ${statusCode}`, null, statusCode)) {
+              upstreamRes.resume();
+              return;
+            }
+            settled = true;
+            res.statusCode = statusCode;
+            res.setHeader('Content-Type', upstreamRes.headers['content-type'] || 'text/plain');
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            if (attempt > 0) {
+              res.setHeader('X-Zentryx-Proxy-Retries', String(attempt));
+            }
+            let errBody = '';
+            upstreamRes.on('data', (chunk) => {
+              errBody += chunk.toString();
+            });
+            upstreamRes.on('end', () => {
+              appendProxyLog(`AUDIO_STREAM RES ${statusCode} ERROR: ${errBody.slice(0, 500)}`);
+              if (!res.writableEnded) {
+                res.end(errBody);
+              }
+            });
+            return;
+          }
+
+          settled = true;
+          res.statusCode = statusCode;
+          const mimeType = resolveMimeType(decodedPath, upstreamRes.headers['content-type']);
+          res.setHeader('Content-Type', mimeType);
+          res.setHeader('Accept-Ranges', 'bytes');
+          res.setHeader('Content-Disposition', 'inline');
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
           res.setHeader('Access-Control-Allow-Origin', '*');
-          let errBody = '';
-          upstreamRes.on('data', (chunk) => {
-            errBody += chunk.toString();
+          res.setHeader('Access-Control-Allow-Headers', 'Range, Authorization, Content-Type, If-Range');
+          res.setHeader(
+            'Access-Control-Expose-Headers',
+            'Content-Range, Content-Length, Accept-Ranges, Content-Type, ETag, Last-Modified, X-Zentryx-Proxy-Retries'
+          );
+          if (attempt > 0) {
+            res.setHeader('X-Zentryx-Proxy-Retries', String(attempt));
+          }
+
+          if (upstreamRes.headers['content-length']) {
+            res.setHeader('Content-Length', upstreamRes.headers['content-length']);
+          }
+          if (upstreamRes.headers['content-range']) {
+            res.setHeader('Content-Range', upstreamRes.headers['content-range']);
+          }
+          if (upstreamRes.headers['etag']) {
+            res.setHeader('ETag', upstreamRes.headers['etag']);
+          }
+          if (upstreamRes.headers['last-modified']) {
+            res.setHeader('Last-Modified', upstreamRes.headers['last-modified']);
+          }
+
+          appendProxyLog(
+            `AUDIO_STREAM RES ${statusCode} (Type: ${mimeType}, Range: ${
+              upstreamRes.headers['content-range'] || 'none'
+            }, Len: ${upstreamRes.headers['content-length'] || 'unknown'}${
+              attempt > 0 ? `, Recovered after ${attempt} retries` : ''
+            })`
+          );
+
+          upstreamRes.on('error', (streamErr) => {
+            appendProxyLog(`AUDIO_STREAM BODY INTERRUPTED: ${streamErr.message} on ${upstreamPath}`);
+            if (!res.writableEnded) {
+              res.destroy(streamErr);
+            }
           });
-          upstreamRes.on('end', () => {
-            appendProxyLog(`AUDIO_STREAM RES ${statusCode} ERROR: ${errBody.slice(0, 500)}`);
-            res.end(errBody);
-          });
+          upstreamRes.pipe(res);
+        }
+      );
+
+      activeUpstreamReq = upstreamReq;
+
+      upstreamReq.on('timeout', () => {
+        const timeoutErr = Object.assign(new Error(`Upstream chunk timeout (${WEBDAV_UPSTREAM_TIMEOUT_MS}ms)`), {
+          code: 'ETIMEDOUT',
+        });
+        upstreamReq.destroy(timeoutErr);
+      });
+
+      upstreamReq.on('error', (err) => {
+        if (clientDisconnected) return;
+        const code = (err as NodeJS.ErrnoException).code || err.message;
+        if (scheduleRetry(code, err)) {
           return;
         }
+        settled = true;
+        appendProxyLog(`AUDIO_STREAM ERROR (after ${attempt} retries): ${err.message}`);
+        if (!res.headersSent && !res.writableEnded) {
+          res.statusCode = 502;
+          res.setHeader('Retry-After', '2');
+          res.setHeader('X-Zentryx-Proxy-Retries', String(attempt));
+          res.end('Upstream stream error: ' + err.message);
+        }
+      });
 
-        const mimeType = resolveMimeType(decodedPath, upstreamRes.headers['content-type']);
-        res.setHeader('Content-Type', mimeType);
-        res.setHeader('Accept-Ranges', 'bytes');
-        res.setHeader('Content-Disposition', 'inline');
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Headers', 'Range, Authorization, Content-Type, If-Range');
-        res.setHeader(
-          'Access-Control-Expose-Headers',
-          'Content-Range, Content-Length, Accept-Ranges, Content-Type, ETag, Last-Modified'
-        );
-
-        if (upstreamRes.headers['content-length']) {
-          res.setHeader('Content-Length', upstreamRes.headers['content-length']);
-        }
-        if (upstreamRes.headers['content-range']) {
-          res.setHeader('Content-Range', upstreamRes.headers['content-range']);
-        }
-        if (upstreamRes.headers['etag']) {
-          res.setHeader('ETag', upstreamRes.headers['etag']);
-        }
-        if (upstreamRes.headers['last-modified']) {
-          res.setHeader('Last-Modified', upstreamRes.headers['last-modified']);
-        }
-
-        appendProxyLog(
-          `AUDIO_STREAM RES ${statusCode} (Type: ${mimeType}, Range: ${
-            upstreamRes.headers['content-range'] || 'none'
-          }, Len: ${upstreamRes.headers['content-length'] || 'unknown'})`
-        );
-        upstreamRes.pipe(res);
+      if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
+        upstreamReq.end();
+      } else {
+        req.pipe(upstreamReq);
       }
-    );
+    };
 
-    upstreamReq.on('error', (err) => {
-      appendProxyLog(`AUDIO_STREAM ERROR: ${err.message}`);
-      if (!res.headersSent) {
-        res.statusCode = 502;
-        res.end('Upstream stream error: ' + err.message);
-      }
-    });
-
-    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
-      upstreamReq.end();
-    } else {
-      req.pipe(upstreamReq);
-    }
+    dispatchAttempt(0);
   } catch (err: any) {
     if (!res.headersSent) {
       res.statusCode = 500;
@@ -195,7 +376,7 @@ export function handleNextcloudProxyRequest(req: IncomingMessage, res: ServerRes
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, DELETE, PROPFIND, OPTIONS');
     res.setHeader(
       'Access-Control-Expose-Headers',
-      'Content-Range, Content-Length, Accept-Ranges, Content-Type, ETag, Last-Modified'
+      'Content-Range, Content-Length, Accept-Ranges, Content-Type, ETag, Last-Modified, X-Zentryx-Proxy-Retries'
     );
     res.end();
     return;
@@ -239,7 +420,7 @@ export function handleNextcloudProxyRequest(req: IncomingMessage, res: ServerRes
 
     if (req.method === 'HEAD') {
       delete outHeaders['range'];
-    } else if (/\.(mp3|flac|m4a|aac|ogg|opus|wav|wma|m4b|alac|aiff)(\?|$)/i.test(upstreamPath)) {
+    } else if (AUDIO_FILE_EXTENSION_RE.test(upstreamPath)) {
       delete outHeaders['if-none-match'];
       delete outHeaders['if-modified-since'];
       const clientRange = outHeaders['range'];
@@ -262,69 +443,172 @@ export function handleNextcloudProxyRequest(req: IncomingMessage, res: ServerRes
       }
     }
 
-    appendProxyLog(
-      `REQ ${req.method} ${req.url} -> ${ALLOWED_NEXTCLOUD_HOST}${upstreamPath} (Auth: ${
-        outHeaders['authorization'] ? 'PRESENT' : 'MISSING'
-      }, Range: ${outHeaders['range'] || 'none'})`
-    );
+    const isReadOnlyMethod = req.method === 'GET' || req.method === 'HEAD';
+    let clientDisconnected = false;
+    let activeUpstreamReq: ReturnType<typeof https.request> | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const upstreamReq = https.request(
-      {
-        hostname: ALLOWED_NEXTCLOUD_HOST,
-        port: 443,
-        path: upstreamPath,
-        method: req.method,
-        headers: outHeaders,
-      },
-      (upstreamRes) => {
-        const headers: Record<string, string | string[]> = {};
-        for (const [k, v] of Object.entries(upstreamRes.headers)) {
-          if (v === undefined) continue;
-          const lk = k.toLowerCase();
-          if (lk === 'x-frame-options' || lk === 'content-security-policy' || lk === 'x-content-type-options') {
-            continue;
-          }
-          headers[k] = v;
+    res.once('close', () => {
+      if (!res.writableEnded) {
+        clientDisconnected = true;
+        if (retryTimer) {
+          clearTimeout(retryTimer);
+          retryTimer = null;
         }
-
-        const isAudio = /\.(mp3|flac|m4a|aac|ogg|opus|wav|wma|m4b|alac|aiff)(\?|$)/i.test(upstreamPath);
-        if (isAudio) {
-          headers['content-type'] = resolveMimeType(
-            upstreamPath.split('?')[0],
-            typeof headers['content-type'] === 'string' ? headers['content-type'] : undefined
-          );
-          headers['content-disposition'] = 'inline';
+        if (activeUpstreamReq && !activeUpstreamReq.destroyed) {
+          activeUpstreamReq.destroy();
         }
-        headers['access-control-allow-origin'] = '*';
-        headers['access-control-allow-headers'] =
-          'Authorization, Content-Type, Range, If-Range, X-Requested-With, Depth, OCS-APIREQUEST';
-        headers['access-control-allow-methods'] = 'GET, HEAD, POST, PUT, DELETE, PROPFIND, OPTIONS';
-        headers['access-control-expose-headers'] =
-          'Content-Range, Content-Length, Accept-Ranges, Content-Type, ETag, Last-Modified';
-        if (!headers['accept-ranges']) {
-          headers['accept-ranges'] = 'bytes';
-        }
-
-        res.writeHead(upstreamRes.statusCode || 502, headers);
-        upstreamRes.pipe(res);
-
-        appendProxyLog(
-          `RES ${upstreamRes.statusCode} ${req.method} ${req.url} (Len: ${
-            upstreamRes.headers['content-length'] || 'unknown'
-          })`
-        );
-      }
-    );
-
-    upstreamReq.on('error', (err) => {
-      appendProxyLog(`PROXY SOCKET ERROR: ${err.message} on ${req.method} ${req.url}`);
-      if (!res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Proxy communication error', message: err.message }));
       }
     });
 
-    req.pipe(upstreamReq);
+    const dispatchAttempt = (attempt: number) => {
+      if (clientDisconnected || res.writableEnded) return;
+
+      const retryLabel = attempt > 0 ? `, Retry: ${attempt}/${WEBDAV_CHUNK_MAX_RETRIES}` : '';
+      appendProxyLog(
+        `REQ ${req.method} ${req.url} -> ${ALLOWED_NEXTCLOUD_HOST}${upstreamPath} (Auth: ${
+          outHeaders['authorization'] ? 'PRESENT' : 'MISSING'
+        }, Range: ${outHeaders['range'] || 'none'}${retryLabel})`
+      );
+
+      let settled = false;
+      const scheduleRetry = (reason: string, err?: Error | null, statusCode?: number): boolean => {
+        if (settled || !isReadOnlyMethod) return false;
+        const canRetry = shouldRetryChunkRequest({
+          method: req.method,
+          url: upstreamPath,
+          rangeHeader: outHeaders['range'],
+          attempt,
+          maxRetries: WEBDAV_CHUNK_MAX_RETRIES,
+          headersSent: res.headersSent,
+          responseEnded: res.writableEnded,
+          clientDisconnected: clientDisconnected || req.destroyed,
+          error: err,
+          statusCode,
+        });
+        if (!canRetry) return false;
+
+        settled = true;
+        const nextAttempt = attempt + 1;
+        const delayMs = computeRetryBackoffMs(nextAttempt);
+        appendProxyLog(
+          `PROXY CHUNK RETRY ${nextAttempt}/${WEBDAV_CHUNK_MAX_RETRIES} in ${delayMs}ms (${reason}) on ${req.method} ${req.url}`
+        );
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          dispatchAttempt(nextAttempt);
+        }, delayMs);
+        return true;
+      };
+
+      const upstreamReq = https.request(
+        {
+          hostname: ALLOWED_NEXTCLOUD_HOST,
+          port: 443,
+          path: upstreamPath,
+          method: req.method,
+          headers: outHeaders,
+          timeout: WEBDAV_UPSTREAM_TIMEOUT_MS,
+        },
+        (upstreamRes) => {
+          const statusCode = upstreamRes.statusCode || 502;
+          if (statusCode >= 400 && scheduleRetry(`HTTP ${statusCode}`, null, statusCode)) {
+            upstreamRes.resume();
+            return;
+          }
+
+          settled = true;
+          const headers: Record<string, string | string[]> = {};
+          for (const [k, v] of Object.entries(upstreamRes.headers)) {
+            if (v === undefined) continue;
+            const lk = k.toLowerCase();
+            if (lk === 'x-frame-options' || lk === 'content-security-policy' || lk === 'x-content-type-options') {
+              continue;
+            }
+            headers[k] = v;
+          }
+
+          const isAudio = AUDIO_FILE_EXTENSION_RE.test(upstreamPath);
+          if (isAudio) {
+            headers['content-type'] = resolveMimeType(
+              upstreamPath.split('?')[0],
+              typeof headers['content-type'] === 'string' ? headers['content-type'] : undefined
+            );
+            headers['content-disposition'] = 'inline';
+          }
+          headers['access-control-allow-origin'] = '*';
+          headers['access-control-allow-headers'] =
+            'Authorization, Content-Type, Range, If-Range, X-Requested-With, Depth, OCS-APIREQUEST';
+          headers['access-control-allow-methods'] = 'GET, HEAD, POST, PUT, DELETE, PROPFIND, OPTIONS';
+          headers['access-control-expose-headers'] =
+            'Content-Range, Content-Length, Accept-Ranges, Content-Type, ETag, Last-Modified, X-Zentryx-Proxy-Retries';
+          if (!headers['accept-ranges']) {
+            headers['accept-ranges'] = 'bytes';
+          }
+          if (attempt > 0) {
+            headers['x-zentryx-proxy-retries'] = String(attempt);
+          }
+
+          res.writeHead(statusCode, headers);
+          upstreamRes.on('error', (streamErr) => {
+            appendProxyLog(`PROXY STREAM INTERRUPTED: ${streamErr.message} on ${req.method} ${req.url}`);
+            if (!res.writableEnded) {
+              res.destroy(streamErr);
+            }
+          });
+          upstreamRes.pipe(res);
+
+          appendProxyLog(
+            `RES ${statusCode} ${req.method} ${req.url} (Len: ${
+              upstreamRes.headers['content-length'] || 'unknown'
+            }${attempt > 0 ? `, Recovered after ${attempt} retries` : ''})`
+          );
+        }
+      );
+
+      activeUpstreamReq = upstreamReq;
+
+      upstreamReq.on('timeout', () => {
+        const timeoutErr = Object.assign(new Error(`Upstream chunk timeout (${WEBDAV_UPSTREAM_TIMEOUT_MS}ms)`), {
+          code: 'ETIMEDOUT',
+        });
+        upstreamReq.destroy(timeoutErr);
+      });
+
+      upstreamReq.on('error', (err) => {
+        if (clientDisconnected) return;
+        const code = (err as NodeJS.ErrnoException).code || err.message;
+        if (scheduleRetry(code, err)) {
+          return;
+        }
+        settled = true;
+        appendProxyLog(`PROXY SOCKET ERROR (after ${attempt} retries): ${err.message} on ${req.method} ${req.url}`);
+        if (!res.headersSent && !res.writableEnded) {
+          res.writeHead(502, {
+            'Content-Type': 'application/json',
+            'Retry-After': '2',
+            'X-Zentryx-Proxy-Retries': String(attempt),
+          });
+          res.end(
+            JSON.stringify({
+              error: 'Proxy communication error',
+              message: err.message,
+              code: (err as NodeJS.ErrnoException).code || 'PROXY_ERROR',
+              retriesAttempted: attempt,
+              retryable: isRetryableProxyError(err),
+            })
+          );
+        }
+      });
+
+      if (isReadOnlyMethod) {
+        upstreamReq.end();
+      } else {
+        req.pipe(upstreamReq);
+      }
+    };
+
+    dispatchAttempt(0);
   } catch (err: any) {
     if (!res.headersSent) {
       res.writeHead(500, { 'Content-Type': 'application/json' });

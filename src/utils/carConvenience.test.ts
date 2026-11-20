@@ -13,6 +13,9 @@ import {
   selectOfflineCacheEvictions,
   recordTrackPlayStat,
   buildSmartMixTracks,
+  resolveTrackGenre,
+  sortAndShuffleTracksByGenre,
+  summarizeMixGenres,
 } from './carConvenience';
 import { parseReplayGainValue, parseID3v2, parseFlacMetadata } from './id3Parser';
 
@@ -216,4 +219,118 @@ test('carConvenience: SWC Long-Press bindings resolve cruising_mix and cycle_sur
   assert.equal(resolveSteeringAction('r', 'KeyR', sanitized), 'cruising_mix');
   assert.equal(resolveSteeringAction('F9', 'F9', sanitized), 'cycle_surround');
   assert.equal(DEFAULT_SWC_LONG_PRESS_BINDINGS.duck, 'Space');
+});
+
+function createSeededRng(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (1664525 * state + 1013904223) >>> 0;
+    return state / 0x100000000;
+  };
+}
+
+test('carConvenience: resolveTrackGenre prioritizes tags, falls back to meaningful folder, else Unclassified', () => {
+  assert.equal(resolveTrackGenre({ genre: 'synthwave', folderPath: 'Music/Rock' }), 'Synthwave');
+  assert.equal(resolveTrackGenre({ genre: 'EDM', folderPath: 'Music/Local' }), 'EDM');
+  assert.equal(resolveTrackGenre({ genre: 'Unknown', folderPath: 'Music/WoW Radio/DKTN' }), 'DKTN');
+  assert.equal(resolveTrackGenre({ genre: '', folderPath: 'Music/deep_house' }), 'Deep House');
+  assert.equal(resolveTrackGenre({ genre: 'Other', folderPath: 'Music/Local/Downloads' }), 'Unclassified');
+  assert.equal(resolveTrackGenre({}), 'Unclassified');
+});
+
+test('carConvenience: sortAndShuffleTracksByGenre keeps genres sorted A-Z with Unclassified last and shuffles within each genre', () => {
+  const library = [
+    { id: 'r1', artist: 'Muse', genre: 'Rock' },
+    { id: 'r2', artist: 'Muse', genre: 'Rock' },
+    { id: 'r3', artist: 'Arctic Monkeys', genre: 'Rock' },
+    { id: 'a1', artist: 'Tycho', genre: 'Ambient' },
+    { id: 'a2', artist: 'Brian Eno', genre: 'Ambient' },
+    { id: 'a3', artist: 'Hammock', genre: 'Ambient' },
+    { id: 'u1', artist: 'Mystery', folderPath: 'Music/Local' },
+    { id: 'e1', artist: 'Daft Punk', genre: 'Electronic' },
+    { id: 'e2', artist: 'Justice', genre: 'Electronic' },
+  ];
+
+  const passA = sortAndShuffleTracksByGenre(library, createSeededRng(11));
+  const passB = sortAndShuffleTracksByGenre(library, createSeededRng(99));
+
+  assert.equal(passA.length, library.length);
+  assert.deepEqual(
+    passA.map((t) => resolveTrackGenre(t)),
+    ['Ambient', 'Ambient', 'Ambient', 'Electronic', 'Electronic', 'Rock', 'Rock', 'Rock', 'Unclassified']
+  );
+  assert.deepEqual(
+    passB.map((t) => resolveTrackGenre(t)),
+    ['Ambient', 'Ambient', 'Ambient', 'Electronic', 'Electronic', 'Rock', 'Rock', 'Rock', 'Unclassified']
+  );
+
+  // Within the Rock block (indices 5..7), Arctic Monkeys should split the two Muse tracks when possible
+  const rockBlock = passA.slice(5, 8);
+  assert.equal(rockBlock.length, 3);
+  assert.ok(
+    rockBlock[0].artist !== rockBlock[1].artist || rockBlock[1].artist !== rockBlock[2].artist,
+    'Rock block should decluster artists'
+  );
+
+  // Different seeds should produce a different order overall
+  assert.notDeepEqual(
+    passA.map((t) => t.id),
+    passB.map((t) => t.id)
+  );
+});
+
+test('carConvenience: buildSmartMixTracks supports full-library genre-sorted Cruising reshuffle, Deep Cuts, and Favorites Radio', () => {
+  const library = [
+    { id: 't1', artist: 'Artist A', genre: 'House' },
+    { id: 't2', artist: 'Artist B', genre: 'Ambient' },
+    { id: 't3', artist: 'Artist C', genre: 'Techno' },
+    { id: 't4', artist: 'Artist D', genre: 'Ambient' },
+    { id: 't5', artist: 'Artist E', genre: 'House' },
+    { id: 't6', artist: 'Artist F', folderPath: 'Music' },
+  ];
+  const stats = {
+    t1: { playCount: 12, lastPlayedAt: 500 },
+    t2: { playCount: 8, lastPlayedAt: 400 },
+  };
+  const favs = new Set(['t1', 't3', 't4']);
+
+  const summary = summarizeMixGenres(library);
+  assert.equal(summary.genreCount, 4);
+  assert.deepEqual(summary.genres, [
+    { genre: 'Ambient', count: 2 },
+    { genre: 'House', count: 2 },
+    { genre: 'Techno', count: 1 },
+    { genre: 'Unclassified', count: 1 },
+  ]);
+
+  const cruisingReshuffled = buildSmartMixTracks(library, 'cruising', stats, favs, library.length, {
+    reshuffle: true,
+    sortByGenre: true,
+    rng: createSeededRng(42),
+  });
+  assert.equal(cruisingReshuffled.length, library.length);
+  assert.deepEqual(
+    cruisingReshuffled.map((t) => resolveTrackGenre(t)),
+    ['Ambient', 'Ambient', 'House', 'House', 'Techno', 'Unclassified']
+  );
+
+  const favRadio = buildSmartMixTracks(library, 'favorites_radio', stats, favs, 10, {
+    reshuffle: true,
+    sortByGenre: true,
+    rng: createSeededRng(7),
+  });
+  assert.deepEqual(
+    favRadio.map((t) => t.id),
+    ['t4', 't1', 't3'] // Ambient -> House -> Techno
+  );
+
+  const deepCuts = buildSmartMixTracks(library, 'deep_cuts', stats, favs, 3, {
+    reshuffle: false,
+    sortByGenre: false,
+  });
+  assert.equal(deepCuts.length, 3);
+  // All picked tracks should be from the 0-play unheard pool (t3, t4, t5, t6)
+  for (const track of deepCuts) {
+    assert.equal(stats[track.id as keyof typeof stats]?.playCount || 0, 0);
+  }
 });

@@ -2,10 +2,12 @@ package com.zentryx.music.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.zentryx.music.download.DownloadFeedbackEvent
 import com.zentryx.music.download.DownloadManager
 import com.zentryx.music.dsp.AndroidDspAudioEngine
 import com.zentryx.music.dsp.AudioOutputRoute
 import com.zentryx.music.dsp.DspSettings
+import com.zentryx.music.dsp.SurroundMode
 import com.zentryx.music.lyrics.LyricsParser
 import com.zentryx.music.lyrics.ParsedLyrics
 import com.zentryx.music.models.PlaybackState
@@ -53,6 +55,8 @@ class PlayerViewModel @Inject constructor(
     val activeOutputRoute: StateFlow<AudioOutputRoute> = dspAudioEngine.activeOutputRoute
     val isMuted: StateFlow<Boolean> = playerManager.isMuted
     val visualizerFrame: StateFlow<VisualizerFrame> = fftCapturer.frame
+    val activeDownloads: StateFlow<Map<String, Int>> = downloadManager.activeDownloads
+    val downloadFeedback: StateFlow<DownloadFeedbackEvent?> = downloadManager.downloadFeedback
 
     val accentColor: StateFlow<MbuxAccentColor> = settingsPreferences.accentColorFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), MbuxAccentColor.LIME)
@@ -142,6 +146,8 @@ class PlayerViewModel @Inject constructor(
     fun toggleMute() = playerManager.toggleMute()
     fun setSleepTimer(minutes: Int) = playerManager.setSleepTimer(minutes)
     fun clearError() = playerManager.clearErrorMessage()
+    fun clearDownloadFeedback() = downloadManager.clearFeedback()
+    fun cycleSurroundMode(): SurroundMode = dspAudioEngine.cycleSurroundMode()
     fun moveQueueItem(fromIndex: Int, toIndex: Int) = playerManager.moveQueueItem(fromIndex, toIndex)
     fun removeQueueItem(index: Int) = playerManager.removeQueueItem(index)
     fun clearQueue() = playerManager.clearQueue(keepCurrent = true)

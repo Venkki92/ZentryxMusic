@@ -6,7 +6,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -54,6 +56,8 @@ import com.zentryx.music.models.Song
 import com.zentryx.music.network.webdav.DiagnosticProbeEntry
 import com.zentryx.music.network.webdav.DiagnosticStepStatus
 import com.zentryx.music.network.webdav.ScanDiagnosticsState
+import com.zentryx.music.player.MixGenreSummary
+import com.zentryx.music.player.SmartMixType
 import com.zentryx.music.ui.components.CrossfadeAlbumArt
 import com.zentryx.music.ui.components.DriveModeHudDialog
 import com.zentryx.music.ui.components.MiniPlayer
@@ -62,6 +66,7 @@ import com.zentryx.music.ui.components.rememberVoiceSearchLauncher
 import com.zentryx.music.viewmodel.LibraryTab
 import com.zentryx.music.viewmodel.LibraryViewModel
 import com.zentryx.music.viewmodel.RemoteFolderBrowserState
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
@@ -110,12 +115,19 @@ fun LibraryScreen(
     val selectedPlaylist by viewModel.selectedPlaylist.collectAsStateWithLifecycle()
     val selectedPlaylistSongs by viewModel.selectedPlaylistSongs.collectAsStateWithLifecycle()
     val batchProgress by viewModel.batchProgress.collectAsStateWithLifecycle()
+    val activeDownloads by viewModel.activeDownloads.collectAsStateWithLifecycle()
+    val downloadFeedback by viewModel.downloadFeedback.collectAsStateWithLifecycle()
     val isLocalScanning by viewModel.isLocalScanning.collectAsStateWithLifecycle()
     val playlistSyncMessage by viewModel.playlistSyncMessage.collectAsStateWithLifecycle()
     val diagnosticsState by viewModel.diagnosticsState.collectAsStateWithLifecycle()
     val showDiagnosticsDialog by viewModel.showDiagnosticsDialog.collectAsStateWithLifecycle()
     val remoteFolderBrowserState by viewModel.remoteFolderBrowserState.collectAsStateWithLifecycle()
     val extraWebDavFolders by viewModel.extraWebDavFolders.collectAsStateWithLifecycle()
+    val cruisingSortByGenre by viewModel.cruisingSortByGenre.collectAsStateWithLifecycle()
+    val activeSmartMix by viewModel.activeSmartMix.collectAsStateWithLifecycle()
+    val cruisingReshuffleCount by viewModel.cruisingReshuffleCount.collectAsStateWithLifecycle()
+    val mixGenreSummary by viewModel.mixGenreSummary.collectAsStateWithLifecycle()
+    val deepCutsCount by viewModel.deepCutsCount.collectAsStateWithLifecycle()
 
     val isWideViewport = LocalConfiguration.current.screenWidthDp >= 820
     val isDualPaneActive = dualPaneCockpit && isWideViewport
@@ -139,6 +151,7 @@ fun LibraryScreen(
     var driveModeDismissedThisTrip by remember { mutableStateOf(false) }
     var showCodecInspector by remember { mutableStateOf(false) }
     var voiceFeedbackMsg by remember { mutableStateOf<String?>(null) }
+    var cruisingOptionsOpen by remember { mutableStateOf(false) }
 
     val launchVoiceSearch = rememberVoiceSearchLauncher(
         onResult = { spoken -> viewModel.handleVoiceSearchResult(spoken) },
@@ -148,6 +161,16 @@ fun LibraryScreen(
     LaunchedEffect(currentSpeedKmH, driveModeAutoSpeedKmH, playbackState.currentSong) {
         if (driveModeAutoSpeedKmH > 0 && currentSpeedKmH >= driveModeAutoSpeedKmH && !driveModeDismissedThisTrip && playbackState.currentSong != null) {
             showDriveModeHud = true
+        }
+    }
+
+    LaunchedEffect(downloadFeedback?.id) {
+        val fb = downloadFeedback
+        if (fb != null && fb.progressPercent == null) {
+            delay(3500L)
+            if (downloadFeedback?.id == fb.id) {
+                viewModel.clearDownloadFeedback()
+            }
         }
     }
 
@@ -161,6 +184,10 @@ fun LibraryScreen(
             }
             viewModel.scanLocalAudio(treeUri, additive = true)
         }
+    }
+    val launchUsbFolderPicker: () -> Unit = {
+        runCatching { usbFolderPicker.launch(null) }
+            .onFailure { voiceFeedbackMsg = "File picker unavailable on this headunit — use Scan Local instead" }
     }
 
     val audioPermission = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
@@ -475,6 +502,67 @@ fun LibraryScreen(
                 }
             }
 
+            // Single-Track Download Progress / Completion / Error Banner
+            val dlFeedback = downloadFeedback
+            if (dlFeedback != null && bp == null) {
+                Surface(
+                    color = if (dlFeedback.isError) Color(0xFF7F1D1D) else accent.copy(alpha = 0.16f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                if (dlFeedback.progressPercent != null) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(13.dp),
+                                        color = accent,
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = if (dlFeedback.isError) Icons.Default.Warning else Icons.Default.CheckCircle,
+                                        contentDescription = null,
+                                        tint = if (dlFeedback.isError) Color(0xFFFCA5A5) else accent,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+                                Text(
+                                    text = dlFeedback.message,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (dlFeedback.isError) Color.White else accent,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            IconButton(
+                                onClick = { viewModel.clearDownloadFeedback() },
+                                modifier = Modifier.size(26.dp)
+                            ) {
+                                Icon(imageVector = Icons.Default.Close, contentDescription = "Dismiss", tint = Color.White, modifier = Modifier.size(15.dp))
+                            }
+                        }
+                        val pct = dlFeedback.progressPercent
+                        if (pct != null) {
+                            LinearProgressIndicator(
+                                progress = { (pct / 100f).coerceIn(0f, 1f) },
+                                color = accent,
+                                trackColor = Color(0xFF1E293B),
+                                modifier = Modifier.fillMaxWidth().height(2.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
             // Playlist / Queue / Voice / Local Scan Feedback Banner
             val syncMsg = playlistSyncMessage ?: voiceFeedbackMsg
             if (!syncMsg.isNullOrBlank()) {
@@ -600,6 +688,35 @@ fun LibraryScreen(
                 )
             }
 
+            // Automotive Smart Mixes Deck (Cruising Mix + Reshuffle + Genre-Sorted Flow)
+            if (allSongs.isNotEmpty()) {
+                SmartMixesDeck(
+                    totalTracks = allSongs.size,
+                    deepCutsCount = deepCutsCount,
+                    favoritesCount = favoriteSongs.size,
+                    recentCount = recentSongs.size,
+                    mostPlayedCount = mostPlayedSongs.size,
+                    genreSummary = mixGenreSummary,
+                    activeSmartMix = activeSmartMix,
+                    cruisingOptionsOpen = cruisingOptionsOpen,
+                    cruisingSortByGenre = cruisingSortByGenre,
+                    cruisingReshuffleCount = cruisingReshuffleCount,
+                    accent = accent,
+                    surfaceColor = surfaceColor,
+                    borderColor = borderCol,
+                    onToggleCruisingOptions = { cruisingOptionsOpen = !cruisingOptionsOpen },
+                    onToggleSortByGenre = { viewModel.setCruisingSortByGenre(!cruisingSortByGenre) },
+                    onPlaySmartMix = { mixType, reshuffle, fullLib ->
+                        viewModel.playSmartMix(
+                            mixType = mixType,
+                            reshuffle = reshuffle,
+                            sortByGenre = cruisingSortByGenre,
+                            fullLibrary = fullLib
+                        )
+                    }
+                )
+            }
+
             // MBUX Low-Profile Navigation Tabs + Smart Shelves
             ScrollableTabRow(
                 selectedTabIndex = selectedTab.ordinal,
@@ -689,6 +806,7 @@ fun LibraryScreen(
                                             song = song,
                                             isCurrent = isCurrent,
                                             isPlaying = isCurrent && playbackState.isPlaying,
+                                            downloadProgressPercent = activeDownloads[song.id],
                                             onToggleFavorite = { viewModel.toggleFavorite(song) },
                                             onDownload = { viewModel.downloadSong(song) },
                                             onAddToPlaylist = { songToAddPlaylist = song },
@@ -704,7 +822,7 @@ fun LibraryScreen(
                                 onScan = { viewModel.startScan() },
                                 onAddSpecificFolder = { viewModel.openRemoteFolderPicker("") },
                                 onScanLocal = triggerLocalScan,
-                                onPickUsbFolder = { usbFolderPicker.launch(null) }
+                                onPickUsbFolder = launchUsbFolderPicker
                             )
                         } else {
                             Row(modifier = Modifier.fillMaxSize()) {
@@ -725,6 +843,7 @@ fun LibraryScreen(
                                                 song = song,
                                                 isCurrent = isCurrent,
                                                 isPlaying = isCurrent && playbackState.isPlaying,
+                                                downloadProgressPercent = activeDownloads[song.id],
                                                 onToggleFavorite = { viewModel.toggleFavorite(song) },
                                                 onDownload = { viewModel.downloadSong(song) },
                                                 onAddToPlaylist = { songToAddPlaylist = song },
@@ -765,7 +884,7 @@ fun LibraryScreen(
                             EmptyLibraryView(
                                 onScan = { viewModel.startScan() },
                                 onScanLocal = triggerLocalScan,
-                                onPickUsbFolder = { usbFolderPicker.launch(null) }
+                                onPickUsbFolder = launchUsbFolderPicker
                             )
                         } else {
                             Row(modifier = Modifier.fillMaxSize()) {
@@ -808,7 +927,7 @@ fun LibraryScreen(
                             EmptyLibraryView(
                                 onScan = { viewModel.startScan() },
                                 onScanLocal = triggerLocalScan,
-                                onPickUsbFolder = { usbFolderPicker.launch(null) }
+                                onPickUsbFolder = launchUsbFolderPicker
                             )
                         } else {
                             Row(modifier = Modifier.fillMaxSize()) {
@@ -900,7 +1019,7 @@ fun LibraryScreen(
                                     Text("Diagnostics", fontSize = 10.sp, color = Color.White, maxLines = 1)
                                 }
                                 OutlinedButton(
-                                    onClick = { usbFolderPicker.launch(null) },
+                                    onClick = launchUsbFolderPicker,
                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                                     modifier = Modifier.height(32.dp)
                                 ) {
@@ -980,6 +1099,7 @@ fun LibraryScreen(
                                             song = song,
                                             isCurrent = isCurrent,
                                             isPlaying = isCurrent && playbackState.isPlaying,
+                                            downloadProgressPercent = activeDownloads[song.id],
                                             onToggleFavorite = { viewModel.toggleFavorite(song) },
                                             onDownload = { viewModel.downloadSong(song) },
                                             onAddToPlaylist = { songToAddPlaylist = song },
@@ -1085,6 +1205,7 @@ fun LibraryScreen(
                                                 song = song,
                                                 isCurrent = isCurrent,
                                                 isPlaying = isCurrent && playbackState.isPlaying,
+                                                downloadProgressPercent = activeDownloads[song.id],
                                                 onToggleFavorite = { viewModel.toggleFavorite(song) },
                                                 onDownload = { viewModel.downloadSong(song) },
                                                 onRemoveFromPlaylist = { viewModel.removeSongFromPlaylist(currentPl.id, song.id) },
@@ -1143,6 +1264,7 @@ fun LibraryScreen(
                                         song = song,
                                         isCurrent = isCurrent,
                                         isPlaying = isCurrent && playbackState.isPlaying,
+                                        downloadProgressPercent = activeDownloads[song.id],
                                         onToggleFavorite = { viewModel.toggleFavorite(song) },
                                         onDownload = { viewModel.downloadSong(song) },
                                         onAddToPlaylist = { songToAddPlaylist = song },
@@ -1178,6 +1300,7 @@ fun LibraryScreen(
                                         isCurrent = isCurrent,
                                         isPlaying = isCurrent && playbackState.isPlaying,
                                         badgeLabel = "${song.playCount}x",
+                                        downloadProgressPercent = activeDownloads[song.id],
                                         onToggleFavorite = { viewModel.toggleFavorite(song) },
                                         onDownload = { viewModel.downloadSong(song) },
                                         onAddToPlaylist = { songToAddPlaylist = song },
@@ -1213,6 +1336,7 @@ fun LibraryScreen(
                                         isCurrent = isCurrent,
                                         isPlaying = isCurrent && playbackState.isPlaying,
                                         badgeLabel = "Resume @ ${formatDuration(song.lastPositionMs)}",
+                                        downloadProgressPercent = activeDownloads[song.id],
                                         onToggleFavorite = { viewModel.toggleFavorite(song) },
                                         onDownload = { viewModel.downloadSong(song) },
                                         onAddToPlaylist = { songToAddPlaylist = song },
@@ -1273,6 +1397,7 @@ fun LibraryScreen(
                                             song = song,
                                             isCurrent = isCurrent,
                                             isPlaying = isCurrent && playbackState.isPlaying,
+                                            downloadProgressPercent = activeDownloads[song.id],
                                             onToggleFavorite = { viewModel.toggleFavorite(song) },
                                             onDownload = { viewModel.downloadSong(song) },
                                             onAddToPlaylist = { songToAddPlaylist = song },
@@ -1308,6 +1433,7 @@ fun LibraryScreen(
                                         song = song,
                                         isCurrent = isCurrent,
                                         isPlaying = isCurrent && playbackState.isPlaying,
+                                        downloadProgressPercent = activeDownloads[song.id],
                                         onToggleFavorite = { viewModel.toggleFavorite(song) },
                                         onDownload = { viewModel.downloadSong(song) },
                                         onAddToPlaylist = { songToAddPlaylist = song },
@@ -1459,7 +1585,7 @@ fun LibraryScreen(
             onRemoveExtraFolder = { path -> viewModel.removeExtraRemoteFolder(path) },
             onPickLocalFolder = {
                 viewModel.dismissRemoteFolderPicker()
-                usbFolderPicker.launch(null)
+                launchUsbFolderPicker()
             },
             onDismiss = { viewModel.dismissRemoteFolderPicker() }
         )
@@ -1589,7 +1715,7 @@ private fun CockpitNowPlayingPane(
                     CrossfadeAlbumArt(
                         artworkPath = song.artworkPath,
                         contentDescription = song.album,
-                        durationMillis = 300,
+                        durationMillis = 350,
                         modifier = Modifier.fillMaxSize()
                     ) {
                         Icon(imageVector = Icons.Default.MusicNote, contentDescription = null, tint = accent, modifier = Modifier.size(52.dp))
@@ -2024,6 +2150,7 @@ private fun SongListItem(
     isCurrent: Boolean,
     isPlaying: Boolean,
     badgeLabel: String? = null,
+    downloadProgressPercent: Int? = null,
     onToggleFavorite: () -> Unit = {},
     onDownload: () -> Unit = {},
     onAddToPlaylist: (() -> Unit)? = null,
@@ -2180,14 +2307,33 @@ private fun SongListItem(
                 if (song.sourceType != "LOCAL") {
                     IconButton(
                         onClick = onDownload,
+                        enabled = downloadProgressPercent == null,
                         modifier = Modifier.size(34.dp)
                     ) {
-                        Icon(
-                            imageVector = if (song.isDownloaded) Icons.Default.CheckCircle else Icons.Default.Download,
-                            contentDescription = "Download Offline",
-                            tint = if (song.isDownloaded) accent else Color(0xFF64748B),
-                            modifier = Modifier.size(17.dp)
-                        )
+                        if (downloadProgressPercent != null) {
+                            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(22.dp)) {
+                                CircularProgressIndicator(
+                                    progress = { (downloadProgressPercent / 100f).coerceIn(0.05f, 1f) },
+                                    color = accent,
+                                    trackColor = Color(0xFF1E293B),
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Text(
+                                    text = "$downloadProgressPercent",
+                                    fontSize = 6.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = accent
+                                )
+                            }
+                        } else {
+                            Icon(
+                                imageVector = if (song.isDownloaded) Icons.Default.CheckCircle else Icons.Default.Download,
+                                contentDescription = "Download Offline",
+                                tint = if (song.isDownloaded) accent else Color(0xFF64748B),
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
                     }
                 }
 
@@ -2801,6 +2947,418 @@ private fun AddSpecificFolderDialog(
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("+ Local / USB", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SmartMixesDeck(
+    totalTracks: Int,
+    deepCutsCount: Int,
+    favoritesCount: Int,
+    recentCount: Int,
+    mostPlayedCount: Int,
+    genreSummary: MixGenreSummary,
+    activeSmartMix: SmartMixType?,
+    cruisingOptionsOpen: Boolean,
+    cruisingSortByGenre: Boolean,
+    cruisingReshuffleCount: Int,
+    accent: Color,
+    surfaceColor: Color,
+    borderColor: Color,
+    onToggleCruisingOptions: () -> Unit,
+    onToggleSortByGenre: () -> Unit,
+    onPlaySmartMix: (SmartMixType, Boolean, Boolean) -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = surfaceColor,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 2.dp)
+            .border(0.8.dp, borderColor, RoundedCornerShape(12.dp))
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp)
+        ) {
+            // Header + 1-Tap Quick Reshuffle Cruising button
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        tint = accent,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = "SMART MIXES",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Black,
+                        letterSpacing = 1.2.sp,
+                        color = Color(0xFFCBD5E1)
+                    )
+                    Text(
+                        text = "$totalTracks tracks · ${genreSummary.genreCount} ${if (genreSummary.genreCount == 1) "genre" else "genres"}",
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = Color(0xFF64748B),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFF0F172A),
+                    modifier = Modifier
+                        .border(0.6.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+                        .clickable { onPlaySmartMix(SmartMixType.CRUISING, true, true) }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Quick Reshuffle Cruising",
+                            tint = accent,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Text(
+                            text = "Quick Reshuffle",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                }
+            }
+
+            // 5 Horizontal Smart Mix Tiles
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                SmartMixTile(
+                    title = "Cruising Mix",
+                    subtitle = if (cruisingSortByGenre) "Genre-sorted · Reshuffle" else "Full library shuffle",
+                    count = totalTracks,
+                    icon = Icons.Default.AutoAwesome,
+                    iconTint = accent,
+                    isActive = cruisingOptionsOpen || activeSmartMix == SmartMixType.CRUISING,
+                    isMuted = false,
+                    accent = accent,
+                    showExpandChevron = true,
+                    isExpanded = cruisingOptionsOpen,
+                    onClick = onToggleCruisingOptions
+                )
+                SmartMixTile(
+                    title = "Deep Cuts",
+                    subtitle = "Unheard & low-play gems",
+                    count = deepCutsCount,
+                    icon = Icons.Default.Explore,
+                    iconTint = accent,
+                    isActive = activeSmartMix == SmartMixType.DEEP_CUTS,
+                    isMuted = false,
+                    accent = accent,
+                    onClick = { onPlaySmartMix(SmartMixType.DEEP_CUTS, true, false) }
+                )
+                SmartMixTile(
+                    title = "Favorites Radio",
+                    subtitle = if (favoritesCount > 0) "Starred · shuffled" else "Heart songs first",
+                    count = favoritesCount,
+                    icon = Icons.Default.Favorite,
+                    iconTint = Color(0xFFFB7185),
+                    isActive = activeSmartMix == SmartMixType.FAVORITES_RADIO,
+                    isMuted = favoritesCount == 0,
+                    accent = accent,
+                    onClick = { onPlaySmartMix(SmartMixType.FAVORITES_RADIO, true, false) }
+                )
+                SmartMixTile(
+                    title = "Recently Played",
+                    subtitle = if (recentCount > 0) "Latest cabin history" else "Start listening first",
+                    count = recentCount,
+                    icon = Icons.Default.History,
+                    iconTint = accent,
+                    isActive = activeSmartMix == SmartMixType.RECENT,
+                    isMuted = recentCount == 0,
+                    accent = accent,
+                    onClick = { onPlaySmartMix(SmartMixType.RECENT, false, false) }
+                )
+                SmartMixTile(
+                    title = "Most Played",
+                    subtitle = if (mostPlayedCount > 0) "Top cockpit rotation" else "No plays yet",
+                    count = mostPlayedCount,
+                    icon = Icons.Default.Equalizer,
+                    iconTint = accent,
+                    isActive = activeSmartMix == SmartMixType.MOST_PLAYED,
+                    isMuted = mostPlayedCount == 0,
+                    accent = accent,
+                    onClick = { onPlaySmartMix(SmartMixType.MOST_PLAYED, false, false) }
+                )
+            }
+
+            // Expanded Cruising Mix Controls: Play, Reshuffle Whole Mix, Keep Sorted by Genre & Genre Flow
+            if (cruisingOptionsOpen) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0xFF070B15),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(0.7.dp, Color(0xFF1E293B), RoundedCornerShape(10.dp))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(
+                                onClick = { onPlaySmartMix(SmartMixType.CRUISING, false, true) },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = accent,
+                                    contentColor = Color.Black
+                                ),
+                                shape = RoundedCornerShape(9.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                                modifier = Modifier.height(34.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PlayArrow,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Play Cruising Mix", fontSize = 11.sp, fontWeight = FontWeight.Black)
+                            }
+
+                            OutlinedButton(
+                                onClick = { onPlaySmartMix(SmartMixType.CRUISING, true, true) },
+                                shape = RoundedCornerShape(9.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                                modifier = Modifier.height(34.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    tint = accent,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                val reshuffleLabel = if (cruisingReshuffleCount > 0) {
+                                    "Reshuffle Whole Mix #$cruisingReshuffleCount"
+                                } else {
+                                    "Reshuffle Whole Mix"
+                                }
+                                Text(reshuffleLabel, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                            }
+
+                            // Keep Sorted by Genre Toggle Chip
+                            Surface(
+                                shape = RoundedCornerShape(9.dp),
+                                color = if (cruisingSortByGenre) Color(0xFF0F172A) else Color(0xFF020617),
+                                modifier = Modifier
+                                    .height(34.dp)
+                                    .border(
+                                        1.dp,
+                                        if (cruisingSortByGenre) accent else Color(0xFF334155),
+                                        RoundedCornerShape(9.dp)
+                                    )
+                                    .clickable { onToggleSortByGenre() }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(14.dp)
+                                            .clip(RoundedCornerShape(3.dp))
+                                            .background(if (cruisingSortByGenre) accent else Color.Transparent)
+                                            .border(
+                                                1.dp,
+                                                if (cruisingSortByGenre) accent else Color(0xFF64748B),
+                                                RoundedCornerShape(3.dp)
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (cruisingSortByGenre) {
+                                            Icon(
+                                                imageVector = Icons.Default.Check,
+                                                contentDescription = null,
+                                                tint = Color.Black,
+                                                modifier = Modifier.size(11.dp)
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        text = "Keep Sorted by Genre",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (cruisingSortByGenre) Color.White else Color(0xFF94A3B8)
+                                    )
+                                }
+                            }
+                        }
+
+                        // Genre Flow (A–Z) Preview Strip
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Text(
+                                text = if (cruisingSortByGenre) "GENRE FLOW (A–Z):" else "SHUFFLE MODE:",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = 0.8.sp,
+                                color = Color(0xFF64748B)
+                            )
+                            if (cruisingSortByGenre) {
+                                genreSummary.genres.take(8).forEachIndexed { idx, entry ->
+                                    if (idx > 0) {
+                                        Text("→", fontSize = 10.sp, color = Color(0xFF475569))
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = Color(0xFF0F172A),
+                                        modifier = Modifier.border(0.5.dp, Color(0xFF1E293B), RoundedCornerShape(6.dp))
+                                    ) {
+                                        Text(
+                                            text = "${entry.genre} (${entry.count})",
+                                            fontSize = 10.sp,
+                                            color = Color(0xFFE2E8F0),
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                                if (genreSummary.genres.size > 8) {
+                                    Text(
+                                        text = "+${genreSummary.genres.size - 8} more",
+                                        fontSize = 9.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = Color(0xFF64748B)
+                                    )
+                                }
+                            } else {
+                                Text(
+                                    text = "Full random across all $totalTracks tracks (artist-declustered)",
+                                    fontSize = 10.sp,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SmartMixTile(
+    title: String,
+    subtitle: String,
+    count: Int,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    iconTint: Color,
+    isActive: Boolean,
+    isMuted: Boolean,
+    accent: Color,
+    showExpandChevron: Boolean = false,
+    isExpanded: Boolean = false,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = if (isActive) Color(0xFF0F172A) else Color(0xFF070B15),
+        modifier = Modifier
+            .widthIn(min = 138.dp, max = 175.dp)
+            .border(
+                width = if (isActive) 1.dp else 0.6.dp,
+                color = if (isActive) accent else Color(0xFF1E293B),
+                shape = RoundedCornerShape(10.dp)
+            )
+            .clickable { onClick() }
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = if (isMuted) iconTint.copy(alpha = 0.5f) else iconTint,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Text(
+                        text = title,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isMuted) Color(0xFF94A3B8) else Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Text(
+                    text = "$count",
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = Color(0xFF94A3B8)
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = subtitle,
+                    fontSize = 9.sp,
+                    color = Color(0xFF94A3B8),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (showExpandChevron) {
+                    Icon(
+                        imageVector = if (isExpanded) Icons.Default.ExpandMore else Icons.Default.ChevronRight,
+                        contentDescription = null,
+                        tint = if (isExpanded) Color.White else Color(0xFF64748B),
+                        modifier = Modifier.size(13.dp)
+                    )
                 }
             }
         }

@@ -6,6 +6,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -526,15 +527,9 @@ fun DspConsoleScreen(
                                             color = Color(0xFF0A0F1E),
                                             modifier = Modifier
                                                 .weight(1f)
+                                                .clip(RoundedCornerShape(8.dp))
                                                 .border(0.5.dp, if (activeOutputRoute == route) accentColor else borderColor, RoundedCornerShape(8.dp))
-                                                .pointerInput(route, dsp.devicePresetMap, allPresets) {
-                                                    detectTapGestures {
-                                                        val idx = allPresets.indexOfFirst { it.id == assignedId }
-                                                        val nextPreset = allPresets[(idx + 1) % allPresets.size]
-                                                        val updatedMap = dsp.devicePresetMap.toMutableMap().apply { put(route.id, nextPreset.id) }
-                                                        viewModel.updateDspSettings(dsp.copy(devicePresetMap = updatedMap))
-                                                    }
-                                                }
+                                                .clickable { viewModel.cycleRoutePreset(route) }
                                         ) {
                                             Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
                                                 Text(route.label, fontSize = 9.sp, color = Color(0xFF94A3B8), fontWeight = FontWeight.Bold)
@@ -588,9 +583,10 @@ fun DspConsoleScreen(
                                     }
                                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                                         if (dsp.surroundMode != SurroundMode.OFF && !dsp.monoFoldDown) {
+                                            val widthLabel = (dsp.stereoWidthPercent + ((dsp.surroundMode.sideWidthTarget - 100f) * (dsp.surroundIntensity / 100f)).roundToInt()).coerceIn(0, 160)
                                             Surface(shape = RoundedCornerShape(6.dp), color = Color(0xFF0A0F1E), modifier = Modifier.border(0.5.dp, borderColor, RoundedCornerShape(6.dp))) {
                                                 Text(
-                                                    text = if (isHwVirtualizerActive) "PCM + HW VIRT" else "PCM 3D MATRIX",
+                                                    text = (if (isHwVirtualizerActive) "PCM + HW VIRT" else "PCM 3D ACTIVE") + " · W $widthLabel%",
                                                     fontSize = 9.sp,
                                                     fontFamily = FontFamily.Monospace,
                                                     color = Color(0xFFCBD5E1),
@@ -613,24 +609,15 @@ fun DspConsoleScreen(
                                             color = if (selected) accentColor.copy(alpha = 0.16f) else Color(0xFF0A0F1E),
                                             modifier = Modifier
                                                 .weight(1f)
+                                                .clip(RoundedCornerShape(10.dp))
                                                 .border(1.dp, if (selected) accentColor else borderColor, RoundedCornerShape(10.dp))
-                                                .pointerInput(mode) {
-                                                    detectTapGestures {
-                                                        viewModel.updateDspSettings(
-                                                            dsp.copy(
-                                                                dspEnabled = true,
-                                                                surroundMode = mode,
-                                                                monoFoldDown = if (mode != SurroundMode.OFF) false else dsp.monoFoldDown
-                                                            )
-                                                        )
-                                                    }
-                                                }
+                                                .clickable { viewModel.selectSurroundMode(mode) }
                                         ) {
                                             Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                                 Text(mode.label, fontSize = 12.sp, fontWeight = FontWeight.Black, color = if (selected) accentColor else Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                                 Text(mode.desc, fontSize = 10.sp, color = Color(0xFF94A3B8), lineHeight = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                                 Text(
-                                                    text = if (mode == SurroundMode.OFF) "0 ms Haas" else "Haas ${mode.haasLeftMs.toInt()}/${mode.haasRightMs.toInt()} ms",
+                                                    text = if (mode == SurroundMode.OFF) "0 ms Haas · 100% W" else "Haas ${mode.haasLeftMs.toInt()}/${mode.haasRightMs.toInt()}ms · ${mode.sideWidthTarget}% W",
                                                     fontSize = 9.sp,
                                                     fontFamily = FontFamily.Monospace,
                                                     color = if (selected) accentColor else Color(0xFF64748B)
@@ -649,18 +636,9 @@ fun DspConsoleScreen(
                                             color = if (selected) accentColor.copy(alpha = 0.16f) else Color(0xFF0A0F1E),
                                             modifier = Modifier
                                                 .weight(1f)
+                                                .clip(RoundedCornerShape(10.dp))
                                                 .border(1.dp, if (selected) accentColor else borderColor, RoundedCornerShape(10.dp))
-                                                .pointerInput(mode) {
-                                                    detectTapGestures {
-                                                        viewModel.updateDspSettings(
-                                                            dsp.copy(
-                                                                dspEnabled = true,
-                                                                surroundMode = mode,
-                                                                monoFoldDown = false
-                                                            )
-                                                        )
-                                                    }
-                                                }
+                                                .clickable { viewModel.selectSurroundMode(mode) }
                                         ) {
                                             Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -1382,10 +1360,15 @@ private fun AdaptiveCabinProfileCard(
                     modifier = Modifier.weight(1f).border(0.5.dp, borderColor, RoundedCornerShape(8.dp))
                 ) {
                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        val displaySpeedKmH = if (config.enabled && evalState.lastEvaluatedAtMs > 0L) {
+                            evalState.smoothedSpeedKmH
+                        } else {
+                            currentSpeedKmH
+                        }
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text("Vehicle GPS Speed", fontSize = 10.sp, color = Color(0xFF94A3B8))
                             Text(
-                                text = if (config.source == AdaptiveCabinSource.MICROPHONE) "Bypassed" else "${currentSpeedKmH.toInt()} km/h",
+                                text = if (config.source == AdaptiveCabinSource.MICROPHONE) "Bypassed" else "${displaySpeedKmH.toInt()} km/h",
                                 fontSize = 11.sp,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Bold,
@@ -1393,7 +1376,7 @@ private fun AdaptiveCabinProfileCard(
                             )
                         }
                         val speedFrac = if (config.enabled && config.source != AdaptiveCabinSource.MICROPHONE) {
-                            (currentSpeedKmH / config.speedHighKmH.coerceAtLeast(120).toFloat()).coerceIn(0f, 1f)
+                            (displaySpeedKmH / config.speedHighKmH.coerceAtLeast(120).toFloat()).coerceIn(0f, 1f)
                         } else 0f
                         LinearProgressIndicator(
                             progress = { speedFrac },
@@ -1402,6 +1385,56 @@ private fun AdaptiveCabinProfileCard(
                             modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp))
                         )
                     }
+                }
+            }
+
+            // Real-Time Noise ↔ DSP Gain Calibration Delta Indicator
+            val calibration = calculateNoiseGainCalibrationDelta(cabinNoiseDb, config, delta)
+            val deltaColor = when (calibration.status) {
+                CalibrationBalanceStatus.BALANCED -> accentColor
+                CalibrationBalanceStatus.UNDER_COMPENSATED -> Color(0xFFF59E0B)
+                CalibrationBalanceStatus.OVER_COMPENSATED -> Color(0xFF38BDF8)
+                else -> Color(0xFF94A3B8)
+            }
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = Color(0xFF0A0F1E),
+                modifier = Modifier.fillMaxWidth().border(0.5.dp, borderColor, RoundedCornerShape(8.dp))
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val deltaSummary = when {
+                        calibration.deltaDb != null -> {
+                            val dSign = if (calibration.deltaDb > 0f) "+" else ""
+                            val nVal = calibration.noiseAboveFloorDb ?: 0f
+                            val nSign = if (nVal > 0f) "+" else ""
+                            "Noise↔DSP Δ $dSign${String.format(Locale.US, "%.1f", calibration.deltaDb)} dB ($nSign${String.format(Locale.US, "%.1f", nVal)} vs +${String.format(Locale.US, "%.1f", calibration.appliedGainDb)} dB)"
+                        }
+                        calibration.status == CalibrationBalanceStatus.SPEED_ONLY ->
+                            "Noise↔DSP Δ · DSP +${String.format(Locale.US, "%.1f", calibration.appliedGainDb)} dB (Speed)"
+                        else -> "Noise↔DSP Δ · —"
+                    }
+                    Text(
+                        text = deltaSummary,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.SemiBold,
+                        color = deltaColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = calibration.hint.uppercase(Locale.US),
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        color = deltaColor
+                    )
                 }
             }
 

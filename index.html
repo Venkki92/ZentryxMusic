@@ -16,8 +16,41 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   </head>
-  <body>
+  <body style="margin:0;background-color:#020617;color:#f1f5f9;">
     <div id="root"></div>
+    <script>
+      (function () {
+        var shown = false;
+        function isIgnorableNoise(msg) {
+          var text = String(msg || '');
+          return /WebSocket|vite|HMR|ResizeObserver|ServiceWorker|dev-sw|AbortError/i.test(text);
+        }
+        function showBootError(msg) {
+          if (shown || isIgnorableNoise(msg)) return;
+          var root = document.getElementById('root');
+          if (root && root.childElementCount > 0) return;
+          shown = true;
+          if (!root) return;
+          root.innerHTML =
+            '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#020617;color:#f1f5f9;font-family:system-ui,sans-serif;">' +
+            '<div style="max-width:440px;width:100%;background:#0b1120;border:1px solid #1e293b;border-radius:16px;padding:24px;">' +
+            '<h1 style="margin:0 0 8px;font-size:18px;font-weight:700;color:#fff;">Zentryx Music Recovery</h1>' +
+            '<p style="margin:0 0 12px;font-size:12px;color:#94a3b8;">The cockpit UI failed to initialize:</p>' +
+            '<pre style="margin:0 0 16px;padding:12px;border-radius:10px;background:#000;border:1px solid rgba(127,29,29,0.5);color:#fca5a5;font-size:11px;white-space:pre-wrap;overflow:auto;">' +
+            String(msg || 'Unknown boot error').replace(/[<>&]/g, function (c) { return ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]); }) +
+            '</pre>' +
+            '<button type="button" onclick="window.location.reload()" style="padding:10px 16px;border-radius:10px;border:none;background:#a3e635;color:#000;font-weight:700;font-size:12px;cursor:pointer;">Reload Player</button>' +
+            '</div></div>';
+        }
+        window.addEventListener('error', function (e) {
+          showBootError(e && (e.message || (e.error && e.error.message)));
+        });
+        window.addEventListener('unhandledrejection', function (e) {
+          var reason = e && e.reason;
+          showBootError(reason && (reason.message || String(reason)));
+        });
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

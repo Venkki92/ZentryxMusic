@@ -3,12 +3,16 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_ADAPTIVE_CABIN_CONFIG,
   INITIAL_ADAPTIVE_STATE,
+  ZERO_ADAPTIVE_DELTA,
   AdaptiveCabinConfig,
   applyAdaptiveCabinOverlay,
   calculateAdaptiveDspDelta,
+  calculateNoiseGainCalibrationDelta,
   estimateCabinNoiseDbFromPcm,
   evaluateAdaptiveCabinState,
   sanitizeAdaptiveCabinConfig,
+  smoothAdaptiveDspDelta,
+  smoothSpeedSample,
 } from './adaptiveCabinProfile';
 import { DEFAULT_DSP_SETTINGS } from './dspConsole';
 
@@ -57,21 +61,18 @@ test('escalates smoothly after dwell time on GPS speed threshold and de-escalate
   assert.equal(s3.activeProfile, 'highway');
   assert.equal(s3.pendingProfile, null);
 
-  // Drop to 20 km/h starts de-escalate dwell, switches after >= 3200ms
-  const s4 = evaluateAdaptiveCabinState(s3, config, {
-    cabinNoiseDb: null,
-    speedKmH: 20,
-    nowMs: 8000,
-  });
-  assert.equal(s4.activeProfile, 'highway');
-  assert.equal(s4.pendingProfile, 'quiet');
-
-  const s5 = evaluateAdaptiveCabinState(s4, config, {
-    cabinNoiseDb: null,
-    speedKmH: 18,
-    nowMs: 11500,
-  });
-  assert.equal(s5.activeProfile, 'quiet');
+  // Sustained slow-down to 20 km/h brings smoothed speed below city threshold and de-escalates after dwell
+  let state = s3;
+  let now = 8000;
+  for (let i = 0; i < 16; i++) {
+    now += 400;
+    state = evaluateAdaptiveCabinState(state, config, {
+      cabinNoiseDb: null,
+      speedKmH: 18,
+      nowMs: now,
+    });
+  }
+  assert.equal(state.activeProfile, 'quiet');
 });
 
 test('hybrid mode picks highest severity between cabin mic dB and GPS speed', () => {
@@ -153,4 +154,93 @@ test('sanitizeAdaptiveCabinConfig enforces monotonic ordered thresholds', () => 
   assert.ok(sanitized.speedHighwayKmH < sanitized.speedHighKmH);
   assert.ok(sanitized.noiseModerateDb < sanitized.noiseLoudDb);
   assert.ok(sanitized.noiseLoudDb < sanitized.noiseExtremeDb);
+});
+
+test('smoothSpeedSample clamps transient GPS spikes and filters acceleration jitter', () => {
+  // Single bogus GPS spike from 40 km/h -> 150 km/h in 250ms must not jump straight to highway/autobahn
+  const afterSpike = smoothSpeedSample(40, 150, 250, false);
+  assert.ok(afterSpike < 45, `expected spike to be heavily attenuated, got ${afterSpike}`);
+
+  // Sustained acceleration from 40 -> 100 km/h over 5 seconds rises monotonically without overshoot
+  let speed = 40;
+  for (let i = 0; i < 25; i++) {
+    const next = smoothSpeedSample(speed, 100, 200, false);
+    assert.ok(next >= speed && next <= 100, `expected monotonic rise, got ${speed} -> ${next}`);
+    speed = next;
+  }
+  assert.ok(speed > 88, `expected speed to converge near 100 km/h after 5s, got ${speed}`);
+});
+
+test('smoothAdaptiveDspDelta rate-limits gain and balance changes without abrupt step jumps', () => {
+  const cfg: AdaptiveCabinConfig = {
+    ...DEFAULT_ADAPTIVE_CABIN_CONFIG,
+    enabled: true,
+    source: 'speed',
+    sensitivity: 'balanced',
+    cabinFocus: 'driver_lhd',
+  };
+  const target = calculateAdaptiveDspDelta('high_noise', cfg); // +4.5 dB, -18 -> -20 bal, +25 fad
+
+  let current = { ...ZERO_ADAPTIVE_DELTA };
+  let prevGain = 0;
+  // Ramp in 200ms ticks and verify each step obeys slew ceiling (<= 1.25 dB/s => <= 0.3 dB/tick)
+  for (let i = 0; i < 40; i++) {
+    current = smoothAdaptiveDspDelta(current, target, 200);
+    const stepDelta = current.gainDb - prevGain;
+    assert.ok(stepDelta >= 0 && stepDelta <= 0.35, `unexpected gain jump ${stepDelta} dB at tick ${i}`);
+    prevGain = current.gainDb;
+  }
+  assert.equal(current.gainDb, target.gainDb);
+  assert.equal(current.balanceDelta, target.balanceDelta);
+  assert.equal(current.faderDelta, target.faderDelta);
+
+  // Ramping back down to quiet applies non-zero decaying overlay cleanly until settled at 0
+  const midRelease = smoothAdaptiveDspDelta(current, ZERO_ADAPTIVE_DELTA, 200);
+  assert.equal(midRelease.profileId, 'quiet');
+  assert.ok(midRelease.gainDb > 0 && midRelease.gainDb < current.gainDb);
+
+  const base = { ...DEFAULT_DSP_SETTINGS, preampDb: 0 };
+  const decayingOverlay = applyAdaptiveCabinOverlay(base, midRelease);
+  assert.equal(decayingOverlay.preampDb, midRelease.gainDb);
+});
+
+test('calculateNoiseGainCalibrationDelta computes accurate noise-vs-DSP calibration deltas', () => {
+  const cfg: AdaptiveCabinConfig = {
+    ...DEFAULT_ADAPTIVE_CABIN_CONFIG,
+    enabled: true,
+    source: 'hybrid',
+    noiseModerateDb: 58,
+  };
+
+  // Quiet floor below threshold
+  const quiet = calculateNoiseGainCalibrationDelta(52.0, cfg, ZERO_ADAPTIVE_DELTA);
+  assert.equal(quiet.noiseAboveFloorDb, -6.0);
+  assert.equal(quiet.deltaDb, -6.0);
+  assert.equal(quiet.status, 'quiet_floor');
+
+  // Balanced cruising (62.5 dB noise -> +4.5 above floor, +1.5 dB gain -> +3.0 dB delta)
+  const cityDelta = calculateAdaptiveDspDelta('city', cfg);
+  const balanced = calculateNoiseGainCalibrationDelta(62.5, cfg, cityDelta);
+  assert.equal(balanced.noiseAboveFloorDb, 4.5);
+  assert.equal(balanced.appliedGainDb, 1.5);
+  assert.equal(balanced.deltaDb, 3.0);
+  assert.equal(balanced.effectiveNoiseDb, 61.0);
+  assert.equal(balanced.status, 'balanced');
+
+  // Under-compensated loud highway (75 dB noise -> +17 above floor, +1.5 dB gain -> +15.5 dB delta)
+  const under = calculateNoiseGainCalibrationDelta(75.0, cfg, cityDelta);
+  assert.equal(under.deltaDb, 15.5);
+  assert.equal(under.status, 'under_compensated');
+
+  // Over-compensated / speed-boosted in quiet cabin (55 dB noise -> -3 above floor, +3.0 dB gain -> -6.0 dB delta)
+  const highwayDelta = calculateAdaptiveDspDelta('highway', cfg);
+  const over = calculateNoiseGainCalibrationDelta(55.0, cfg, highwayDelta);
+  assert.equal(over.deltaDb, -6.0);
+  assert.equal(over.status, 'over_compensated');
+
+  // Speed-only mode returns clean speed_only status without NaN
+  const speedOnly = calculateNoiseGainCalibrationDelta(65.0, { ...cfg, source: 'speed' }, highwayDelta);
+  assert.equal(speedOnly.deltaDb, null);
+  assert.equal(speedOnly.appliedGainDb, 3.0);
+  assert.equal(speedOnly.status, 'speed_only');
 });
