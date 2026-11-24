@@ -54,6 +54,8 @@ import {
   AdaptiveCabinProfileId,
   AdaptiveDspDelta,
 } from '../utils/adaptiveCabinProfile';
+import { StereoSpectrumSnapshot } from '../utils/w203Cockpit';
+import { SurroundMatrixDebuggerPanel } from './SurroundMatrixDebuggerPanel';
 
 interface DspConsolePanelProps {
   accentHex: string;
@@ -76,6 +78,7 @@ interface DspConsolePanelProps {
   adaptiveProfileId?: AdaptiveCabinProfileId;
   adaptiveDspDelta?: AdaptiveDspDelta;
   onToggleAdaptiveCabin?: () => void;
+  getStereoSpectrumSnapshot?: () => StereoSpectrumSnapshot | null;
 }
 
 type DspSubTab = 'eq' | 'surround' | 'stage' | 'rta';
@@ -123,6 +126,7 @@ export const DspConsolePanel: React.FC<DspConsolePanelProps> = ({
   adaptiveProfileId = 'quiet',
   adaptiveDspDelta,
   onToggleAdaptiveCabin,
+  getStereoSpectrumSnapshot,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<DspSubTab>('eq');
   const [newPresetName, setNewPresetName] = useState('');
@@ -1400,6 +1404,21 @@ export const DspConsolePanel: React.FC<DspConsolePanelProps> = ({
               </button>
             </div>
           </div>
+
+          {/* Real-Time Surround Matrix Debugger + 16-Band L/R Frequency Distribution Overlay */}
+          <SurroundMatrixDebuggerPanel
+            accentHex={accentHex}
+            dspSettings={dspSettings}
+            onSelectMode={(modeId) =>
+              onChangeDspSettings((prev) => ({
+                ...prev,
+                dspEnabled: true,
+                surroundMode: modeId,
+                monoFoldDown: modeId !== 'off' ? false : prev.monoFoldDown,
+              }))
+            }
+            getStereoSpectrumSnapshot={getStereoSpectrumSnapshot}
+          />
         </div>
       )}
 

@@ -1,5 +1,31 @@
 @import "tailwindcss";
 
+/* W203 Cluster Night Amber Semantic Theme Tokens */
+:root {
+  --w203-bg: #020617;
+  --w203-surface: #0b1120;
+  --w203-border: rgba(30, 41, 59, 0.85);
+  --w203-amber: #f59e0b;
+}
+
+.w203-amber-night {
+  --w203-bg: #050403;
+  --w203-surface: #0d0a07;
+  --w203-border: rgba(245, 158, 11, 0.28);
+  background-color: var(--w203-bg);
+  color: #fef3c7;
+}
+
+.w203-amber-night header {
+  background-color: rgba(8, 6, 4, 0.92);
+  border-color: rgba(245, 158, 11, 0.24);
+}
+
+.w203-amber-night .w203-surface-card {
+  background-color: #0d0a07;
+  border-color: rgba(245, 158, 11, 0.26);
+}
+
 /* 8-Inch 1024x600 Automotive Headunit Landscape Ergonomics */
 @media (max-height: 640px) and (min-width: 768px) {
   .headunit-header-bar {

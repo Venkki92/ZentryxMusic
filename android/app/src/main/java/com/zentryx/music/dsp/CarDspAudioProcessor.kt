@@ -13,6 +13,7 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
+import kotlin.math.log10
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -51,6 +52,8 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         private const val SCHROEDER_AP2_MS = 11.3f
         private const val HALL_COMB_L_MS = 39.7f
         private const val HALL_COMB_R_MS = 47.3f
+        private const val SPECTRUM_BLOCK_SIZE = 512
+        private const val SPECTRUM_BANDS = 16
     }
 
     @Volatile private var dspEnabled: Boolean = true
@@ -231,6 +234,23 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
 
     private var maxSampleAbs: Double = 32767.0
 
+    // Real-time 16-band L/R Goertzel stereo frequency distribution analyzer (zero-allocation)
+    private val spectrumGoertzelCoeff = DoubleArray(SPECTRUM_BANDS)
+    private val spectrumWindow = FloatArray(SPECTRUM_BLOCK_SIZE) { i ->
+        (0.5 * (1.0 - cos(2.0 * PI * i / (SPECTRUM_BLOCK_SIZE - 1)))).toFloat()
+    }
+    private val spectrumBufL = FloatArray(SPECTRUM_BLOCK_SIZE)
+    private val spectrumBufR = FloatArray(SPECTRUM_BLOCK_SIZE)
+    private var spectrumWritePos = 0
+    private val smoothedBandsL = FloatArray(SPECTRUM_BANDS)
+    private val smoothedBandsR = FloatArray(SPECTRUM_BANDS)
+    @Volatile private var publishedBandsL = FloatArray(SPECTRUM_BANDS)
+    @Volatile private var publishedBandsR = FloatArray(SPECTRUM_BANDS)
+    @Volatile private var publishedMidRms: Float = 0f
+    @Volatile private var publishedSideRms: Float = 0f
+    @Volatile private var publishedStereoSepPct: Float = 0f
+    @Volatile private var lastSpectrumTimestampMs: Long = 0L
+
     fun updateSettings(settings: DspSettings) {
         dspEnabled = settings.dspEnabled
         hpfHz = settings.hpfCutoffHz.hz
@@ -298,6 +318,96 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             outputChecksum = lastOutputChecksum,
             lastProcessedTimestampMs = lastProcessedTimestampMs
         )
+    }
+
+    fun snapshotStereoSpectrum(): StereoSpectrumSnapshot {
+        val now = System.currentTimeMillis()
+        val live = lastSpectrumTimestampMs > 0L && (now - lastSpectrumTimestampMs) <= 2000L
+        return StereoSpectrumSnapshot(
+            leftBands = publishedBandsL.copyOf(),
+            rightBands = publishedBandsR.copyOf(),
+            midRms = publishedMidRms,
+            sideRms = publishedSideRms,
+            stereoSeparationPercent = publishedStereoSepPct,
+            isStreamingLive = live,
+            sampleRateHz = activeSampleRateHz
+        )
+    }
+
+    private fun updateSpectrumCoefficients() {
+        val sr = sampleRateHz.toDouble().coerceAtLeast(8000.0)
+        for (b in 0 until SPECTRUM_BANDS) {
+            val freq = STEREO_SPECTRUM_FREQS_HZ[b].toDouble().coerceAtMost(sr * 0.46)
+            val omega = 2.0 * PI * freq / sr
+            spectrumGoertzelCoeff[b] = 2.0 * cos(omega)
+        }
+    }
+
+    private fun pushSpectrumFrame(normL: Float, normR: Float) {
+        spectrumBufL[spectrumWritePos] = normL
+        spectrumBufR[spectrumWritePos] = normR
+        spectrumWritePos++
+        if (spectrumWritePos >= SPECTRUM_BLOCK_SIZE) {
+            computeSpectrumBlock()
+            spectrumWritePos = 0
+        }
+    }
+
+    private fun computeSpectrumBlock() {
+        var sumMidSq = 0.0
+        var sumSideSq = 0.0
+        for (i in 0 until SPECTRUM_BLOCK_SIZE) {
+            val l = spectrumBufL[i].toDouble()
+            val r = spectrumBufR[i].toDouble()
+            val m = (l + r) * 0.5
+            val s = (l - r) * 0.5
+            sumMidSq += m * m
+            sumSideSq += s * s
+        }
+        val midRms = sqrt(sumMidSq / SPECTRUM_BLOCK_SIZE).toFloat()
+        val sideRms = sqrt(sumSideSq / SPECTRUM_BLOCK_SIZE).toFloat()
+        val denom = midRms + sideRms
+        val sepPct = if (denom > 0.0001f) ((sideRms / denom) * 100f).coerceIn(0f, 100f) else 0f
+
+        val nextL = FloatArray(SPECTRUM_BANDS)
+        val nextR = FloatArray(SPECTRUM_BANDS)
+        val scaleNorm = 2.0 / (SPECTRUM_BLOCK_SIZE * 0.5)
+        for (b in 0 until SPECTRUM_BANDS) {
+            val coeff = spectrumGoertzelCoeff[b]
+            var s1L = 0.0; var s2L = 0.0
+            var s1R = 0.0; var s2R = 0.0
+            for (i in 0 until SPECTRUM_BLOCK_SIZE) {
+                val w = spectrumWindow[i].toDouble()
+                val s0L = spectrumBufL[i].toDouble() * w + coeff * s1L - s2L
+                s2L = s1L; s1L = s0L
+
+                val s0R = spectrumBufR[i].toDouble() * w + coeff * s1R - s2R
+                s2R = s1R; s1R = s0R
+            }
+            val powerL = (s1L * s1L + s2L * s2L - coeff * s1L * s2L).coerceAtLeast(0.0)
+            val powerR = (s1R * s1R + s2R * s2R - coeff * s1R * s2R).coerceAtLeast(0.0)
+            val magL = sqrt(powerL) * scaleNorm
+            val magR = sqrt(powerR) * scaleNorm
+            val dbL = 20.0 * log10(magL + 1e-6)
+            val dbR = 20.0 * log10(magR + 1e-6)
+            val normL = ((dbL + 56.0) / 56.0).toFloat().coerceIn(0f, 1f)
+            val normR = ((dbR + 56.0) / 56.0).toFloat().coerceIn(0f, 1f)
+
+            val prevL = smoothedBandsL[b]
+            val prevR = smoothedBandsR[b]
+            val smL = if (normL >= prevL) prevL + (normL - prevL) * 0.55f else prevL + (normL - prevL) * 0.25f
+            val smR = if (normR >= prevR) prevR + (normR - prevR) * 0.55f else prevR + (normR - prevR) * 0.25f
+            smoothedBandsL[b] = smL
+            smoothedBandsR[b] = smR
+            nextL[b] = smL
+            nextR[b] = smR
+        }
+        publishedBandsL = nextL
+        publishedBandsR = nextR
+        publishedMidRms = midRms
+        publishedSideRms = sideRms
+        publishedStereoSepPct = sepPct
+        lastSpectrumTimestampMs = System.currentTimeMillis()
     }
 
     fun setRoadNoiseSpeedKmH(speedKmH: Float) {
@@ -372,6 +482,7 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             xtcBufferR = FloatArray(xtcSize)
         }
 
+        updateSpectrumCoefficients()
         recalculateCoefficients()
         smoothedWidth = computedEffectiveWidth.toDouble()
         smoothedHeadroomGain = targetHeadroomGain
@@ -704,10 +815,22 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             var sumSq = 0.0
             var hash = 17
             val totalSamples = frameCount * channelCount
-            for (s in 0 until totalSamples) {
-                val sample = probe.getShort().toInt()
-                sumSq += sample.toDouble() * sample.toDouble()
-                hash = hash * 31 + sample
+            if (channelCount == 2) {
+                for (f in 0 until frameCount) {
+                    val sL = probe.getShort().toInt()
+                    val sR = probe.getShort().toInt()
+                    sumSq += sL.toDouble() * sL.toDouble() + sR.toDouble() * sR.toDouble()
+                    hash = (hash * 31 + sL) * 31 + sR
+                    pushSpectrumFrame(sL / 32767f, sR / 32767f)
+                }
+            } else {
+                for (s in 0 until totalSamples) {
+                    val sample = probe.getShort().toInt()
+                    sumSq += sample.toDouble() * sample.toDouble()
+                    hash = hash * 31 + sample
+                    val norm = sample / 32767f
+                    pushSpectrumFrame(norm, norm)
+                }
             }
             val rms = if (totalSamples > 0) (sqrt(sumSq / totalSamples) / 32767.0).toFloat() else 0f
             processedBufferCount++
@@ -1039,6 +1162,7 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
                 sumOutSq += clampedL.toDouble() * clampedL.toDouble() + clampedR.toDouble() * clampedR.toDouble()
                 outChecksum = outChecksum * 31 + clampedL.toInt()
                 outChecksum = outChecksum * 31 + clampedR.toInt()
+                pushSpectrumFrame(clampedL / 32767f, clampedR / 32767f)
                 outBuffer.putShort(clampedL)
                 outBuffer.putShort(clampedR)
             }
@@ -1157,6 +1281,12 @@ class CarDspAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         delayBufferL.fill(0f)
         delayBufferR.fill(0f)
         delayWritePos = 0
+
+        spectrumBufL.fill(0f)
+        spectrumBufR.fill(0f)
+        spectrumWritePos = 0
+        smoothedBandsL.fill(0f)
+        smoothedBandsR.fill(0f)
 
         recalculateCoefficients()
         smoothedWidth = computedEffectiveWidth.toDouble()

@@ -408,6 +408,8 @@ class AndroidDspAudioEngine @Inject constructor(
         )
     }
 
+    fun snapshotStereoSpectrum(): StereoSpectrumSnapshot = carDspAudioProcessor.snapshotStereoSpectrum()
+
     fun selectSurroundMode(mode: SurroundMode) {
         if (isHoldSurroundBypassed) {
             isHoldSurroundBypassed = false

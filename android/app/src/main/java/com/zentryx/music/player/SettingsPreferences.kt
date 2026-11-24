@@ -106,6 +106,17 @@ class SettingsPreferences @Inject constructor(
         private val KEY_ACTIVE_DRIVER_PROFILE_ID = stringPreferencesKey("active_driver_profile_id")
         private val KEY_SWC_CUSTOM_KEYMAP_JSON = stringPreferencesKey("swc_custom_keymap_json")
         private val KEY_CRUISING_SORT_BY_GENRE = booleanPreferencesKey("cruising_sort_by_genre")
+
+        // W203 Auto Day/Night Amber Schedule, Split-Screen Rail & Home Wi-Fi Folder Auto-Cache
+        private val KEY_DAY_START_HOUR = intPreferencesKey("w203_day_start_hour")
+        private val KEY_NIGHT_START_HOUR = intPreferencesKey("w203_night_start_hour")
+        private val KEY_AUTO_AMBER_AT_NIGHT = booleanPreferencesKey("w203_auto_amber_at_night")
+        private val KEY_SWAP_GROUP_MODE = stringPreferencesKey("w203_swap_group_mode")
+        private val KEY_SPLIT_SCREEN_RAIL = booleanPreferencesKey("w203_split_screen_rail")
+        private val KEY_WIFI_AUTO_CACHE_ENABLED = booleanPreferencesKey("wifi_auto_cache_enabled")
+        private val KEY_WIFI_AUTO_CACHE_SSID = stringPreferencesKey("wifi_auto_cache_ssid")
+        private val KEY_WIFI_AUTO_CACHE_MAX_MB = intPreferencesKey("wifi_auto_cache_max_mb")
+        private val KEY_PINNED_CACHE_FOLDERS_JSON = stringPreferencesKey("pinned_cache_folders_json")
     }
 
     val accentColorFlow: Flow<MbuxAccentColor> = context.settingsDataStore.data.map { prefs ->
@@ -197,6 +208,27 @@ class SettingsPreferences @Inject constructor(
     val activeDriverProfileIdFlow: Flow<String> = context.settingsDataStore.data.map { it[KEY_ACTIVE_DRIVER_PROFILE_ID] ?: "driver_venki" }
     val swcCustomKeyMapJsonFlow: Flow<String?> = context.settingsDataStore.data.map { it[KEY_SWC_CUSTOM_KEYMAP_JSON] }
     val cruisingSortByGenreFlow: Flow<Boolean> = context.settingsDataStore.data.map { it[KEY_CRUISING_SORT_BY_GENRE] ?: true }
+
+    val dayStartHourFlow: Flow<Int> = context.settingsDataStore.data.map { (it[KEY_DAY_START_HOUR] ?: 7).coerceIn(0, 23) }
+    val nightStartHourFlow: Flow<Int> = context.settingsDataStore.data.map { (it[KEY_NIGHT_START_HOUR] ?: 19).coerceIn(0, 23) }
+    val autoAmberAtNightFlow: Flow<Boolean> = context.settingsDataStore.data.map { it[KEY_AUTO_AMBER_AT_NIGHT] ?: true }
+    val swapGroupModeFlow: Flow<SwapGroupMode> = context.settingsDataStore.data.map { SwapGroupMode.fromId(it[KEY_SWAP_GROUP_MODE]) }
+    val splitScreenRailFlow: Flow<Boolean> = context.settingsDataStore.data.map { it[KEY_SPLIT_SCREEN_RAIL] ?: true }
+    val wifiAutoCacheEnabledFlow: Flow<Boolean> = context.settingsDataStore.data.map { it[KEY_WIFI_AUTO_CACHE_ENABLED] ?: true }
+    val wifiAutoCacheSsidFlow: Flow<String> = context.settingsDataStore.data.map { it[KEY_WIFI_AUTO_CACHE_SSID] ?: "" }
+    val wifiAutoCacheMaxMbFlow: Flow<Int> = context.settingsDataStore.data.map { (it[KEY_WIFI_AUTO_CACHE_MAX_MB] ?: 4096).coerceIn(0, 65536) }
+    val pinnedCacheFoldersFlow: Flow<Set<String>> = context.settingsDataStore.data.map { prefs ->
+        val raw = prefs[KEY_PINNED_CACHE_FOLDERS_JSON] ?: return@map emptySet()
+        runCatching {
+            val arr = JSONArray(raw)
+            buildSet {
+                for (i in 0 until arr.length()) {
+                    val v = arr.optString(i).trim().trim('/')
+                    if (v.isNotEmpty()) add(v)
+                }
+            }
+        }.getOrDefault(emptySet())
+    }
 
     suspend fun setAccentColor(accent: MbuxAccentColor) = context.settingsDataStore.edit { it[KEY_ACCENT_COLOR] = accent.name }
     suspend fun setDuckingEnabled(enabled: Boolean) = context.settingsDataStore.edit { it[KEY_DUCKING_ENABLED] = enabled }
@@ -329,6 +361,38 @@ class SettingsPreferences @Inject constructor(
     suspend fun setActiveDriverProfileId(id: String) = context.settingsDataStore.edit { it[KEY_ACTIVE_DRIVER_PROFILE_ID] = id }
     suspend fun saveSwcCustomKeyMapJson(json: String) = context.settingsDataStore.edit { it[KEY_SWC_CUSTOM_KEYMAP_JSON] = json }
     suspend fun setCruisingSortByGenre(enabled: Boolean) = context.settingsDataStore.edit { it[KEY_CRUISING_SORT_BY_GENRE] = enabled }
+
+    suspend fun setDayStartHour(hour: Int) = context.settingsDataStore.edit { it[KEY_DAY_START_HOUR] = hour.coerceIn(0, 23) }
+    suspend fun setNightStartHour(hour: Int) = context.settingsDataStore.edit { it[KEY_NIGHT_START_HOUR] = hour.coerceIn(0, 23) }
+    suspend fun setAutoAmberAtNight(enabled: Boolean) = context.settingsDataStore.edit { it[KEY_AUTO_AMBER_AT_NIGHT] = enabled }
+    suspend fun setSwapGroupMode(mode: SwapGroupMode) = context.settingsDataStore.edit { it[KEY_SWAP_GROUP_MODE] = mode.id }
+    suspend fun setSplitScreenRailEnabled(enabled: Boolean) = context.settingsDataStore.edit { it[KEY_SPLIT_SCREEN_RAIL] = enabled }
+    suspend fun setWifiAutoCacheEnabled(enabled: Boolean) = context.settingsDataStore.edit { it[KEY_WIFI_AUTO_CACHE_ENABLED] = enabled }
+    suspend fun setWifiAutoCacheSsid(ssid: String) = context.settingsDataStore.edit { it[KEY_WIFI_AUTO_CACHE_SSID] = ssid.trim() }
+    suspend fun setWifiAutoCacheMaxMb(maxMb: Int) = context.settingsDataStore.edit { it[KEY_WIFI_AUTO_CACHE_MAX_MB] = maxMb.coerceIn(0, 65536) }
+    suspend fun togglePinnedCacheFolder(folderKey: String) = context.settingsDataStore.edit { prefs ->
+        val clean = folderKey.trim().trim('/')
+        if (clean.isEmpty()) return@edit
+        val current = linkedSetOf<String>()
+        prefs[KEY_PINNED_CACHE_FOLDERS_JSON]?.let { raw ->
+            runCatching {
+                val arr = JSONArray(raw)
+                for (i in 0 until arr.length()) {
+                    val v = arr.optString(i).trim().trim('/')
+                    if (v.isNotEmpty()) current.add(v)
+                }
+            }
+        }
+        val existingMatch = current.firstOrNull { it.equals(clean, ignoreCase = true) }
+        if (existingMatch != null) {
+            current.remove(existingMatch)
+        } else {
+            current.add(clean)
+        }
+        val arr = JSONArray()
+        current.forEach { arr.put(it) }
+        prefs[KEY_PINNED_CACHE_FOLDERS_JSON] = arr.toString()
+    }
 
     /**
      * Exports non-secret settings & DSP curve state as a portable JSON backup string.

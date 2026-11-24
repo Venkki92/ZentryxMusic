@@ -715,6 +715,53 @@ data class SurroundDebugSnapshot(
             (snapshotTimestampMs - bitstream.lastProcessedTimestampMs) <= 2000L
 }
 
+val STEREO_SPECTRUM_FREQS_HZ: FloatArray = floatArrayOf(
+    60f, 100f, 160f, 250f, 400f, 630f, 1000f, 1600f,
+    2200f, 3200f, 4500f, 6300f, 7200f, 9500f, 12500f, 16000f
+)
+
+val STEREO_SPECTRUM_LABELS: List<String> = listOf(
+    "60", "100", "160", "250", "400", "630", "1k", "1.6k",
+    "2.2k", "3.2k", "4.5k", "6.3k", "7.2k", "9.5k", "12.5k", "16k"
+)
+
+/**
+ * Real-time post-DSP 16-band Left/Right frequency distribution & Mid/Side stereo spread snapshot
+ * captured inside CarDspAudioProcessor for the Surround Matrix Debugger overlay.
+ */
+data class StereoSpectrumSnapshot(
+    val leftBands: FloatArray = FloatArray(STEREO_SPECTRUM_FREQS_HZ.size),
+    val rightBands: FloatArray = FloatArray(STEREO_SPECTRUM_FREQS_HZ.size),
+    val midRms: Float = 0f,
+    val sideRms: Float = 0f,
+    val stereoSeparationPercent: Float = 0f,
+    val isStreamingLive: Boolean = false,
+    val sampleRateHz: Int = 48000
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is StereoSpectrumSnapshot) return false
+        return leftBands.contentEquals(other.leftBands) &&
+            rightBands.contentEquals(other.rightBands) &&
+            midRms == other.midRms &&
+            sideRms == other.sideRms &&
+            stereoSeparationPercent == other.stereoSeparationPercent &&
+            isStreamingLive == other.isStreamingLive &&
+            sampleRateHz == other.sampleRateHz
+    }
+
+    override fun hashCode(): Int {
+        var result = leftBands.contentHashCode()
+        result = 31 * result + rightBands.contentHashCode()
+        result = 31 * result + midRms.hashCode()
+        result = 31 * result + sideRms.hashCode()
+        result = 31 * result + stereoSeparationPercent.hashCode()
+        result = 31 * result + isStreamingLive.hashCode()
+        result = 31 * result + sampleRateHz
+        return result
+    }
+}
+
 private fun jsonEscape(value: String): String {
     return value.replace("\\", "\\\\").replace("\"", "\\\"")
 }

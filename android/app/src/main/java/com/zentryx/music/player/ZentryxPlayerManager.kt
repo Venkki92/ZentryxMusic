@@ -743,6 +743,45 @@ class ZentryxPlayerManager @Inject constructor(
     }
 
     /**
+     * Plays a Nextcloud folder or album group immediately from the split-screen rail or Quick-Swap drawer.
+     */
+    fun playSwapGroup(group: SwapMediaGroup): Boolean {
+        val playable = if (isOfflineOnly) {
+            group.songs.filter { isLocallyAvailable(it) }
+        } else {
+            group.songs
+        }
+        if (playable.isEmpty()) {
+            _playbackState.update {
+                it.copy(errorMessage = "No playable tracks in \"${group.displayName}\" (Offline Mode active)")
+            }
+            return false
+        }
+        playSong(playable.first(), playable)
+        return true
+    }
+
+    /**
+     * Jumps cleanly to the previous (-1) or next (+1) Nextcloud folder or album on the go.
+     */
+    suspend fun swapToAdjacentGroup(
+        delta: Int,
+        mode: SwapGroupMode,
+        pinnedFolders: Set<String>
+    ): Pair<SwapMediaGroup, Int>? {
+        val allSongs = musicRepositoryLazy.get().getAllSongs().firstOrNull().orEmpty()
+        val playablePool = if (isOfflineOnly) allSongs.filter { isLocallyAvailable(it) } else allSongs
+        if (playablePool.isEmpty()) return null
+        val groups = when (mode) {
+            SwapGroupMode.FOLDERS -> buildFolderSwapGroups(playablePool, pinnedFolders)
+            SwapGroupMode.ALBUMS -> buildAlbumSwapGroups(playablePool, pinnedFolders)
+        }
+        val nextPair = findAdjacentSwapGroup(groups, _playbackState.value.currentSong, mode, delta) ?: return null
+        playSong(nextPair.first.songs.first(), nextPair.first.songs)
+        return nextPair
+    }
+
+    /**
      * Toggles the Heart / Favorite state of the currently playing track from Steering Wheel / UI.
      */
     fun toggleFavoriteCurrentSong() {

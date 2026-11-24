@@ -18,11 +18,13 @@ fun ZentryxTheme(
     accentColor: MbuxAccentColor = MbuxAccentColor.LIME,
     cockpitThemeMode: CockpitThemeMode = CockpitThemeMode.NIGHT,
     isSolarDaylight: Boolean? = null,
+    useDayModeOverride: Boolean? = null,
+    isW203AmberNightActive: Boolean = false,
     content: @Composable () -> Unit
 ) {
-    val activeAccent = Color(accentColor.hexColor)
+    val activeAccent = if (isW203AmberNightActive) Color(0xFFF59E0B) else Color(accentColor.hexColor)
 
-    val useDayMode = when (cockpitThemeMode) {
+    val useDayMode = useDayModeOverride ?: when (cockpitThemeMode) {
         CockpitThemeMode.DAY -> true
         CockpitThemeMode.NIGHT -> false
         CockpitThemeMode.AUTO -> isSolarDaylight ?: SolarCalculator.isDaylight(null, null)
@@ -46,6 +48,24 @@ fun ZentryxTheme(
         error = StatusError
     )
 
+    val w203AmberNightScheme = darkColorScheme(
+        primary = Color(0xFFF59E0B),
+        onPrimary = Color.Black,
+        primaryContainer = Color(0xFFF59E0B).copy(alpha = 0.24f),
+        onPrimaryContainer = Color(0xFFFEF3C7),
+        secondary = Color(0xFFD97706),
+        onSecondary = Color.Black,
+        background = Color(0xFF06070A),
+        onBackground = Color(0xFFFEF3C7),
+        surface = Color(0xFF101218),
+        onSurface = Color(0xFFFDE68A),
+        surfaceVariant = Color(0xFF191B24),
+        onSurfaceVariant = Color(0xFFD6B98C),
+        outline = Color(0xFFF59E0B).copy(alpha = 0.36f),
+        outlineVariant = Color(0xFF332615),
+        error = StatusError
+    )
+
     val daylightCockpitScheme = darkColorScheme(
         primary = activeAccent,
         onPrimary = Color.Black,
@@ -64,7 +84,11 @@ fun ZentryxTheme(
         error = StatusError
     )
 
-    val colorScheme = if (useDayMode) daylightCockpitScheme else darkScheme
+    val colorScheme = when {
+        useDayMode -> daylightCockpitScheme
+        isW203AmberNightActive -> w203AmberNightScheme
+        else -> darkScheme
+    }
     val view = LocalView.current
 
     if (!view.isInEditMode) {

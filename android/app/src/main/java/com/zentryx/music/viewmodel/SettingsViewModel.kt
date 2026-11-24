@@ -8,6 +8,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.zentryx.music.di.IoDispatcher
 import com.zentryx.music.download.DownloadManager
+import com.zentryx.music.download.WifiAutoCacheManager
+import com.zentryx.music.download.WifiAutoCacheState
 import com.zentryx.music.dsp.*
 import com.zentryx.music.models.ScanProgress
 import com.zentryx.music.models.ServerConfig
@@ -82,6 +84,7 @@ class SettingsViewModel @Inject constructor(
     private val cabinRtaCalibrator: CabinRtaCalibrator,
     private val speedVolumeController: SpeedVolumeController,
     private val downloadManager: DownloadManager,
+    private val wifiAutoCacheManager: WifiAutoCacheManager,
     private val settingsBackupManager: SettingsBackupManager,
     private val steeringWheelManager: SteeringWheelManager,
     private val usbVolumeMonitor: UsbVolumeMonitor,
@@ -196,6 +199,36 @@ class SettingsViewModel @Inject constructor(
 
     val amberFilterEnabled: StateFlow<Boolean> = settingsPreferences.amberFilterEnabledFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val dayStartHour: StateFlow<Int> = settingsPreferences.dayStartHourFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 7)
+
+    val nightStartHour: StateFlow<Int> = settingsPreferences.nightStartHourFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 19)
+
+    val autoAmberAtNight: StateFlow<Boolean> = settingsPreferences.autoAmberAtNightFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    val wifiAutoCacheEnabled: StateFlow<Boolean> = settingsPreferences.wifiAutoCacheEnabledFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    val wifiAutoCacheSsid: StateFlow<String> = settingsPreferences.wifiAutoCacheSsidFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "")
+
+    val wifiAutoCacheMaxMb: StateFlow<Int> = settingsPreferences.wifiAutoCacheMaxMbFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 4096)
+
+    val pinnedCacheFolders: StateFlow<Set<String>> = settingsPreferences.pinnedCacheFoldersFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+
+    val wifiAutoCacheState: StateFlow<WifiAutoCacheState> = wifiAutoCacheManager.state
+
+    val availableFolderGroups: StateFlow<List<SwapMediaGroup>> = combine(
+        musicRepository.getAllSongs(),
+        pinnedCacheFolders
+    ) { songs, pins ->
+        buildFolderSwapGroups(songs, pins)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val idleScreensaverSeconds: StateFlow<Int> = settingsPreferences.idleScreensaverSecondsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
@@ -513,6 +546,14 @@ class SettingsViewModel @Inject constructor(
     fun setCockpitThemeMode(mode: CockpitThemeMode) = viewModelScope.launch { settingsPreferences.setCockpitThemeMode(mode) }
     fun setNightBrightness(level: Float) = viewModelScope.launch { settingsPreferences.setNightBrightness(level) }
     fun setAmberFilterEnabled(enabled: Boolean) = viewModelScope.launch { settingsPreferences.setAmberFilterEnabled(enabled) }
+    fun setDayStartHour(hour: Int) = viewModelScope.launch { settingsPreferences.setDayStartHour(hour) }
+    fun setNightStartHour(hour: Int) = viewModelScope.launch { settingsPreferences.setNightStartHour(hour) }
+    fun setAutoAmberAtNight(enabled: Boolean) = viewModelScope.launch { settingsPreferences.setAutoAmberAtNight(enabled) }
+    fun setWifiAutoCacheEnabled(enabled: Boolean) = viewModelScope.launch { settingsPreferences.setWifiAutoCacheEnabled(enabled) }
+    fun setWifiAutoCacheSsid(ssid: String) = viewModelScope.launch { settingsPreferences.setWifiAutoCacheSsid(ssid) }
+    fun setWifiAutoCacheMaxMb(maxMb: Int) = viewModelScope.launch { settingsPreferences.setWifiAutoCacheMaxMb(maxMb) }
+    fun togglePinnedCacheFolder(folderKey: String) = viewModelScope.launch { settingsPreferences.togglePinnedCacheFolder(folderKey) }
+    fun syncPinnedFoldersNow() = wifiAutoCacheManager.syncPinnedFoldersNow(forceEvenWithoutWifi = true)
     fun setIdleScreensaverSeconds(seconds: Int) = viewModelScope.launch { settingsPreferences.setIdleScreensaverSeconds(seconds) }
     fun setDualPaneCockpit(enabled: Boolean) = viewModelScope.launch { settingsPreferences.setDualPaneCockpit(enabled) }
     fun setDriveModeAutoSpeedKmH(kmh: Int) = viewModelScope.launch { settingsPreferences.setDriveModeAutoSpeedKmH(kmh) }
@@ -555,6 +596,8 @@ class SettingsViewModel @Inject constructor(
     fun selectSurroundMode(mode: SurroundMode) = dspAudioEngine.selectSurroundMode(mode)
     fun getSurroundDebugSnapshot(trigger: String = "debugger_live_poll"): SurroundDebugSnapshot =
         dspAudioEngine.getSurroundDebugSnapshot(trigger)
+    fun snapshotStereoSpectrum(): StereoSpectrumSnapshot =
+        dspAudioEngine.snapshotStereoSpectrum()
     fun dumpSurroundDiagnosticsToLogcat(): SurroundMatrixDiagnostics =
         dspAudioEngine.logSurroundMatrixDiagnostics("debugger_manual_dump")
     fun cycleRoutePreset(route: AudioOutputRoute) = dspAudioEngine.cycleRoutePreset(route)

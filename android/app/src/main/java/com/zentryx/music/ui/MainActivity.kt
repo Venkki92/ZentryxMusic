@@ -16,8 +16,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -28,11 +32,14 @@ import com.zentryx.music.navigation.ZentryxNavHost
 import com.zentryx.music.player.CockpitThemeMode
 import com.zentryx.music.player.MbuxAccentColor
 import com.zentryx.music.player.SettingsPreferences
+import com.zentryx.music.player.resolveW203DimmerState
 import com.zentryx.music.security.EncryptedDataStore
 import com.zentryx.music.swc.SteeringWheelManager
 import com.zentryx.music.ui.theme.ZentryxTheme
 import com.zentryx.music.viewmodel.LoginViewModel
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.delay
+import java.util.Calendar
 import javax.inject.Inject
 
 /**
@@ -82,15 +89,50 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val accentColor by settingsPreferences.accentColorFlow.collectAsStateWithLifecycle(initialValue = MbuxAccentColor.LIME)
-            val cockpitThemeMode by settingsPreferences.cockpitThemeModeFlow.collectAsStateWithLifecycle(initialValue = CockpitThemeMode.NIGHT)
+            val cockpitThemeMode by settingsPreferences.cockpitThemeModeFlow.collectAsStateWithLifecycle(initialValue = CockpitThemeMode.AUTO)
             val isSolarDaylight by speedVolumeController.isDaylightBySolar.collectAsStateWithLifecycle()
             val nightBrightness by settingsPreferences.nightBrightnessFlow.collectAsStateWithLifecycle(initialValue = 1.0f)
             val amberFilterEnabled by settingsPreferences.amberFilterEnabledFlow.collectAsStateWithLifecycle(initialValue = false)
+            val dayStartHour by settingsPreferences.dayStartHourFlow.collectAsStateWithLifecycle(initialValue = 7)
+            val nightStartHour by settingsPreferences.nightStartHourFlow.collectAsStateWithLifecycle(initialValue = 19)
+            val autoAmberAtNight by settingsPreferences.autoAmberAtNightFlow.collectAsStateWithLifecycle(initialValue = true)
+
+            var currentHour24 by remember { mutableIntStateOf(Calendar.getInstance().get(Calendar.HOUR_OF_DAY)) }
+            LaunchedEffect(Unit) {
+                while (true) {
+                    currentHour24 = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+                    delay(60_000L)
+                }
+            }
+
+            val dimmerState = remember(
+                cockpitThemeMode,
+                currentHour24,
+                dayStartHour,
+                nightStartHour,
+                isSolarDaylight,
+                autoAmberAtNight,
+                amberFilterEnabled,
+                nightBrightness
+            ) {
+                resolveW203DimmerState(
+                    themeMode = cockpitThemeMode,
+                    hourOfDay = currentHour24,
+                    dayStartHour = dayStartHour,
+                    nightStartHour = nightStartHour,
+                    isSolarDaylight = isSolarDaylight,
+                    autoAmberAtNight = autoAmberAtNight,
+                    manualAmberFilter = amberFilterEnabled,
+                    nightBrightness = nightBrightness
+                )
+            }
 
             ZentryxTheme(
                 accentColor = accentColor,
                 cockpitThemeMode = cockpitThemeMode,
-                isSolarDaylight = isSolarDaylight
+                isSolarDaylight = isSolarDaylight,
+                useDayModeOverride = dimmerState.useDayMode,
+                isW203AmberNightActive = dimmerState.isAmberNightActive
             ) {
                 Box(modifier = Modifier.fillMaxSize()) {
                     Surface(modifier = Modifier.fillMaxSize()) {
@@ -107,24 +149,26 @@ class MainActivity : ComponentActivity() {
                                 modifier = Modifier.fillMaxSize(),
                                 contentAlignment = Alignment.Center
                             ) {
-                                CircularProgressIndicator(color = Color(accentColor.hexColor))
+                                CircularProgressIndicator(
+                                    color = if (dimmerState.isAmberNightActive) Color(0xFFF59E0B) else Color(accentColor.hexColor)
+                                )
                             }
                         } else {
                             ZentryxNavHost(startDestination = startDestination!!)
                         }
                     }
 
-                    // Non-blocking Warm W203 Amber Night Comfort Overlay
-                    if (amberFilterEnabled) {
+                    // Non-blocking Warm W203 Cluster Amber Night Comfort Scrim
+                    if (dimmerState.isAmberNightActive) {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .background(Color(0x1FF59E0B))
+                                .background(Color(0x1CF59E0B))
                         )
                     }
 
-                    // Non-blocking In-App Night Dimmer Overlay
-                    val dimAlpha = (1f - nightBrightness).coerceIn(0f, 0.65f)
+                    // Non-blocking In-App Night Dimmer Scrim (active automatically at night or when dimmed)
+                    val dimAlpha = (1f - dimmerState.effectiveBrightness).coerceIn(0f, 0.65f)
                     if (dimAlpha > 0.01f) {
                         Box(
                             modifier = Modifier

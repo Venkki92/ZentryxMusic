@@ -852,6 +852,7 @@ fun DspConsoleScreen(
                             onToggleDspEnabled = { enabled -> viewModel.updateDspSettings(dsp.copy(dspEnabled = enabled)) },
                             onToggleMonoFoldDown = { mono -> viewModel.updateDspSettings(dsp.copy(monoFoldDown = mono)) },
                             snapshotProvider = { trigger -> viewModel.getSurroundDebugSnapshot(trigger) },
+                            spectrumProvider = { viewModel.snapshotStereoSpectrum() },
                             onDumpToLogcat = { viewModel.dumpSurroundDiagnosticsToLogcat() },
                             initiallyExpanded = true
                         )

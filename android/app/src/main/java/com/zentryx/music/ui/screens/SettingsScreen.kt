@@ -163,6 +163,15 @@ fun SettingsScreen(
     val cockpitThemeMode by viewModel.cockpitThemeMode.collectAsStateWithLifecycle()
     val nightBrightness by viewModel.nightBrightness.collectAsStateWithLifecycle()
     val amberFilterEnabled by viewModel.amberFilterEnabled.collectAsStateWithLifecycle()
+    val dayStartHour by viewModel.dayStartHour.collectAsStateWithLifecycle()
+    val nightStartHour by viewModel.nightStartHour.collectAsStateWithLifecycle()
+    val autoAmberAtNight by viewModel.autoAmberAtNight.collectAsStateWithLifecycle()
+    val wifiAutoCacheEnabled by viewModel.wifiAutoCacheEnabled.collectAsStateWithLifecycle()
+    val wifiAutoCacheSsid by viewModel.wifiAutoCacheSsid.collectAsStateWithLifecycle()
+    val wifiAutoCacheMaxMb by viewModel.wifiAutoCacheMaxMb.collectAsStateWithLifecycle()
+    val wifiAutoCacheState by viewModel.wifiAutoCacheState.collectAsStateWithLifecycle()
+    val availableFolderGroups by viewModel.availableFolderGroups.collectAsStateWithLifecycle()
+    var ssidInputText by remember(wifiAutoCacheSsid) { mutableStateOf(wifiAutoCacheSsid) }
     val idleScreensaverSeconds by viewModel.idleScreensaverSeconds.collectAsStateWithLifecycle()
     val dualPaneCockpit by viewModel.dualPaneCockpit.collectAsStateWithLifecycle()
     val driveModeAutoSpeedKmH by viewModel.driveModeAutoSpeedKmH.collectAsStateWithLifecycle()
@@ -611,7 +620,46 @@ fun SettingsScreen(
                         }
 
                         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Warm W203 Amber Night Filter", fontSize = 12.sp, color = Color.White)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Auto W203 Amber Palette at Night", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                Text("Shifts cockpit to glare-free W203 Cluster Amber (${String.format(Locale.US, "%02d:00", nightStartHour)} → ${String.format(Locale.US, "%02d:00", dayStartHour)})", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                            }
+                            Switch(checked = autoAmberAtNight, onCheckedChange = { viewModel.setAutoAmberAtNight(it) }, colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = accentColor))
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("Day Start Hour", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    listOf(6, 7, 8).forEach { hr ->
+                                        FilterChip(
+                                            selected = dayStartHour == hr,
+                                            onClick = { viewModel.setDayStartHour(hr) },
+                                            label = { Text("${hr}h", fontSize = 9.sp) },
+                                            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = accentColor.copy(alpha = 0.2f), selectedLabelColor = accentColor),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                }
+                            }
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("Night Amber Start", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    listOf(18, 19, 20, 21).forEach { hr ->
+                                        FilterChip(
+                                            selected = nightStartHour == hr,
+                                            onClick = { viewModel.setNightStartHour(hr) },
+                                            label = { Text("${hr}h", fontSize = 9.sp) },
+                                            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Color(0xFFF59E0B).copy(alpha = 0.22f), selectedLabelColor = Color(0xFFF59E0B)),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Force Warm W203 Amber Filter Always", fontSize = 12.sp, color = Color.White)
                             Switch(checked = amberFilterEnabled, onCheckedChange = { viewModel.setAmberFilterEnabled(it) }, colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = accentColor))
                         }
                     }
@@ -791,6 +839,115 @@ fun SettingsScreen(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
+                    }
+                }
+
+                // Card 3A: Home Wi-Fi Nextcloud Auto-Cache Policy & Pinned Folders
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = surfaceColor,
+                    modifier = Modifier.fillMaxWidth().border(1.dp, borderColor, RoundedCornerShape(12.dp))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
+                                Icon(imageVector = Icons.Default.Wifi, contentDescription = null, tint = accentColor, modifier = Modifier.size(18.dp))
+                                Column {
+                                    Text("HOME WI-FI NEXTCLOUD AUTO-CACHE", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black, letterSpacing = 1.sp, color = Color.White))
+                                    Text(
+                                        text = wifiAutoCacheState.lastStatusMessage,
+                                        fontSize = 10.sp,
+                                        color = if (wifiAutoCacheState.isOnEligibleWifi) Color(0xFF4ADE80) else Color(0xFF94A3B8),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            Switch(
+                                checked = wifiAutoCacheEnabled,
+                                onCheckedChange = { viewModel.setWifiAutoCacheEnabled(it) },
+                                colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = accentColor)
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = ssidInputText,
+                                onValueChange = { ssidInputText = it },
+                                label = { Text("Home Wi-Fi SSID (blank = any unmetered Wi-Fi)", fontSize = 10.sp) },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedButton(
+                                onClick = { viewModel.setWifiAutoCacheSsid(ssidInputText.trim()) },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.height(40.dp)
+                            ) {
+                                Text("Save SSID", fontSize = 10.sp, color = accentColor, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("Cache Cap:", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                            listOf(2048 to "2 GB", 4096 to "4 GB", 8192 to "8 GB", 0 to "Unlimited").forEach { (mb, lbl) ->
+                                FilterChip(
+                                    selected = wifiAutoCacheMaxMb == mb,
+                                    onClick = { viewModel.setWifiAutoCacheMaxMb(mb) },
+                                    label = { Text(lbl, fontSize = 9.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(selectedContainerColor = accentColor.copy(alpha = 0.2f), selectedLabelColor = accentColor),
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+
+                        if (availableFolderGroups.isNotEmpty()) {
+                            Text("Pin Nextcloud Folders for Auto-Sync (${wifiAutoCacheState.pinnedFolderCount} pinned):", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                            Row(
+                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                availableFolderGroups.take(24).forEach { folder ->
+                                    FilterChip(
+                                        selected = folder.isPinnedForWifiCache,
+                                        onClick = { viewModel.togglePinnedCacheFolder(folder.key) },
+                                        label = {
+                                            Text(
+                                                text = "${folder.displayName} (${folder.offlineCount}/${folder.trackCount})",
+                                                fontSize = 10.sp,
+                                                maxLines = 1
+                                            )
+                                        },
+                                        colors = FilterChipDefaults.filterChipColors(selectedContainerColor = accentColor.copy(alpha = 0.22f), selectedLabelColor = accentColor)
+                                    )
+                                }
+                            }
+                        }
+
+                        Button(
+                            onClick = { viewModel.syncPinnedFoldersNow() },
+                            enabled = wifiAutoCacheState.pinnedFolderCount > 0 && batchDownloadProgress == null,
+                            colors = ButtonDefaults.buttonColors(containerColor = accentColor, contentColor = Color.Black),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth().height(38.dp)
+                        ) {
+                            Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = batchDownloadProgress?.let { (done, total) -> "Syncing $done / $total tracks…" }
+                                    ?: "Sync Pinned Folders Now (${wifiAutoCacheState.pendingCount} pending)",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Black
+                            )
+                        }
                     }
                 }
 

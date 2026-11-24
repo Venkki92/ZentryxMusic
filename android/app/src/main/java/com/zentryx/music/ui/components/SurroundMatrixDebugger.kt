@@ -1,5 +1,6 @@
 package com.zentryx.music.ui.components
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -19,7 +20,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -57,6 +62,7 @@ fun SurroundMatrixDebugger(
         onToggleDspEnabled = { enabled -> engine.updateSettings(dsp.copy(dspEnabled = enabled)) },
         onToggleMonoFoldDown = { mono -> engine.updateSettings(dsp.copy(monoFoldDown = mono)) },
         snapshotProvider = { trigger -> engine.getSurroundDebugSnapshot(trigger) },
+        spectrumProvider = { engine.snapshotStereoSpectrum() },
         onDumpToLogcat = { engine.logSurroundMatrixDiagnostics("debugger_manual_dump") },
         modifier = modifier,
         initiallyExpanded = initiallyExpanded
@@ -85,12 +91,14 @@ fun SurroundMatrixDebugger(
     snapshotProvider: (trigger: String) -> SurroundDebugSnapshot,
     onDumpToLogcat: () -> Unit,
     modifier: Modifier = Modifier,
-    initiallyExpanded: Boolean = true
+    initiallyExpanded: Boolean = true,
+    spectrumProvider: (() -> StereoSpectrumSnapshot)? = null
 ) {
     val clipboard = LocalClipboardManager.current
     var expanded by remember { mutableStateOf(initiallyExpanded) }
     var lastTrigger by remember { mutableStateOf("debugger_init") }
     var snapshot by remember { mutableStateOf(snapshotProvider("debugger_init")) }
+    var spectrum by remember { mutableStateOf(spectrumProvider?.invoke() ?: StereoSpectrumSnapshot()) }
     var statusToast by remember { mutableStateOf<String?>(null) }
 
     // Refresh immediately whenever DSP settings or trigger change
@@ -113,6 +121,16 @@ fun SurroundMatrixDebugger(
         while (expanded) {
             snapshot = snapshotProvider("live_poll")
             delay(250L)
+        }
+    }
+
+    // Smooth ~110 ms real-time L/R stereo spectrum overlay poll while expanded
+    LaunchedEffect(expanded, spectrumProvider) {
+        if (spectrumProvider != null) {
+            while (expanded) {
+                spectrum = spectrumProvider()
+                delay(110L)
+            }
         }
     }
 
@@ -313,6 +331,16 @@ fun SurroundMatrixDebugger(
                     }
                 }
 
+                // Real-time 16-Band Left vs Right Stereo Frequency Distribution Overlay
+                if (spectrumProvider != null) {
+                    StereoFrequencyDistributionOverlay(
+                        spectrum = spectrum,
+                        surroundMode = diag.mode,
+                        accentColor = accentColor,
+                        borderColor = borderColor
+                    )
+                }
+
                 // Compact live bitstream verification readout tiles
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -436,6 +464,194 @@ fun SurroundMatrixDebugger(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StereoFrequencyDistributionOverlay(
+    spectrum: StereoSpectrumSnapshot,
+    surroundMode: SurroundMode,
+    accentColor: Color,
+    borderColor: Color
+) {
+    val leftColor = Color(0xFF38BDF8)
+    val rightColor = Color(0xFFF59E0B)
+    val sepPct = spectrum.stereoSeparationPercent.coerceIn(0f, 100f)
+
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = Color(0xFF060A14),
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, borderColor, RoundedCornerShape(10.dp))
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "REAL-TIME L / R FREQUENCY DISTRIBUTION",
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Black,
+                        letterSpacing = 0.7.sp,
+                        color = Color(0xFFCBD5E1)
+                    )
+                    Text(
+                        text = "L CH",
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        color = leftColor
+                    )
+                    Text(
+                        text = "R CH",
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        color = rightColor
+                    )
+                }
+                Text(
+                    text = if (spectrum.isStreamingLive) {
+                        "${surroundMode.badge} · SIDE SPREAD ${String.format(Locale.US, "%.0f", sepPct)}%"
+                    } else {
+                        "${surroundMode.badge} · PLAY AUDIO FOR LIVE SPECTRUM"
+                    },
+                    fontSize = 9.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    color = if (spectrum.isStreamingLive && sepPct > 12f) accentColor else Color(0xFF94A3B8),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // 16-band L/R dual-bar real-time frequency overlay canvas
+            Canvas(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(78.dp)
+            ) {
+                val w = size.width
+                val h = size.height
+                val bandCount = STEREO_SPECTRUM_FREQS_HZ.size
+                val slotW = w / bandCount.toFloat()
+
+                // Horizontal reference dB grid lines (-18 dB, -36 dB)
+                val dashEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 4f), 0f)
+                listOf(0.33f, 0.66f).forEach { frac ->
+                    val y = h * frac
+                    drawLine(
+                        color = Color(0xFF1E293B),
+                        start = Offset(0f, y),
+                        end = Offset(w, y),
+                        strokeWidth = 1f,
+                        pathEffect = dashEffect
+                    )
+                }
+
+                // Vertical acoustic cue markers at 2.2 kHz (index 8, Center Lock) and 7.2 kHz (index 12, Atmos Height)
+                listOf(8 to Color(0xFF38BDF8), 12 to Color(0xFFF59E0B)).forEach { (idx, col) ->
+                    val cx = (idx + 0.5f) * slotW
+                    drawLine(
+                        color = col.copy(alpha = 0.28f),
+                        start = Offset(cx, 0f),
+                        end = Offset(cx, h),
+                        strokeWidth = 1.2f,
+                        pathEffect = dashEffect
+                    )
+                }
+
+                // Side-by-side paired L & R bars per band + difference cap highlight
+                for (i in 0 until bandCount) {
+                    val lv = spectrum.leftBands.getOrElse(i) { 0f }.coerceIn(0f, 1f)
+                    val rv = spectrum.rightBands.getOrElse(i) { 0f }.coerceIn(0f, 1f)
+                    val baseX = i * slotW + slotW * 0.12f
+                    val pairW = slotW * 0.76f
+                    val barW = (pairW * 0.46f).coerceAtLeast(2f)
+                    val gap = (pairW * 0.08f).coerceAtLeast(1f)
+
+                    val lh = (lv * (h - 4f)).coerceAtLeast(2f)
+                    val rh = (rv * (h - 4f)).coerceAtLeast(2f)
+
+                    drawRoundRect(
+                        color = leftColor.copy(alpha = 0.78f),
+                        topLeft = Offset(baseX, h - lh),
+                        size = Size(barW, lh),
+                        cornerRadius = CornerRadius(2.5f, 2.5f)
+                    )
+                    drawRoundRect(
+                        color = rightColor.copy(alpha = 0.82f),
+                        topLeft = Offset(baseX + barW + gap, h - rh),
+                        size = Size(barW, rh),
+                        cornerRadius = CornerRadius(2.5f, 2.5f)
+                    )
+                }
+            }
+
+            // Compact frequency axis + stereo L-R spread meter
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                listOf("60Hz", "250Hz", "1k", "2.2k CTR", "4.5k", "7.2k HT", "16k").forEach { lbl ->
+                    Text(
+                        text = lbl,
+                        fontSize = 8.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = if (lbl.contains("CTR")) leftColor.copy(alpha = 0.85f)
+                        else if (lbl.contains("HT")) rightColor.copy(alpha = 0.85f)
+                        else Color(0xFF64748B)
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "STEREO L−R SPREAD",
+                    fontSize = 8.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF94A3B8)
+                )
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(5.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Color(0xFF1E293B))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth((sepPct / 100f).coerceIn(0.02f, 1f))
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(if (sepPct > 28f) accentColor else leftColor)
+                    )
+                }
+                Text(
+                    text = "M ${String.format(Locale.US, "%.2f", spectrum.midRms)} · S ${String.format(Locale.US, "%.2f", spectrum.sideRms)}",
+                    fontSize = 8.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = Color(0xFF94A3B8)
+                )
             }
         }
     }

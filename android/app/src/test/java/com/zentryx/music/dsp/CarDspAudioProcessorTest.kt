@@ -693,4 +693,61 @@ class CarDspAudioProcessorTest {
             hallTail > studioTail * 2L && hallTail > 200_000L
         )
     }
+
+    @Test
+    fun `stereo spectrum analyzer reports active 16-band L R distribution and higher stereo spread under surround DSP`() {
+        val sampleRate = 48000
+        val frames = 4096 // 8 blocks of 512 frames so Goertzel smoothing converges
+
+        fun runCenteredMix(mode: SurroundMode): StereoSpectrumSnapshot {
+            val processor = CarDspAudioProcessor()
+            processor.configure(AudioFormat(sampleRate, 2, C.ENCODING_PCM_16BIT))
+            processor.updateSettings(
+                DspSettings(
+                    dspEnabled = true,
+                    hpfCutoffHz = HpfCutoffHz.OFF,
+                    roadNoiseEqEnabled = false,
+                    surroundMode = mode,
+                    surroundIntensity = 80,
+                    centerCoherence = 60,
+                    virtualHeight = 65,
+                    peakLimiterCeilingDb = -0.5f
+                )
+            )
+            processor.flush()
+            val buf = ByteBuffer.allocateDirect(frames * 4).order(ByteOrder.LITTLE_ENDIAN)
+            for (i in 0 until frames) {
+                val t = i.toDouble() / sampleRate
+                val sig = 0.50 * sin(2.0 * PI * 250.0 * t) +
+                    0.35 * sin(2.0 * PI * 1000.0 * t) +
+                    0.25 * sin(2.0 * PI * 4000.0 * t)
+                val s = (sig * 12000.0).roundToInt().toShort()
+                buf.putShort(s)
+                buf.putShort(s)
+            }
+            buf.flip()
+            processor.queueInput(buf)
+            processor.getOutput()
+            return processor.snapshotStereoSpectrum()
+        }
+
+        val direct = runCenteredMix(SurroundMode.OFF)
+        val logic7 = runCenteredMix(SurroundMode.LOGIC7_SURROUND)
+        val virtual360 = runCenteredMix(SurroundMode.VIRTUAL_SURROUND_360)
+
+        assertEquals(16, direct.leftBands.size)
+        assertEquals(16, direct.rightBands.size)
+        assertTrue("Direct spectrum must detect live audio", direct.isActive)
+        assertTrue("Logic 7 spectrum must detect live audio", logic7.isActive)
+        assertTrue("Direct 1 kHz band must register energy", direct.leftBands[7] > 0.05f)
+        assertTrue(
+            "Logic 7 stereo separation (${logic7.stereoSeparationPercent}%) must exceed dry centered Stereo Direct (${direct.stereoSeparationPercent}%)",
+            logic7.stereoSeparationPercent > direct.stereoSeparationPercent + 5f
+        )
+        assertTrue(
+            "Virtual 360 stereo separation (${virtual360.stereoSeparationPercent}%) must exceed dry centered Stereo Direct (${direct.stereoSeparationPercent}%)",
+            virtual360.stereoSeparationPercent > direct.stereoSeparationPercent + 5f
+        )
+    }
 }
+

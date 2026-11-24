@@ -45,8 +45,11 @@ import {
   Layers,
   MapPin,
   Cpu,
+  Wifi,
+  Pin,
 } from 'lucide-react';
 import { AudioOutputRouteId, DspPreset16, DspSettings, SURROUND_MODES } from '../utils/dspConsole';
+import { StereoSpectrumSnapshot, SwapMediaGroup } from '../utils/w203Cockpit';
 import { DspConsolePanel } from './DspConsolePanel';
 import {
   DriverProfile,
@@ -219,6 +222,29 @@ export interface SettingsPanelProps {
   floatingMiniBarOpen: boolean;
   onToggleFloatingMiniBar: (open: boolean) => void;
   getAudioContext?: () => AudioContext | null;
+  getStereoSpectrumSnapshot?: () => StereoSpectrumSnapshot | null;
+
+  // W203 Auto Day/Night Amber Dimmer Schedule
+  dayStartHour: number;
+  onChangeDayStartHour: (hour: number) => void;
+  nightStartHour: number;
+  onChangeNightStartHour: (hour: number) => void;
+  autoAmberAtNight: boolean;
+  onToggleAutoAmberAtNight: (enabled: boolean) => void;
+  isAmberNightActive: boolean;
+
+  // Home Wi-Fi Nextcloud Auto-Cache Policy
+  wifiAutoCacheEnabled: boolean;
+  onToggleWifiAutoCacheEnabled: (enabled: boolean) => void;
+  wifiAutoCacheSsid: string;
+  onChangeWifiAutoCacheSsid: (ssid: string) => void;
+  wifiAutoCacheMaxMb: number;
+  onChangeWifiAutoCacheMaxMb: (mb: number) => void;
+  availableFolderGroups: SwapMediaGroup[];
+  onTogglePinFolderForWifiCache: (folderKey: string) => void;
+  wifiAutoCacheStatus: string;
+  isWifiAutoCaching: boolean;
+  onSyncPinnedFoldersNow: () => void;
 
   // Offline Roadtrip Budget Planner
   onBuildRoadtripPlan: (hours: number, pool: RoadtripPool) => RoadtripPlanResult<{ id: string }>;
@@ -385,6 +411,27 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   floatingMiniBarOpen,
   onToggleFloatingMiniBar,
   getAudioContext,
+  getStereoSpectrumSnapshot,
+
+  dayStartHour,
+  onChangeDayStartHour,
+  nightStartHour,
+  onChangeNightStartHour,
+  autoAmberAtNight,
+  onToggleAutoAmberAtNight,
+  isAmberNightActive,
+
+  wifiAutoCacheEnabled,
+  onToggleWifiAutoCacheEnabled,
+  wifiAutoCacheSsid,
+  onChangeWifiAutoCacheSsid,
+  wifiAutoCacheMaxMb,
+  onChangeWifiAutoCacheMaxMb,
+  availableFolderGroups,
+  onTogglePinFolderForWifiCache,
+  wifiAutoCacheStatus,
+  isWifiAutoCaching,
+  onSyncPinnedFoldersNow,
 
   onBuildRoadtripPlan,
   onPinRoadtripOffline,
@@ -690,6 +737,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             activeOutputRoute={activeOutputRoute}
             onSelectOutputRoute={onSelectOutputRoute}
             getAudioContext={getAudioContext}
+            getStereoSpectrumSnapshot={getStereoSpectrumSnapshot}
             adaptiveCabinEnabled={adaptiveCabinConfig.enabled}
             adaptiveProfileId={adaptiveCabinState.activeProfile}
             adaptiveDspDelta={adaptiveDspDelta}
@@ -1235,6 +1283,83 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   />
                 </button>
               </div>
+
+              {/* W203 Automatic Day/Night Amber Schedule */}
+              <div className="pt-3 border-t border-slate-800/50 space-y-3">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="space-y-0.5">
+                    <div className="text-sm font-bold text-white flex items-center gap-2 flex-wrap">
+                      <span>Auto W203 Amber Palette at Night</span>
+                      <span className="text-[11px] font-mono text-amber-400">
+                        {isAmberNightActive ? '· Amber Night Active' : '· Standby'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      Automatically shifts accents and night tint to glare-free Mercedes W203 Cluster Amber ({nightStartHour}:00–{dayStartHour}:00).
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label="Toggle Auto W203 Amber Palette at Night"
+                    onClick={() => onToggleAutoAmberAtNight(!autoAmberAtNight)}
+                    className={`w-12 h-6 rounded-full p-1 transition-colors shrink-0 ${
+                      autoAmberAtNight ? 'bg-amber-400' : 'bg-slate-700'
+                    }`}
+                  >
+                    <div
+                      className={`w-4 h-4 rounded-full bg-black transition-transform ${
+                        autoAmberAtNight ? 'translate-x-6' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="p-3 rounded-xl bg-black/40 border border-slate-800/80 space-y-2">
+                    <div className="text-xs font-bold text-slate-300">Day Mode Start Hour</div>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {[6, 7, 8].map((hr) => {
+                        const isSel = dayStartHour === hr;
+                        return (
+                          <button
+                            key={hr}
+                            type="button"
+                            onClick={() => onChangeDayStartHour(hr)}
+                            className={`min-h-[38px] rounded-lg text-xs font-mono font-bold border transition-colors ${
+                              isSel ? 'text-black border-transparent' : 'bg-black/50 border-slate-800 text-slate-300 hover:text-white'
+                            }`}
+                            style={isSel ? { backgroundColor: accentHex } : undefined}
+                          >
+                            {String(hr).padStart(2, '0')}:00
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-black/40 border border-slate-800/80 space-y-2">
+                    <div className="text-xs font-bold text-slate-300">Night Amber Start Hour</div>
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {[18, 19, 20, 21].map((hr) => {
+                        const isSel = nightStartHour === hr;
+                        return (
+                          <button
+                            key={hr}
+                            type="button"
+                            onClick={() => onChangeNightStartHour(hr)}
+                            className={`min-h-[38px] rounded-lg text-xs font-mono font-bold border transition-colors ${
+                              isSel ? 'text-black border-transparent' : 'bg-black/50 border-slate-800 text-slate-300 hover:text-white'
+                            }`}
+                            style={isSel ? { backgroundColor: accentHex } : undefined}
+                          >
+                            {hr}:00
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Driver Safe UI Lock (>= 10 km/h) */}
@@ -1674,6 +1799,133 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       {/* ============================================================== */}
       {activeCategory === 'offline' && (
         <div className="space-y-6 animate-in fade-in duration-150">
+          {/* Home Wi-Fi Nextcloud Auto-Cache Policy */}
+          <div className="bg-[#0b1120] w203-surface-card border border-slate-800/80 rounded-2xl p-5 sm:p-6 shadow-xl space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800/60">
+              <div className="flex items-center gap-3 min-w-0">
+                <div
+                  className="w-10 h-10 rounded-xl flex items-center justify-center border shrink-0"
+                  style={{ backgroundColor: `${accentHex}18`, borderColor: `${accentHex}44` }}
+                >
+                  <Wifi className="w-5 h-5" style={{ color: accentHex }} />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-base font-bold text-white">Home Wi-Fi Nextcloud Auto-Cache</h3>
+                  <p className="text-xs text-slate-400">
+                    Automatically downloads pinned Nextcloud folders on unmetered home Wi-Fi while parked.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                aria-label="Toggle Home Wi-Fi Nextcloud Auto-Cache"
+                onClick={() => onToggleWifiAutoCacheEnabled(!wifiAutoCacheEnabled)}
+                className={`w-12 h-6 rounded-full p-1 transition-colors shrink-0 ${
+                  wifiAutoCacheEnabled ? '' : 'bg-slate-700'
+                }`}
+                style={wifiAutoCacheEnabled ? { backgroundColor: accentHex } : undefined}
+              >
+                <div
+                  className={`w-4 h-4 rounded-full bg-black transition-transform ${
+                    wifiAutoCacheEnabled ? 'translate-x-6' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl bg-black/50 border border-slate-800/80">
+              <span className="text-xs font-mono text-slate-300">{wifiAutoCacheStatus}</span>
+              <button
+                type="button"
+                disabled={isWifiAutoCaching}
+                onClick={onSyncPinnedFoldersNow}
+                className="min-h-[40px] px-4 py-1.5 rounded-xl text-xs font-bold text-black flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50"
+                style={{ backgroundColor: accentHex }}
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isWifiAutoCaching ? 'animate-spin' : ''}`} />
+                <span>{isWifiAutoCaching ? 'Syncing Pinned…' : 'Sync Pinned Folders Now'}</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-300 block">
+                  Optional Home Wi-Fi SSID Filter (Android APK)
+                </label>
+                <input
+                  type="text"
+                  value={wifiAutoCacheSsid}
+                  onChange={(e) => onChangeWifiAutoCacheSsid(e.target.value)}
+                  placeholder="Blank = any unmetered Wi-Fi"
+                  className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-black/60 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-slate-600"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="text-xs font-bold text-slate-300">Auto-Cache Storage Cap</div>
+                <div className="grid grid-cols-4 gap-1.5">
+                  {[
+                    { mb: 2048, label: '2 GB' },
+                    { mb: 4096, label: '4 GB' },
+                    { mb: 8192, label: '8 GB' },
+                    { mb: 0, label: 'No Cap' },
+                  ].map((opt) => {
+                    const isSel = wifiAutoCacheMaxMb === opt.mb;
+                    return (
+                      <button
+                        key={opt.mb}
+                        type="button"
+                        onClick={() => onChangeWifiAutoCacheMaxMb(opt.mb)}
+                        className={`min-h-[42px] rounded-xl text-xs font-mono font-bold border transition-colors whitespace-nowrap ${
+                          isSel
+                            ? 'text-black border-transparent'
+                            : 'bg-black/40 border-slate-800 text-slate-300 hover:text-white'
+                        }`}
+                        style={isSel ? { backgroundColor: accentHex } : undefined}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="text-xs font-bold text-slate-300">
+                Pinned Nextcloud Folders ({availableFolderGroups.filter((g) => g.isPinnedForWifiCache).length} pinned)
+              </div>
+              {availableFolderGroups.length === 0 ? (
+                <p className="text-xs text-slate-500">
+                  Scan your Nextcloud library to pin folders for automatic home Wi-Fi caching.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {availableFolderGroups.map((group) => (
+                    <button
+                      key={group.id}
+                      type="button"
+                      onClick={() => onTogglePinFolderForWifiCache(group.id)}
+                      className={`min-h-[40px] px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                        group.isPinnedForWifiCache
+                          ? 'text-black border-transparent'
+                          : 'bg-black/40 border-slate-800 text-slate-300 hover:text-white hover:border-slate-600'
+                      }`}
+                      style={group.isPinnedForWifiCache ? { backgroundColor: accentHex } : undefined}
+                    >
+                      <Pin className="w-3.5 h-3.5 shrink-0" />
+                      <span>{group.name}</span>
+                      <span className="font-mono text-[10px] opacity-80 tabular-nums">
+                        {group.cachedCount}/{group.tracks.length}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
           {/* Offline Roadtrip Budget Planner */}
           <div className="bg-[#0b1120] border border-slate-800/80 rounded-2xl p-5 sm:p-6 shadow-xl space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800/60">

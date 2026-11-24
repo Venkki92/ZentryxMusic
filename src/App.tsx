@@ -69,6 +69,8 @@ import {
   Headphones,
   Info,
   Columns2,
+  ArrowLeftRight,
+  Pin,
 } from 'lucide-react';
 import { parseAudioMetadata, estimateBitrateKbps } from './utils/id3Parser';
 import {
@@ -218,6 +220,19 @@ import {
   serializeM3u8,
   serializePlaylistFileName,
 } from './utils/m3uPlaylist';
+import {
+  SwapGroupMode,
+  SwapMediaGroup,
+  buildAlbumSwapGroups,
+  buildFolderSwapGroups,
+  findAdjacentSwapGroup,
+  findCurrentSwapGroupIndex,
+  isUnmeteredWifiLikely,
+  normalizeFolderKey,
+  resolveW203DimmerState,
+  selectTracksForWifiAutoCache,
+} from './utils/w203Cockpit';
+import { CockpitQuickSwapDrawer } from './components/CockpitQuickSwapDrawer';
 
 export function safeBtoa(str: string): string {
   try {
@@ -394,7 +409,7 @@ export default function App() {
     RED: { hex: '#ef4444', name: 'Sport Red', border: 'rgba(239, 68, 68, 0.25)', bg: 'rgba(239, 68, 68, 0.12)' },
   };
 
-  const activeAccent = accentPalette[accentKey] || accentPalette.LIME;
+  const baseAccent = accentPalette[accentKey] || accentPalette.LIME;
 
   // Real Nextcloud Tracks Library State (Cached in LocalStorage)
   const [tracks, setTracks] = useState<Track[]>(() => {
@@ -782,16 +797,118 @@ export default function App() {
   const [librarySearchQuery, setLibrarySearchQuery] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Driver Safe Motion Lock & Astronomical Solar GPS Day/Night Mode
+  // W203 Auto Day/Night Amber Schedule, Quick-Swap Mode & Home Wi-Fi Nextcloud Auto-Cache
+  const [dayStartHour, setDayStartHour] = useState<number>(() => {
+    const saved = Number(localStorage.getItem('zentryx_day_start_hour'));
+    return Number.isFinite(saved) && saved >= 0 && saved <= 23 ? saved : 7;
+  });
+  const [nightStartHour, setNightStartHour] = useState<number>(() => {
+    const saved = Number(localStorage.getItem('zentryx_night_start_hour'));
+    return Number.isFinite(saved) && saved >= 0 && saved <= 23 ? saved : 19;
+  });
+  const [autoAmberAtNight, setAutoAmberAtNight] = useState<boolean>(() => {
+    return localStorage.getItem('zentryx_auto_amber_night') !== 'false';
+  });
+  const [swapGroupMode, setSwapGroupMode] = useState<SwapGroupMode>(() => {
+    return localStorage.getItem('zentryx_swap_group_mode') === 'albums' ? 'albums' : 'folders';
+  });
+  const [playerRailTab, setPlayerRailTab] = useState<'folders' | 'albums' | 'queue'>('folders');
+  const [isQuickSwapOpen, setIsQuickSwapOpen] = useState<boolean>(false);
+
+  const [wifiAutoCacheEnabled, setWifiAutoCacheEnabled] = useState<boolean>(() => {
+    return localStorage.getItem('zentryx_wifi_autocache_enabled') !== 'false';
+  });
+  const [wifiAutoCacheSsid, setWifiAutoCacheSsid] = useState<string>(() => {
+    return localStorage.getItem('zentryx_wifi_autocache_ssid') || '';
+  });
+  const [wifiAutoCacheMaxMb, setWifiAutoCacheMaxMb] = useState<number>(() => {
+    const saved = Number(localStorage.getItem('zentryx_wifi_autocache_max_mb'));
+    return Number.isFinite(saved) && saved >= 0 ? saved : 4096;
+  });
+  const [pinnedCacheFolders, setPinnedCacheFolders] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('zentryx_pinned_cache_folders');
+      const parsed = saved ? JSON.parse(saved) : [];
+      return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+    } catch {
+      return [];
+    }
+  });
+  const [isWifiAutoCaching, setIsWifiAutoCaching] = useState<boolean>(false);
+  const [wifiAutoCacheStatus, setWifiAutoCacheStatus] = useState<string>('Ready · Pin folders for Home Wi-Fi sync');
+  const wifiAutoCacheRunKeyRef = useRef<string>('');
+
+  // Minute ticker to keep Auto Day/Night W203 Amber schedule accurate
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setSolarMinuteTick(Math.floor(Date.now() / 60000));
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('zentryx_day_start_hour', String(dayStartHour));
+  }, [dayStartHour]);
+  useEffect(() => {
+    localStorage.setItem('zentryx_night_start_hour', String(nightStartHour));
+  }, [nightStartHour]);
+  useEffect(() => {
+    localStorage.setItem('zentryx_auto_amber_night', autoAmberAtNight ? 'true' : 'false');
+  }, [autoAmberAtNight]);
+  useEffect(() => {
+    localStorage.setItem('zentryx_swap_group_mode', swapGroupMode);
+  }, [swapGroupMode]);
+  useEffect(() => {
+    localStorage.setItem('zentryx_wifi_autocache_enabled', wifiAutoCacheEnabled ? 'true' : 'false');
+  }, [wifiAutoCacheEnabled]);
+  useEffect(() => {
+    localStorage.setItem('zentryx_wifi_autocache_ssid', wifiAutoCacheSsid);
+  }, [wifiAutoCacheSsid]);
+  useEffect(() => {
+    localStorage.setItem('zentryx_wifi_autocache_max_mb', String(wifiAutoCacheMaxMb));
+  }, [wifiAutoCacheMaxMb]);
+  useEffect(() => {
+    localStorage.setItem('zentryx_pinned_cache_folders', JSON.stringify(pinnedCacheFolders));
+  }, [pinnedCacheFolders]);
+
+  // Driver Safe Motion Lock & W203 Auto Day/Night Amber Schedule Resolution
   const driverSafeActive = isDriverSafeLockActive(driverSafeMode, currentGpsSpeed, 10);
-  const isDaylightCockpit = useMemo(() => {
-    if (cockpitThemeMode === 'day') return true;
-    if (cockpitThemeMode === 'night') return false;
-    return isDaylightBySolar(gpsCoords?.lat, gpsCoords?.lon);
-  }, [cockpitThemeMode, gpsCoords, solarMinuteTick]);
+  const w203Dimmer = useMemo(() => {
+    const nowHour = new Date().getHours();
+    const solarDaylight = gpsCoords ? isDaylightBySolar(gpsCoords.lat, gpsCoords.lon) : null;
+    return resolveW203DimmerState({
+      themeMode: cockpitThemeMode,
+      hourOfDay: nowHour,
+      dayStartHour,
+      nightStartHour,
+      isSolarDaylight: solarDaylight,
+      autoAmberAtNight,
+      manualAmberFilter: warmAmberFilter,
+    });
+  }, [cockpitThemeMode, gpsCoords, solarMinuteTick, dayStartHour, nightStartHour, autoAmberAtNight, warmAmberFilter]);
+
+  const isDaylightCockpit = w203Dimmer.useDayMode;
+  const isAmberNightActive = w203Dimmer.isAmberNightActive;
+  const activeAccent = isAmberNightActive ? accentPalette.AMBER : baseAccent;
 
   // Current Track Pointer from active Queue (fallback to indexed tracks)
   const currentTrack: Track | undefined = queue[currentTrackIndex] || tracks[currentTrackIndex];
+
+  // Deterministic Folder & Album groups for Quick-Swap Bar, Split-Screen Live Rail & Home Wi-Fi Pinning
+  const folderSwapGroups = useMemo(
+    () => buildFolderSwapGroups(tracks, offlineTrackIds, pinnedCacheFolders, false),
+    [tracks, offlineTrackIds, pinnedCacheFolders]
+  );
+  const albumSwapGroups = useMemo(
+    () => buildAlbumSwapGroups(tracks, offlineTrackIds, pinnedCacheFolders, false),
+    [tracks, offlineTrackIds, pinnedCacheFolders]
+  );
+  const activeSwapGroups = swapGroupMode === 'folders' ? folderSwapGroups : albumSwapGroups;
+  const currentSwapGroupIndex = useMemo(
+    () => findCurrentSwapGroupIndex(activeSwapGroups, currentTrack, swapGroupMode),
+    [activeSwapGroups, currentTrack, swapGroupMode]
+  );
+  const activeSwapGroup = currentSwapGroupIndex >= 0 ? activeSwapGroups[currentSwapGroupIndex] : null;
 
   // Persist Accent & Theme Mode
   useEffect(() => {
@@ -4467,6 +4584,161 @@ export default function App() {
     setTimeout(() => setStatusMessage(null), 3000);
   };
 
+  // On-the-Go Cockpit Folder / Album Swapping
+  const handlePlaySwapGroup = async (group: SwapMediaGroup<Track>) => {
+    if (!group || group.tracks.length === 0) return;
+    triggerHaptic('confirm');
+    setQueue(group.tracks);
+    setCurrentTrackIndex(0);
+    setPositionSeconds(0);
+    showCockpitHud(
+      'play',
+      swapGroupMode === 'folders' ? 'Folder Swapped' : 'Album Swapped',
+      `${group.name} (${group.tracks.length} tracks)`
+    );
+    setStatusMessage(`Playing ${group.name} · ${group.tracks.length} tracks`);
+    setTimeout(() => setStatusMessage(null), 2600);
+    await startAudioPlayback(group.tracks[0]);
+  };
+
+  const handleSwapAdjacentGroup = async (delta: number) => {
+    const next = findAdjacentSwapGroup(activeSwapGroups, currentTrack, swapGroupMode, delta);
+    if (!next) {
+      setStatusMessage('No folders or albums available to swap.');
+      setTimeout(() => setStatusMessage(null), 2200);
+      return;
+    }
+    await handlePlaySwapGroup(next.group);
+  };
+
+  const handleTogglePinFolderForWifiCache = (folderKey: string) => {
+    const clean = normalizeFolderKey(folderKey);
+    if (!clean) return;
+    triggerHaptic('toggle');
+    setPinnedCacheFolders((prev) => {
+      const exists = prev.some((p) => normalizeFolderKey(p).toLowerCase() === clean.toLowerCase());
+      const next = exists
+        ? prev.filter((p) => normalizeFolderKey(p).toLowerCase() !== clean.toLowerCase())
+        : [...prev, clean];
+      setStatusMessage(
+        exists
+          ? `Unpinned "${clean}" from Home Wi-Fi Auto-Cache`
+          : `Pinned "${clean}" for automatic Home Wi-Fi caching`
+      );
+      setTimeout(() => setStatusMessage(null), 2500);
+      return next;
+    });
+  };
+
+  const handleSyncPinnedFoldersNow = async (forceEvenIfMetered = true) => {
+    if (isWifiAutoCaching || isBatchSyncing) return;
+    if (pinnedCacheFolders.length === 0) {
+      setWifiAutoCacheStatus('No folders pinned · Pin folders to auto-cache');
+      return;
+    }
+    if (!forceEvenIfMetered && (!wifiAutoCacheEnabled || !isUnmeteredWifiLikely())) {
+      setWifiAutoCacheStatus(
+        wifiAutoCacheEnabled
+          ? 'Waiting for unmetered Home Wi-Fi connection'
+          : 'Auto-cache paused'
+      );
+      return;
+    }
+    const candidates = selectTracksForWifiAutoCache({
+      tracks,
+      offlineTrackIds,
+      pinnedFolders: pinnedCacheFolders,
+      maxCacheMb: wifiAutoCacheMaxMb,
+      currentCachedBytes: offlineStorageBytes,
+    });
+    if (candidates.length === 0) {
+      setWifiAutoCacheStatus(
+        `${pinnedCacheFolders.length} pinned folder${pinnedCacheFolders.length === 1 ? '' : 's'} up to date offline`
+      );
+      return;
+    }
+    setIsWifiAutoCaching(true);
+    setWifiAutoCacheStatus(`Syncing 0/${candidates.length} pinned tracks…`);
+    let completed = 0;
+    try {
+      for (const track of candidates) {
+        try {
+          await downloadTrackForOffline(track);
+          completed += 1;
+          setWifiAutoCacheStatus(`Syncing ${completed}/${candidates.length} · ${track.title}`);
+        } catch (err) {
+          console.warn('Wi-Fi auto-cache skipped track:', track.title, err);
+        }
+      }
+      await refreshOfflineStorage();
+      setWifiAutoCacheStatus(`Cached ${completed}/${candidates.length} tracks from pinned folders`);
+    } finally {
+      setIsWifiAutoCaching(false);
+    }
+  };
+
+  // Automatic background Home Wi-Fi auto-cache trigger when online & unmetered
+  useEffect(() => {
+    if (!wifiAutoCacheEnabled || !isOnline || !isLoggedIn || pinnedCacheFolders.length === 0 || tracks.length === 0) {
+      if (pinnedCacheFolders.length === 0) {
+        setWifiAutoCacheStatus('Pin any folder to auto-cache on Home Wi-Fi');
+      } else if (!wifiAutoCacheEnabled) {
+        setWifiAutoCacheStatus(`Auto-cache paused (${pinnedCacheFolders.length} pinned)`);
+      } else if (!isOnline) {
+        setWifiAutoCacheStatus('Offline · Waiting for Home Wi-Fi');
+      }
+      return;
+    }
+    if (!isUnmeteredWifiLikely()) {
+      setWifiAutoCacheStatus('Metered / cellular link · Waiting for Home Wi-Fi');
+      return;
+    }
+    const pending = selectTracksForWifiAutoCache({
+      tracks,
+      offlineTrackIds,
+      pinnedFolders: pinnedCacheFolders,
+      maxCacheMb: wifiAutoCacheMaxMb,
+      currentCachedBytes: offlineStorageBytes,
+    });
+    if (pending.length === 0) {
+      setWifiAutoCacheStatus(`${pinnedCacheFolders.length} pinned folder${pinnedCacheFolders.length === 1 ? '' : 's'} cached offline`);
+      return;
+    }
+    const runKey = `${pinnedCacheFolders.join('|')}:${pending.length}:${wifiAutoCacheMaxMb}`;
+    if (wifiAutoCacheRunKeyRef.current === runKey) return;
+    wifiAutoCacheRunKeyRef.current = runKey;
+    const timer = window.setTimeout(() => {
+      handleSyncPinnedFoldersNow(false);
+    }, 1800);
+    return () => window.clearTimeout(timer);
+  }, [
+    wifiAutoCacheEnabled,
+    isOnline,
+    isLoggedIn,
+    pinnedCacheFolders,
+    tracks.length,
+    offlineTrackIds.size,
+    wifiAutoCacheMaxMb,
+  ]);
+
+  const handleCycleCockpitThemeMode = () => {
+    triggerHaptic('toggle');
+    setCockpitThemeMode((prev) => {
+      const next = prev === 'auto' ? 'day' : prev === 'day' ? 'night' : 'auto';
+      const label =
+        next === 'auto'
+          ? `Auto Day/Night (${dayStartHour}:00–${nightStartHour}:00)`
+          : next === 'day'
+            ? 'Daylight High-Contrast'
+            : autoAmberAtNight
+              ? 'W203 Amber Night'
+              : 'OLED Night';
+      setStatusMessage(`Display Mode: ${label}`);
+      setTimeout(() => setStatusMessage(null), 2200);
+      return next;
+    });
+  };
+
   // No-Look Cockpit Swipe Gestures
   const handleTouchStart = (e: React.TouchEvent) => {
     if (!enableSwipeGestures) return;
@@ -5172,7 +5444,7 @@ export default function App() {
   }, []);
 
   const playerAccent = useMemo(() => {
-    if (dynamicAmbientGlow && artAmbientPalette) {
+    if (!isAmberNightActive && dynamicAmbientGlow && artAmbientPalette) {
       return artAmbientPalette;
     }
     return {
@@ -5183,7 +5455,7 @@ export default function App() {
       textOnAccent: '#020617' as const,
       contrastOnDark: 8,
     };
-  }, [dynamicAmbientGlow, artAmbientPalette, activeAccent]);
+  }, [isAmberNightActive, dynamicAmbientGlow, artAmbientPalette, activeAccent]);
 
   const progressPercent = useMemo(() => {
     if (!durationSeconds || durationSeconds <= 0) return 0;
@@ -5522,7 +5794,11 @@ export default function App() {
   return (
     <div
       className={`min-h-screen text-slate-100 flex flex-col font-sans select-none selection:bg-[#a3e635] selection:text-black transition-colors duration-300 ${
-        isDaylightCockpit ? 'bg-[#0f172a]' : 'bg-[#020617]'
+        isAmberNightActive
+          ? 'w203-amber-night bg-[#050403]'
+          : isDaylightCockpit
+            ? 'bg-[#0f172a]'
+            : 'bg-[#020617]'
       }`}
     >
       {/* Hidden Real HTML5 Audio Element without CORS restrictions */}
@@ -5753,6 +6029,53 @@ export default function App() {
               <span className="hidden md:inline font-mono">{isOnline ? 'Hotspot OK' : 'Roaming'}</span>
             </div>
 
+            {/* 1-Tap W203 Day / Night Amber Cycle Button */}
+            <button
+              type="button"
+              onClick={handleCycleCockpitThemeMode}
+              className="min-h-[38px] px-2.5 py-1.5 rounded-xl bg-[#0b1120] hover:bg-slate-800 border border-slate-800 text-xs font-bold text-slate-200 hover:text-white transition-all active:scale-95 flex items-center gap-1.5 whitespace-nowrap"
+              title={`Display Mode: ${cockpitThemeMode.toUpperCase()}${isAmberNightActive ? ' (W203 Amber Night Active)' : ''} — Click to cycle`}
+            >
+              {cockpitThemeMode === 'day' ? (
+                <Sun className="w-4 h-4" style={{ color: activeAccent.hex }} />
+              ) : cockpitThemeMode === 'night' ? (
+                <Moon className="w-4 h-4" style={{ color: activeAccent.hex }} />
+              ) : (
+                <SunMoon className="w-4 h-4" style={{ color: activeAccent.hex }} />
+              )}
+              <span className="hidden md:inline font-mono text-[11px]">
+                {isAmberNightActive ? 'Amber' : cockpitThemeMode === 'day' ? 'Day' : 'Auto'}
+              </span>
+            </button>
+
+            {/* Cockpit Quick-Swap Drawer Trigger */}
+            <button
+              type="button"
+              onClick={() => {
+                triggerHaptic();
+                setIsQuickSwapOpen(true);
+              }}
+              className="min-h-[38px] px-2.5 py-1.5 rounded-xl bg-[#0b1120] hover:bg-slate-800 border border-slate-800 text-xs font-bold text-slate-200 hover:text-white transition-all active:scale-95 flex items-center gap-1.5 whitespace-nowrap"
+              title="Open Cockpit Folder & Album Quick-Swap Drawer"
+            >
+              <ArrowLeftRight className="w-4 h-4" style={{ color: activeAccent.hex }} />
+              <span className="hidden md:inline">Swap</span>
+            </button>
+
+            {/* Split-Screen Rail Toggle */}
+            <button
+              type="button"
+              onClick={() => {
+                triggerHaptic('toggle');
+                setDualPaneCockpit((v) => !v);
+              }}
+              className="hidden lg:flex min-h-[38px] p-2 rounded-xl bg-[#0b1120] hover:bg-slate-800 border text-slate-300 hover:text-white transition-all active:scale-95 items-center justify-center"
+              style={dualPaneCockpit ? { borderColor: activeAccent.hex, color: activeAccent.hex } : { borderColor: '#1e293b' }}
+              title={dualPaneCockpit ? 'Hide Split-Screen Folder/Album Rail' : 'Show Split-Screen Folder/Album Rail'}
+            >
+              <Columns2 className="w-4 h-4" />
+            </button>
+
             {/* Queue Toggle Button */}
             <button
               onClick={() => {
@@ -5844,10 +6167,10 @@ export default function App() {
           dualPaneCockpit ? 'max-w-7xl' : 'max-w-6xl'
         } w-full mx-auto px-4 py-6 flex flex-col justify-center`}
       >
-        {/* VIEW 1: PLAYER SCREEN (MBUX COCKPIT + OPTIONAL DUAL-PANE WIDESCREEN) */}
+        {/* VIEW 1: PLAYER SCREEN (MBUX COCKPIT + SPLIT-SCREEN LIVE FOLDER/ALBUM RAIL) */}
         {activeTab === 'player' && (
-          <div className={`w-full mx-auto ${dualPaneCockpit && tracks.length > 0 ? 'max-w-7xl grid grid-cols-1 xl:grid-cols-12 gap-6 items-start' : 'max-w-4xl'}`}>
-            <div className={dualPaneCockpit && tracks.length > 0 ? 'xl:col-span-8' : 'w-full'}>
+          <div className={`w-full mx-auto ${dualPaneCockpit && tracks.length > 0 ? 'max-w-7xl grid grid-cols-1 lg:grid-cols-12 gap-5 items-start' : 'max-w-4xl'}`}>
+            <div className={dualPaneCockpit && tracks.length > 0 ? 'lg:col-span-8' : 'w-full'}>
             {tracks.length === 0 ? (
               /* Empty State: Prompt User to Sync or Sign In */
               <div
@@ -6256,6 +6579,53 @@ export default function App() {
                           )}
                         </button>
                       )}
+
+                      {/* On-the-Go Prev / Active Folder (or Album) / Next Quick-Swap Bar */}
+                      {activeSwapGroups.length > 0 && (
+                        <div className="mt-3 flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleSwapAdjacentGroup(-1)}
+                            className="min-h-[44px] px-3 rounded-xl bg-black/55 hover:bg-slate-900 border border-slate-800 hover:border-slate-600 text-xs font-bold text-slate-200 flex items-center gap-1 active:scale-95 transition-transform whitespace-nowrap shrink-0"
+                            title={swapGroupMode === 'folders' ? 'Previous Nextcloud Folder' : 'Previous Album'}
+                          >
+                            <ChevronLeft className="w-4 h-4" style={{ color: playerAccent.hex }} />
+                            <span>Prev {swapGroupMode === 'folders' ? 'Folder' : 'Album'}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              triggerHaptic();
+                              setIsQuickSwapOpen(true);
+                            }}
+                            className="min-h-[44px] flex-1 min-w-0 px-3 rounded-xl bg-black/45 hover:bg-slate-900/90 border border-slate-800/90 hover:border-slate-600 text-left flex items-center justify-between gap-2 active:scale-[0.99] transition-transform"
+                            title="Open Cockpit Quick-Swap Drawer"
+                          >
+                            <div className="min-w-0">
+                              <div className="text-xs font-bold text-white truncate">
+                                {activeSwapGroup?.name || (swapGroupMode === 'folders' ? 'Select Folder' : 'Select Album')}
+                              </div>
+                              <div className="text-[10px] font-mono text-slate-400 tabular-nums truncate">
+                                {activeSwapGroup
+                                  ? `${currentSwapGroupIndex + 1}/${activeSwapGroups.length} · ${activeSwapGroup.cachedCount}/${activeSwapGroup.tracks.length} offline`
+                                  : `${activeSwapGroups.length} ${swapGroupMode}`}
+                              </div>
+                            </div>
+                            <ArrowLeftRight className="w-3.5 h-3.5 shrink-0 text-slate-400" />
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleSwapAdjacentGroup(1)}
+                            className="min-h-[44px] px-3 rounded-xl bg-black/55 hover:bg-slate-900 border border-slate-800 hover:border-slate-600 text-xs font-bold text-slate-200 flex items-center gap-1 active:scale-95 transition-transform whitespace-nowrap shrink-0"
+                            title={swapGroupMode === 'folders' ? 'Next Nextcloud Folder' : 'Next Album'}
+                          >
+                            <span>Next {swapGroupMode === 'folders' ? 'Folder' : 'Album'}</span>
+                            <ChevronRight className="w-4 h-4" style={{ color: playerAccent.hex }} />
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                     {playbackError && (
@@ -6479,98 +6849,191 @@ export default function App() {
             )}
             </div>
 
-            {/* Dual-Pane Widescreen Companion Rail on Player View (Up Next & Quick Shortcuts) */}
+            {/* Split-Screen Live Folder / Album / Queue Companion Rail */}
             {dualPaneCockpit && tracks.length > 0 && (
-              <aside className="hidden xl:flex xl:col-span-4 flex-col bg-[#0b1120] border border-slate-800/80 rounded-3xl p-4 shadow-2xl space-y-3 max-h-[560px]">
-                <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
-                  <div className="flex items-center gap-2">
-                    <Columns2 className="w-4 h-4" style={{ color: activeAccent.hex }} />
-                    <span className="text-xs font-bold uppercase tracking-wider text-white">Up Next Cockpit</span>
+              <aside className="hidden lg:flex lg:col-span-4 flex-col bg-[#0b1120] w203-surface-card border border-slate-800/80 rounded-3xl p-4 shadow-2xl space-y-3 max-h-[590px]">
+                <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-800/80">
+                  <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-black/60 border border-slate-800 flex-1">
+                    {(
+                      [
+                        { id: 'folders', label: `Folders (${folderSwapGroups.length})` },
+                        { id: 'albums', label: `Albums (${albumSwapGroups.length})` },
+                        { id: 'queue', label: `Queue (${queue.length})` },
+                      ] as const
+                    ).map((tab) => {
+                      const isSel = playerRailTab === tab.id;
+                      return (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => {
+                            setPlayerRailTab(tab.id);
+                            if (tab.id === 'folders' || tab.id === 'albums') {
+                              setSwapGroupMode(tab.id);
+                            }
+                          }}
+                          className={`min-h-[36px] px-2 rounded-lg text-[11px] font-bold transition-colors truncate ${
+                            isSel ? 'text-black' : 'text-slate-400 hover:text-white'
+                          }`}
+                          style={isSel ? { backgroundColor: activeAccent.hex } : undefined}
+                        >
+                          {tab.label}
+                        </button>
+                      );
+                    })}
                   </div>
+                </div>
+
+                {playerRailTab === 'queue' ? (
+                  <>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handlePlaySmartMix('cruising', {
+                            reshuffle: true,
+                            sortByGenre: cruisingSortByGenre,
+                            fullLibrary: true,
+                          })
+                        }
+                        className="px-2.5 py-1 rounded-lg bg-black/50 border border-slate-800 hover:border-slate-600 text-[11px] font-semibold text-slate-200 flex items-center gap-1"
+                      >
+                        <RefreshCw className="w-3 h-3" style={{ color: activeAccent.hex }} />
+                        Cruising
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handlePlaySmartMix('recent')}
+                        className="px-2.5 py-1 rounded-lg bg-black/50 border border-slate-800 hover:border-slate-600 text-[11px] font-semibold text-slate-200"
+                      >
+                        Recent
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handlePlaySmartMix('most_played')}
+                        className="px-2.5 py-1 rounded-lg bg-black/50 border border-slate-800 hover:border-slate-600 text-[11px] font-semibold text-slate-200"
+                      >
+                        Most Played
+                      </button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
+                      {queue.slice(currentTrackIndex, currentTrackIndex + 18).map((qTrack, offset) => {
+                        const idx = currentTrackIndex + offset;
+                        const active = offset === 0;
+                        return (
+                          <div
+                            key={`${qTrack.id}-${idx}`}
+                            onClick={() => playTrackAtIndex(idx)}
+                            className={`p-2.5 rounded-xl flex items-center gap-2.5 cursor-pointer border transition-colors ${
+                              active
+                                ? 'bg-white/[0.08] border-slate-600'
+                                : 'bg-black/35 border-slate-800/60 hover:bg-slate-900/70'
+                            }`}
+                          >
+                            <LazyAlbumArt
+                              src={coverArtUrls[qTrack.id]}
+                              alt={qTrack.album || qTrack.title}
+                              accentHex={activeAccent.hex}
+                              isCurrent={active}
+                              variant="row"
+                              className="w-9 h-9"
+                            />
+                            <div className="min-w-0 flex-1">
+                              <div
+                                className="text-xs font-bold truncate"
+                                style={{ color: active ? activeAccent.hex : '#ffffff' }}
+                              >
+                                {qTrack.title}
+                              </div>
+                              <div className="text-[10px] text-slate-400 truncate">{qTrack.artist}</div>
+                            </div>
+                            <span className="text-[10px] font-mono tabular-nums text-slate-500 shrink-0">{qTrack.duration}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
+                    {(playerRailTab === 'folders' ? folderSwapGroups : albumSwapGroups).map((group) => {
+                      const isActive = activeSwapGroup?.id === group.id && swapGroupMode === playerRailTab;
+                      return (
+                        <div
+                          key={`${playerRailTab}-${group.id}-${group.name}`}
+                          className={`p-2.5 rounded-xl border flex items-center gap-2 transition-colors ${
+                            isActive
+                              ? 'bg-white/[0.08] border-slate-500'
+                              : 'bg-black/35 border-slate-800/70 hover:bg-slate-900/70'
+                          }`}
+                          style={isActive ? { borderColor: activeAccent.hex } : undefined}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSwapGroupMode(playerRailTab);
+                              handlePlaySwapGroup(group);
+                            }}
+                            className="flex items-center gap-2.5 flex-1 min-w-0 text-left min-h-[42px]"
+                          >
+                            <div
+                              className="w-9 h-9 rounded-lg flex items-center justify-center border shrink-0"
+                              style={
+                                isActive
+                                  ? { backgroundColor: `${activeAccent.hex}24`, borderColor: activeAccent.hex, color: activeAccent.hex }
+                                  : { backgroundColor: 'rgba(15,23,42,0.75)', borderColor: '#1e293b', color: '#94a3b8' }
+                              }
+                            >
+                              {playerRailTab === 'folders' ? <Folder className="w-4 h-4" /> : <Disc className="w-4 h-4" />}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div
+                                className="text-xs font-bold truncate"
+                                style={{ color: isActive ? activeAccent.hex : '#ffffff' }}
+                              >
+                                {group.name}
+                              </div>
+                              <div className="text-[10px] font-mono text-slate-400 tabular-nums truncate">
+                                {group.tracks.length} tracks · {group.cachedCount}/{group.tracks.length} offline
+                              </div>
+                            </div>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleTogglePinFolderForWifiCache(group.id)}
+                            aria-label={`Pin ${group.name} for Home Wi-Fi Auto-Cache`}
+                            title={group.isPinnedForWifiCache ? 'Pinned for Home Wi-Fi Auto-Cache' : 'Pin for Home Wi-Fi Auto-Cache'}
+                            className={`min-h-[38px] min-w-[38px] rounded-lg border flex items-center justify-center shrink-0 transition-colors ${
+                              group.isPinnedForWifiCache
+                                ? 'text-black border-transparent'
+                                : 'bg-black/50 border-slate-800 text-slate-400 hover:text-white'
+                            }`}
+                            style={group.isPinnedForWifiCache ? { backgroundColor: activeAccent.hex } : undefined}
+                          >
+                            <Pin className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="pt-2 border-t border-slate-800/70 flex items-center justify-between gap-2 text-[11px]">
+                  <button
+                    type="button"
+                    onClick={() => setIsQuickSwapOpen(true)}
+                    className="font-bold hover:underline"
+                    style={{ color: activeAccent.hex }}
+                  >
+                    Full Quick-Swap Drawer
+                  </button>
                   <button
                     type="button"
                     onClick={() => navigateToMenu({ tab: 'library' })}
-                    className="text-[11px] font-bold hover:underline"
-                    style={{ color: activeAccent.hex }}
+                    className="text-slate-400 hover:text-white font-semibold"
                   >
-                    Open Library →
+                    Library →
                   </button>
-                </div>
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handlePlaySmartMix('cruising', {
-                        reshuffle: true,
-                        sortByGenre: cruisingSortByGenre,
-                        fullLibrary: true,
-                      })
-                    }
-                    className="px-2.5 py-1 rounded-lg bg-black/50 border border-slate-800 hover:border-slate-600 text-[11px] font-semibold text-slate-200 flex items-center gap-1"
-                    title="Reshuffle whole Cruising Mix"
-                  >
-                    <RefreshCw className="w-3 h-3" style={{ color: activeAccent.hex }} />
-                    Cruising
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handlePlaySmartMix('recent')}
-                    className="px-2.5 py-1 rounded-lg bg-black/50 border border-slate-800 hover:border-slate-600 text-[11px] font-semibold text-slate-200"
-                  >
-                    Recent
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handlePlaySmartMix('most_played')}
-                    className="px-2.5 py-1 rounded-lg bg-black/50 border border-slate-800 hover:border-slate-600 text-[11px] font-semibold text-slate-200"
-                  >
-                    Most Played
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      navigateToMenu({ tab: 'library', libraryFilter: 'resume' });
-                    }}
-                    className="px-2.5 py-1 rounded-lg bg-black/50 border border-slate-800 hover:border-slate-600 text-[11px] font-semibold text-slate-200"
-                  >
-                    Resume ({resumableTracksCount})
-                  </button>
-                </div>
-                <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
-                  {queue.slice(currentTrackIndex, currentTrackIndex + 15).map((qTrack, offset) => {
-                    const idx = currentTrackIndex + offset;
-                    const active = offset === 0;
-                    return (
-                      <div
-                        key={`${qTrack.id}-${idx}`}
-                        onClick={() => playTrackAtIndex(idx)}
-                        className={`p-2.5 rounded-xl flex items-center gap-2.5 cursor-pointer border transition-colors ${
-                          active
-                            ? 'bg-white/[0.08] border-slate-600'
-                            : 'bg-black/35 border-slate-800/60 hover:bg-slate-900/70'
-                        }`}
-                      >
-                        <LazyAlbumArt
-                          src={coverArtUrls[qTrack.id]}
-                          alt={qTrack.album || qTrack.title}
-                          accentHex={activeAccent.hex}
-                          isCurrent={active}
-                          variant="row"
-                          className="w-9 h-9"
-                        />
-                        <div className="min-w-0 flex-1">
-                          <div
-                            className="text-xs font-bold truncate"
-                            style={{ color: active ? activeAccent.hex : '#ffffff' }}
-                          >
-                            {qTrack.title}
-                          </div>
-                          <div className="text-[10px] text-slate-400 truncate">{qTrack.artist}</div>
-                        </div>
-                        <span className="text-[10px] font-mono text-slate-500 shrink-0">{qTrack.duration}</span>
-                      </div>
-                    );
-                  })}
                 </div>
               </aside>
             )}
@@ -8096,6 +8559,27 @@ export default function App() {
             floatingMiniBarOpen={floatingMiniBarOpen}
             onToggleFloatingMiniBar={setFloatingMiniBarOpen}
             getAudioContext={() => webAudioCtxRef.current}
+            getStereoSpectrumSnapshot={() => dspEngineRef.current?.getStereoSpectrumSnapshot() ?? null}
+
+            dayStartHour={dayStartHour}
+            onChangeDayStartHour={setDayStartHour}
+            nightStartHour={nightStartHour}
+            onChangeNightStartHour={setNightStartHour}
+            autoAmberAtNight={autoAmberAtNight}
+            onToggleAutoAmberAtNight={setAutoAmberAtNight}
+            isAmberNightActive={isAmberNightActive}
+
+            wifiAutoCacheEnabled={wifiAutoCacheEnabled}
+            onToggleWifiAutoCacheEnabled={setWifiAutoCacheEnabled}
+            wifiAutoCacheSsid={wifiAutoCacheSsid}
+            onChangeWifiAutoCacheSsid={setWifiAutoCacheSsid}
+            wifiAutoCacheMaxMb={wifiAutoCacheMaxMb}
+            onChangeWifiAutoCacheMaxMb={setWifiAutoCacheMaxMb}
+            availableFolderGroups={folderSwapGroups}
+            onTogglePinFolderForWifiCache={handleTogglePinFolderForWifiCache}
+            wifiAutoCacheStatus={wifiAutoCacheStatus}
+            isWifiAutoCaching={isWifiAutoCaching}
+            onSyncPinnedFoldersNow={() => handleSyncPinnedFoldersNow(true)}
 
             onBuildRoadtripPlan={handleBuildRoadtripPlan}
             onPinRoadtripOffline={handlePinRoadtripOffline}
@@ -9077,19 +9561,37 @@ export default function App() {
         onClose={() => setFloatingMiniBarOpen(false)}
       />
 
+      {/* COCKPIT QUICK-SWAP DRAWER (FOLDERS, ALBUMS & HOME WI-FI PINS) */}
+      <CockpitQuickSwapDrawer
+        isOpen={isQuickSwapOpen}
+        onClose={() => setIsQuickSwapOpen(false)}
+        accentHex={activeAccent.hex}
+        mode={swapGroupMode}
+        onChangeMode={setSwapGroupMode}
+        folderGroups={folderSwapGroups}
+        albumGroups={albumSwapGroups}
+        activeGroupId={activeSwapGroup?.id ?? null}
+        onPlayGroup={handlePlaySwapGroup}
+        onTogglePinFolder={handleTogglePinFolderForWifiCache}
+        wifiAutoCacheEnabled={wifiAutoCacheEnabled}
+        wifiSyncStatus={wifiAutoCacheStatus}
+        isWifiSyncing={isWifiAutoCaching}
+        onSyncPinnedNow={() => handleSyncPinnedFoldersNow(true)}
+      />
+
       {/* PWA OFFLINE INDICATOR */}
       <OfflineIndicator />
 
-      {/* NIGHT BRIGHTNESS DIMMER & WARM AMBER ANTI-GLARE OVERLAY */}
-      {(nightBrightness < 100 || warmAmberFilter) && (
+      {/* NIGHT BRIGHTNESS DIMMER & WARM W203 AMBER ANTI-GLARE OVERLAY */}
+      {(nightBrightness < 100 || isAmberNightActive) && (
         <div
           aria-hidden="true"
           data-testid="night-dimmer-overlay"
           className="fixed inset-0 z-[90] pointer-events-none transition-opacity duration-200"
           style={{
-            backgroundColor: warmAmberFilter ? 'rgba(24, 14, 2, 1)' : 'rgba(2, 6, 23, 1)',
+            backgroundColor: isAmberNightActive ? 'rgba(24, 14, 2, 1)' : 'rgba(2, 6, 23, 1)',
             opacity: Math.max(
-              warmAmberFilter ? 0.14 : 0,
+              isAmberNightActive ? 0.14 : 0,
               calculateDimmerOverlayOpacity(nightBrightness)
             ),
           }}

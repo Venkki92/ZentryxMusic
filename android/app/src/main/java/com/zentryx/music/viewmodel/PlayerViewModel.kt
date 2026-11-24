@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.zentryx.music.download.DownloadFeedbackEvent
 import com.zentryx.music.download.DownloadManager
+import com.zentryx.music.download.WifiAutoCacheManager
+import com.zentryx.music.download.WifiAutoCacheState
 import com.zentryx.music.dsp.AndroidDspAudioEngine
 import com.zentryx.music.dsp.AudioOutputRoute
 import com.zentryx.music.dsp.DspSettings
@@ -13,10 +15,15 @@ import com.zentryx.music.lyrics.ParsedLyrics
 import com.zentryx.music.models.PlaybackState
 import com.zentryx.music.models.Playlist
 import com.zentryx.music.models.RepeatMode
+import com.zentryx.music.player.CockpitThemeMode
 import com.zentryx.music.player.MbuxAccentColor
 import com.zentryx.music.player.SettingsPreferences
 import com.zentryx.music.player.SpeedVolumeController
+import com.zentryx.music.player.SwapGroupMode
+import com.zentryx.music.player.SwapMediaGroup
 import com.zentryx.music.player.ZentryxPlayerManager
+import com.zentryx.music.player.buildAlbumSwapGroups
+import com.zentryx.music.player.buildFolderSwapGroups
 import com.zentryx.music.repository.MusicRepository
 import com.zentryx.music.visualizer.AudioFftCapturer
 import com.zentryx.music.visualizer.VisualizerColorway
@@ -28,6 +35,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -38,6 +46,7 @@ class PlayerViewModel @Inject constructor(
     private val playerManager: ZentryxPlayerManager,
     private val musicRepository: MusicRepository,
     private val downloadManager: DownloadManager,
+    private val wifiAutoCacheManager: WifiAutoCacheManager,
     private val speedVolumeController: SpeedVolumeController,
     private val settingsPreferences: SettingsPreferences,
     private val dspAudioEngine: AndroidDspAudioEngine,
@@ -83,6 +92,34 @@ class PlayerViewModel @Inject constructor(
 
     val playlists: StateFlow<List<Playlist>> = musicRepository.getPlaylists()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val cockpitThemeMode: StateFlow<CockpitThemeMode> = settingsPreferences.cockpitThemeModeFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), CockpitThemeMode.AUTO)
+
+    val swapGroupMode: StateFlow<SwapGroupMode> = settingsPreferences.swapGroupModeFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SwapGroupMode.FOLDERS)
+
+    val splitScreenRailEnabled: StateFlow<Boolean> = settingsPreferences.splitScreenRailFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    val pinnedCacheFolders: StateFlow<Set<String>> = settingsPreferences.pinnedCacheFoldersFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+
+    val wifiAutoCacheState: StateFlow<WifiAutoCacheState> = wifiAutoCacheManager.state
+
+    val folderSwapGroups: StateFlow<List<SwapMediaGroup>> = combine(
+        musicRepository.getAllSongs(),
+        pinnedCacheFolders
+    ) { songs, pins ->
+        buildFolderSwapGroups(songs, pins)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val albumSwapGroups: StateFlow<List<SwapMediaGroup>> = combine(
+        musicRepository.getAllSongs(),
+        pinnedCacheFolders
+    ) { songs, pins ->
+        buildAlbumSwapGroups(songs, pins)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _isLyricsVisible = MutableStateFlow(false)
     val isLyricsVisible: StateFlow<Boolean> = _isLyricsVisible.asStateFlow()
@@ -189,5 +226,58 @@ class PlayerViewModel @Inject constructor(
         val queue = playbackState.value.queue
         val song = queue.getOrNull(index) ?: return
         playerManager.playSong(song, queue)
+    }
+
+    fun setSwapGroupMode(mode: SwapGroupMode) {
+        viewModelScope.launch {
+            settingsPreferences.setSwapGroupMode(mode)
+        }
+    }
+
+    fun toggleSplitScreenRail() {
+        val next = !splitScreenRailEnabled.value
+        viewModelScope.launch {
+            settingsPreferences.setSplitScreenRailEnabled(next)
+        }
+    }
+
+    fun playSwapGroup(group: SwapMediaGroup): Boolean {
+        return playerManager.playSwapGroup(group)
+    }
+
+    fun swapToAdjacentGroup(delta: Int, onSwapped: (String) -> Unit) {
+        viewModelScope.launch {
+            val mode = swapGroupMode.value
+            val pins = pinnedCacheFolders.value
+            val result = playerManager.swapToAdjacentGroup(delta, mode, pins)
+            if (result != null) {
+                val (group, idx) = result
+                val total = if (mode == SwapGroupMode.FOLDERS) folderSwapGroups.value.size else albumSwapGroups.value.size
+                val kind = if (mode == SwapGroupMode.FOLDERS) "Folder" else "Album"
+                onSwapped("$kind ${idx + 1}/${total.coerceAtLeast(1)} · ${group.displayName}")
+            } else {
+                onSwapped("No other ${if (mode == SwapGroupMode.FOLDERS) "folders" else "albums"} available")
+            }
+        }
+    }
+
+    fun togglePinFolderForWifiCache(folderKey: String) {
+        viewModelScope.launch {
+            settingsPreferences.togglePinnedCacheFolder(folderKey)
+        }
+    }
+
+    fun syncPinnedFoldersNow() {
+        wifiAutoCacheManager.syncPinnedFoldersNow(forceEvenWithoutWifi = true)
+    }
+
+    fun cycleCockpitThemeMode(): CockpitThemeMode {
+        val modes = CockpitThemeMode.entries
+        val cur = cockpitThemeMode.value
+        val next = modes[(modes.indexOf(cur) + 1) % modes.size]
+        viewModelScope.launch {
+            settingsPreferences.setCockpitThemeMode(next)
+        }
+        return next
     }
 }

@@ -13,6 +13,7 @@ import {
   dbToLinearGain,
   formatSurroundMatrixDiagnosticLog,
 } from './dspConsole';
+import { STEREO_SPECTRUM_FREQS_HZ, StereoSpectrumSnapshot } from './w203Cockpit';
 
 function smoothSet(param: AudioParam, value: number, ctx: AudioContext): void {
   const safeVal = Number.isFinite(value) ? value : 0;
@@ -95,6 +96,15 @@ export class HeadunitDspEngine {
 
   private readonly compressorNode: DynamicsCompressorNode;
   private readonly peakLimiterShaper: WaveShaperNode;
+  private readonly spectrumSplitter: ChannelSplitterNode;
+  private readonly analyserLeft: AnalyserNode;
+  private readonly analyserRight: AnalyserNode;
+  private readonly freqBinsLeft: Float32Array<ArrayBuffer>;
+  private readonly freqBinsRight: Float32Array<ArrayBuffer>;
+  private readonly timeBinsLeft: Float32Array<ArrayBuffer>;
+  private readonly timeBinsRight: Float32Array<ArrayBuffer>;
+  private readonly smoothedLeftBands: Float32Array;
+  private readonly smoothedRightBands: Float32Array;
   private lastCeilingDb: number = -999;
   private lastLoggedSurroundMode: SurroundModeId | null = null;
   public lastSurroundDiagnostics: SurroundMatrixDiagnostics | null = null;
@@ -249,6 +259,22 @@ export class HeadunitDspEngine {
     this.peakLimiterShaper.oversample = '2x';
     this.output = ctx.createGain();
 
+    // Post-surround L/R stereo spectrum analyzers (zero-allocation typed buffers)
+    this.spectrumSplitter = ctx.createChannelSplitter(2);
+    this.analyserLeft = ctx.createAnalyser();
+    this.analyserRight = ctx.createAnalyser();
+    this.analyserLeft.fftSize = 1024;
+    this.analyserRight.fftSize = 1024;
+    this.analyserLeft.smoothingTimeConstant = 0.72;
+    this.analyserRight.smoothingTimeConstant = 0.72;
+    const binCount = this.analyserLeft.frequencyBinCount;
+    this.freqBinsLeft = new Float32Array(new ArrayBuffer(binCount * Float32Array.BYTES_PER_ELEMENT));
+    this.freqBinsRight = new Float32Array(new ArrayBuffer(binCount * Float32Array.BYTES_PER_ELEMENT));
+    this.timeBinsLeft = new Float32Array(new ArrayBuffer(this.analyserLeft.fftSize * Float32Array.BYTES_PER_ELEMENT));
+    this.timeBinsRight = new Float32Array(new ArrayBuffer(this.analyserRight.fftSize * Float32Array.BYTES_PER_ELEMENT));
+    this.smoothedLeftBands = new Float32Array(STEREO_SPECTRUM_FREQS_HZ.length);
+    this.smoothedRightBands = new Float32Array(STEREO_SPECTRUM_FREQS_HZ.length);
+
     // Wire serial front-end filtering chain
     let cursor: AudioNode = this.input;
     cursor.connect(this.preampNode);
@@ -336,6 +362,11 @@ export class HeadunitDspEngine {
     this.heightElevationNode.connect(this.compressorNode);
     this.compressorNode.connect(this.peakLimiterShaper);
     this.peakLimiterShaper.connect(this.output);
+
+    // Parallel non-intrusive tap for real-time L/R stereo frequency distribution debugger
+    this.output.connect(this.spectrumSplitter);
+    this.spectrumSplitter.connect(this.analyserLeft, 0);
+    this.spectrumSplitter.connect(this.analyserRight, 1);
   }
 
   applySettings(settings: DspSettings, masterVolumePercent: number, speedKmH = 0): void {
@@ -505,5 +536,87 @@ export class HeadunitDspEngine {
     this.lastSurroundDiagnostics = diag;
     console.info(formatSurroundMatrixDiagnosticLog(diag));
     return diag;
+  }
+
+  getStereoSpectrumSnapshot(): StereoSpectrumSnapshot {
+    const sampleRate = this.ctx.sampleRate || 48000;
+    const nyquist = sampleRate / 2;
+    const binCount = this.analyserLeft.frequencyBinCount;
+
+    this.analyserLeft.getFloatFrequencyData(this.freqBinsLeft);
+    this.analyserRight.getFloatFrequencyData(this.freqBinsRight);
+
+    const leftBands: number[] = new Array(STEREO_SPECTRUM_FREQS_HZ.length);
+    const rightBands: number[] = new Array(STEREO_SPECTRUM_FREQS_HZ.length);
+
+    let peakBandEnergy = 0;
+    for (let i = 0; i < STEREO_SPECTRUM_FREQS_HZ.length; i++) {
+      const centerHz = STEREO_SPECTRUM_FREQS_HZ[i];
+      const prevHz = i === 0 ? centerHz * 0.72 : Math.sqrt(STEREO_SPECTRUM_FREQS_HZ[i - 1] * centerHz);
+      const nextHz =
+        i === STEREO_SPECTRUM_FREQS_HZ.length - 1
+          ? Math.min(nyquist, centerHz * 1.28)
+          : Math.sqrt(centerHz * STEREO_SPECTRUM_FREQS_HZ[i + 1]);
+
+      const startBin = Math.max(1, Math.floor((prevHz / nyquist) * binCount));
+      const endBin = Math.min(binCount - 1, Math.max(startBin, Math.ceil((nextHz / nyquist) * binCount)));
+
+      let maxDbL = -100;
+      let maxDbR = -100;
+      for (let b = startBin; b <= endBin; b++) {
+        const dbL = this.freqBinsLeft[b];
+        const dbR = this.freqBinsRight[b];
+        if (Number.isFinite(dbL) && dbL > maxDbL) maxDbL = dbL;
+        if (Number.isFinite(dbR) && dbR > maxDbR) maxDbR = dbR;
+      }
+
+      const normL = Math.max(0, Math.min(1, (maxDbL + 84) / 72));
+      const normR = Math.max(0, Math.min(1, (maxDbR + 84) / 72));
+
+      this.smoothedLeftBands[i] = this.smoothedLeftBands[i] * 0.45 + normL * 0.55;
+      this.smoothedRightBands[i] = this.smoothedRightBands[i] * 0.45 + normR * 0.55;
+      leftBands[i] = this.smoothedLeftBands[i];
+      rightBands[i] = this.smoothedRightBands[i];
+      if (leftBands[i] > peakBandEnergy) peakBandEnergy = leftBands[i];
+      if (rightBands[i] > peakBandEnergy) peakBandEnergy = rightBands[i];
+    }
+
+    let midSqSum = 0;
+    let sideSqSum = 0;
+    let timeSamples = 0;
+    if (
+      typeof this.analyserLeft.getFloatTimeDomainData === 'function' &&
+      typeof this.analyserRight.getFloatTimeDomainData === 'function'
+    ) {
+      this.analyserLeft.getFloatTimeDomainData(this.timeBinsLeft);
+      this.analyserRight.getFloatTimeDomainData(this.timeBinsRight);
+      const len = Math.min(this.timeBinsLeft.length, this.timeBinsRight.length);
+      for (let i = 0; i < len; i++) {
+        const l = this.timeBinsLeft[i];
+        const r = this.timeBinsRight[i];
+        const mid = 0.5 * (l + r);
+        const side = 0.5 * (l - r);
+        midSqSum += mid * mid;
+        sideSqSum += side * side;
+      }
+      timeSamples = len;
+    }
+
+    const midRms = timeSamples > 0 ? Math.sqrt(midSqSum / timeSamples) : 0;
+    const sideRms = timeSamples > 0 ? Math.sqrt(sideSqSum / timeSamples) : 0;
+    const isActive = midRms + sideRms > 0.0015 || peakBandEnergy > 0.04;
+    const stereoSeparationPercent = isActive
+      ? Math.max(0, Math.min(100, (sideRms / (midRms + sideRms + 1e-6)) * 200))
+      : 0;
+
+    return {
+      leftBands,
+      rightBands,
+      midRms,
+      sideRms,
+      stereoSeparationPercent,
+      isActive,
+      sampleRateHz: sampleRate,
+    };
   }
 }

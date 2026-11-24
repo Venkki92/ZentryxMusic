@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -31,6 +32,11 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.zentryx.music.models.RepeatMode
+import com.zentryx.music.player.CockpitThemeMode
+import com.zentryx.music.player.SwapGroupMode
+import com.zentryx.music.player.SwapMediaGroup
+import com.zentryx.music.player.extractFolderKey
+import com.zentryx.music.player.findCurrentSwapGroupIndex
 import com.zentryx.music.ui.components.CrossfadeAlbumArt
 import com.zentryx.music.ui.components.DriveModeHudDialog
 import com.zentryx.music.ui.components.FullscreenVisualizerDialog
@@ -43,6 +49,12 @@ import com.zentryx.music.visualizer.VisualizerMode
 import kotlinx.coroutines.delay
 import java.io.File
 import java.util.Locale
+
+private enum class CockpitRailTab(val label: String) {
+    FOLDERS("Folders"),
+    ALBUMS("Albums"),
+    QUEUE("Queue")
+}
 
 /**
  * MBUX-style cockpit player optimized for 8-inch 1024x600 landscape automotive displays.
@@ -81,14 +93,23 @@ fun PlayerScreen(
     val playlists by viewModel.playlists.collectAsStateWithLifecycle()
     val activeDownloads by viewModel.activeDownloads.collectAsStateWithLifecycle()
     val downloadFeedback by viewModel.downloadFeedback.collectAsStateWithLifecycle()
+    val cockpitThemeMode by viewModel.cockpitThemeMode.collectAsStateWithLifecycle()
+    val swapGroupMode by viewModel.swapGroupMode.collectAsStateWithLifecycle()
+    val splitScreenRailEnabled by viewModel.splitScreenRailEnabled.collectAsStateWithLifecycle()
+    val folderSwapGroups by viewModel.folderSwapGroups.collectAsStateWithLifecycle()
+    val albumSwapGroups by viewModel.albumSwapGroups.collectAsStateWithLifecycle()
+    val wifiAutoCacheState by viewModel.wifiAutoCacheState.collectAsStateWithLifecycle()
 
-    val accentColor = Color(accent.hexColor)
+    val accentColor = MaterialTheme.colorScheme.primary
     val bgColor = MaterialTheme.colorScheme.background
     val surfaceColor = MaterialTheme.colorScheme.surface
     val surfaceVariantColor = MaterialTheme.colorScheme.surfaceVariant
     val borderColor = MaterialTheme.colorScheme.outline
 
     var showQueueDrawer by remember { mutableStateOf(false) }
+    var showQuickSwapDrawer by remember { mutableStateOf(false) }
+    var quickSwapOfflineOnly by remember { mutableStateOf(false) }
+    var railTab by remember { mutableStateOf(CockpitRailTab.FOLDERS) }
     var showVisualizerTile by remember { mutableStateOf(true) }
     var showFullscreenVisualizer by remember { mutableStateOf(false) }
     var showDriveModeHud by remember { mutableStateOf(false) }
@@ -100,6 +121,12 @@ fun PlayerScreen(
     var seekPositionSlider by remember { mutableFloatStateOf(0f) }
     var lastInteractionMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var swipeHudText by remember { mutableStateOf<String?>(null) }
+
+    val activeGroups = if (swapGroupMode == SwapGroupMode.FOLDERS) folderSwapGroups else albumSwapGroups
+    val activeGroupIndex = remember(activeGroups, currentSong) {
+        findCurrentSwapGroupIndex(activeGroups, currentSong)
+    }
+    val activeGroup = activeGroups.getOrNull(activeGroupIndex)
 
     val launchVoiceInDriveHud = rememberVoiceSearchLauncher(
         onResult = { spoken -> swipeHudText = "VOICE: $spoken" },
@@ -220,6 +247,50 @@ fun PlayerScreen(
                     }
                 },
                 actions = {
+                    // 1-Tap W203 Day / Night / Auto Amber cycle
+                    IconButton(
+                        onClick = {
+                            val next = viewModel.cycleCockpitThemeMode()
+                            swipeHudText = "DIMMER: ${next.label.uppercase(Locale.US)}"
+                        },
+                        modifier = Modifier.size(42.dp)
+                    ) {
+                        val themeIcon = when (cockpitThemeMode) {
+                            CockpitThemeMode.DAY -> Icons.Default.WbSunny
+                            CockpitThemeMode.NIGHT -> Icons.Default.DarkMode
+                            CockpitThemeMode.AUTO -> Icons.Default.BrightnessAuto
+                        }
+                        Icon(
+                            imageVector = themeIcon,
+                            contentDescription = "Cycle Day/Night W203 Amber",
+                            tint = if (cockpitThemeMode == CockpitThemeMode.AUTO) accentColor else Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    // Cockpit Quick-Swap Folder/Album Drawer trigger
+                    IconButton(onClick = { showQuickSwapDrawer = true }, modifier = Modifier.size(42.dp)) {
+                        Icon(
+                            imageVector = Icons.Default.FolderOpen,
+                            contentDescription = "Quick-Swap Folders & Albums",
+                            tint = if (showQuickSwapDrawer) accentColor else Color.White,
+                            modifier = Modifier.size(21.dp)
+                        )
+                    }
+                    // Toggle Split-Screen Live Folder/Album Rail
+                    IconButton(
+                        onClick = {
+                            viewModel.toggleSplitScreenRail()
+                            showQueueDrawer = false
+                        },
+                        modifier = Modifier.size(42.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ViewSidebar,
+                            contentDescription = "Toggle Split-Screen Rail",
+                            tint = if (splitScreenRailEnabled) accentColor else Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                     // Drive Mode Large-Target HUD shortcut
                     IconButton(onClick = { showDriveModeHud = true }, modifier = Modifier.size(42.dp)) {
                         Icon(
@@ -450,12 +521,12 @@ fun PlayerScreen(
                         )
                     }
                 },
-            horizontalArrangement = Arrangement.spacedBy(20.dp)
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Left Pane (40%): Visualizer / Artwork Toggle + Mode Chip + Track Metadata
+            // Left Pane: Visualizer / Artwork Toggle + Track Metadata (compact when Split Rail is open)
             Column(
                 modifier = Modifier
-                    .weight(0.40f)
+                    .weight(if (splitScreenRailEnabled && !showQueueDrawer) 0.28f else 0.40f)
                     .fillMaxHeight(),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
@@ -742,7 +813,7 @@ fun PlayerScreen(
             } else {
                 Column(
                     modifier = Modifier
-                        .weight(0.60f)
+                        .weight(if (splitScreenRailEnabled) 0.39f else 0.60f)
                         .fillMaxHeight(),
                     verticalArrangement = Arrangement.SpaceEvenly
                 ) {
@@ -852,6 +923,83 @@ fun PlayerScreen(
                         }
                     }
 
+                    // Dedicated On-The-Go Prev / Next Folder (or Album) Swap Bar (48dp touch targets)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val modeNoun = if (swapGroupMode == SwapGroupMode.FOLDERS) "Folder" else "Album"
+                        OutlinedButton(
+                            onClick = {
+                                viewModel.swapToAdjacentGroup(-1) { hud -> swipeHudText = hud }
+                            },
+                            enabled = activeGroups.size > 1,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.height(48.dp)
+                        ) {
+                            Icon(Icons.Default.SkipPrevious, contentDescription = "Previous $modeNoun", tint = accentColor, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text("Prev $modeNoun", fontSize = 11.sp, fontWeight = FontWeight.Black, color = Color.White, maxLines = 1)
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = surfaceColor,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .border(1.dp, borderColor, RoundedCornerShape(10.dp))
+                                .clickable { showQuickSwapDrawer = true }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = activeGroup?.displayName ?: extractFolderKey(currentSong).ifBlank { currentSong.album },
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Black,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = if (activeGroupIndex >= 0 && activeGroups.isNotEmpty()) {
+                                            "$modeNoun ${activeGroupIndex + 1}/${activeGroups.size} · ${activeGroup?.offlineCount ?: 0}/${activeGroup?.trackCount ?: 0} offline"
+                                        } else {
+                                            "Tap to Quick-Swap"
+                                        },
+                                        fontSize = 9.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = accentColor,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Icon(Icons.Default.SwapHoriz, contentDescription = "Swap Drawer", tint = accentColor, modifier = Modifier.size(18.dp))
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                viewModel.swapToAdjacentGroup(1) { hud -> swipeHudText = hud }
+                            },
+                            enabled = activeGroups.size > 1,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.height(48.dp)
+                        ) {
+                            Text("Next $modeNoun", fontSize = 11.sp, fontWeight = FontWeight.Black, color = Color.White, maxLines = 1)
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Icon(Icons.Default.SkipNext, contentDescription = "Next $modeNoun", tint = accentColor, modifier = Modifier.size(18.dp))
+                        }
+                    }
+
                     // Bottom QOL Strip: -20dB Duck, Speed Rate, Sleep Timer, DSP Console
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -936,6 +1084,183 @@ fun PlayerScreen(
                             Icon(imageVector = Icons.Default.Tune, contentDescription = null, tint = accentColor, modifier = Modifier.size(14.dp))
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("EQ / DSP", fontSize = 10.sp, color = accentColor, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                // Split-Screen Live Right Rail (Folders | Albums | Queue)
+                if (splitScreenRailEnabled) {
+                    Column(
+                        modifier = Modifier
+                            .weight(0.33f)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(surfaceColor)
+                            .border(1.dp, borderColor, RoundedCornerShape(14.dp))
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF0A0F1E), RoundedCornerShape(8.dp))
+                                .padding(2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            CockpitRailTab.entries.forEach { tab ->
+                                val selected = railTab == tab
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = if (selected) accentColor else Color.Transparent,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(32.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .clickable {
+                                            railTab = tab
+                                            when (tab) {
+                                                CockpitRailTab.FOLDERS -> viewModel.setSwapGroupMode(SwapGroupMode.FOLDERS)
+                                                CockpitRailTab.ALBUMS -> viewModel.setSwapGroupMode(SwapGroupMode.ALBUMS)
+                                                CockpitRailTab.QUEUE -> Unit
+                                            }
+                                        }
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text(
+                                            text = tab.label,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Black,
+                                            color = if (selected) Color.Black else Color(0xFFCBD5E1),
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        when (railTab) {
+                            CockpitRailTab.FOLDERS, CockpitRailTab.ALBUMS -> {
+                                val railGroups = if (railTab == CockpitRailTab.FOLDERS) folderSwapGroups else albumSwapGroups
+                                val railActiveIdx = findCurrentSwapGroupIndex(railGroups, currentSong)
+                                if (railGroups.isEmpty()) {
+                                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        Text("Scan Nextcloud to populate", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                                    }
+                                } else {
+                                    LazyColumn(
+                                        modifier = Modifier.fillMaxSize(),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        itemsIndexed(railGroups, key = { _, g -> g.key }) { idx, group ->
+                                            val isCurrent = idx == railActiveIdx
+                                            Surface(
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = if (isCurrent) accentColor.copy(alpha = 0.16f) else Color(0xFF0A0F1E),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .border(
+                                                        width = if (isCurrent) 1.dp else 0.5.dp,
+                                                        color = if (isCurrent) accentColor else borderColor.copy(alpha = 0.5f),
+                                                        shape = RoundedCornerShape(8.dp)
+                                                    )
+                                                    .clickable {
+                                                        if (viewModel.playSwapGroup(group)) {
+                                                            swipeHudText = "${railTab.label.dropLast(1).uppercase(Locale.US)}: ${group.displayName}"
+                                                        }
+                                                    }
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(
+                                                            text = group.displayName,
+                                                            fontSize = 11.sp,
+                                                            fontWeight = if (isCurrent) FontWeight.Black else FontWeight.SemiBold,
+                                                            color = if (isCurrent) accentColor else Color.White,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                        Text(
+                                                            text = "${group.trackCount} trk · ${group.offlineCount}/${group.trackCount} offline",
+                                                            fontSize = 9.sp,
+                                                            fontFamily = FontFamily.Monospace,
+                                                            color = if (group.isFullyOffline) Color(0xFF4ADE80) else Color(0xFF94A3B8),
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                    }
+                                                    if (railTab == CockpitRailTab.FOLDERS) {
+                                                        IconButton(
+                                                            onClick = { viewModel.togglePinFolderForWifiCache(group.key) },
+                                                            modifier = Modifier.size(34.dp)
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = if (group.isPinnedForWifiCache) Icons.Default.Wifi else Icons.Default.CloudDownload,
+                                                                contentDescription = "Pin folder for Home Wi-Fi Auto-Cache",
+                                                                tint = if (group.isPinnedForWifiCache) accentColor else Color(0xFF64748B),
+                                                                modifier = Modifier.size(16.dp)
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            CockpitRailTab.QUEUE -> {
+                                LazyColumn(
+                                    modifier = Modifier.fillMaxSize(),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    itemsIndexed(playbackState.queue) { index, item ->
+                                        val isItemActive = index == playbackState.currentQueueIndex
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = if (isItemActive) accentColor.copy(alpha = 0.16f) else Color(0xFF0A0F1E),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable { viewModel.playQueueIndex(index) }
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = "${index + 1}",
+                                                    fontSize = 10.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (isItemActive) accentColor else Color(0xFF64748B),
+                                                    modifier = Modifier.width(20.dp)
+                                                )
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = item.title,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = if (isItemActive) FontWeight.Black else FontWeight.Medium,
+                                                        color = if (isItemActive) accentColor else Color.White,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Text(
+                                                        text = item.artist,
+                                                        fontSize = 9.sp,
+                                                        color = Color(0xFF94A3B8),
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1079,6 +1404,186 @@ fun PlayerScreen(
             replayGainAppliedDb = playbackState.replayGainAppliedDb,
             accentColor = accentColor,
             onDismiss = { showCodecInspector = false }
+        )
+    }
+
+    // Cockpit Quick-Swap Folder / Album Drawer Dialog (Glove-friendly driving picker + Home Wi-Fi Pin)
+    if (showQuickSwapDrawer) {
+        val rawGroups = if (swapGroupMode == SwapGroupMode.FOLDERS) folderSwapGroups else albumSwapGroups
+        val filteredGroups = if (quickSwapOfflineOnly) rawGroups.filter { it.offlineCount > 0 } else rawGroups
+        val currentIdx = findCurrentSwapGroupIndex(filteredGroups, currentSong)
+
+        AlertDialog(
+            onDismissRequest = { showQuickSwapDrawer = false },
+            containerColor = surfaceColor,
+            title = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "COCKPIT QUICK-SWAP",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Black,
+                            letterSpacing = 1.2.sp,
+                            color = accentColor
+                        )
+                        Text(
+                            text = wifiAutoCacheState.lastStatusMessage,
+                            fontSize = 10.sp,
+                            color = Color(0xFF94A3B8),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = { viewModel.syncPinnedFoldersNow() },
+                        enabled = wifiAutoCacheState.pinnedFolderCount > 0,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        modifier = Modifier.height(30.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(Icons.Default.Sync, contentDescription = null, tint = accentColor, modifier = Modifier.size(13.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Sync Pins", fontSize = 10.sp, color = accentColor, fontWeight = FontWeight.Bold)
+                    }
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        SwapGroupMode.entries.forEach { mode ->
+                            FilterChip(
+                                selected = swapGroupMode == mode,
+                                onClick = { viewModel.setSwapGroupMode(mode) },
+                                label = { Text(mode.label, fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = accentColor.copy(alpha = 0.22f),
+                                    selectedLabelColor = accentColor
+                                )
+                            )
+                        }
+                        Spacer(modifier = Modifier.weight(1f))
+                        FilterChip(
+                            selected = quickSwapOfflineOnly,
+                            onClick = { quickSwapOfflineOnly = !quickSwapOfflineOnly },
+                            label = { Text("Offline Ready", fontSize = 10.sp, fontWeight = FontWeight.Bold) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFF22C55E).copy(alpha = 0.22f),
+                                selectedLabelColor = Color(0xFF4ADE80)
+                            )
+                        )
+                    }
+
+                    if (filteredGroups.isEmpty()) {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().height(120.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = if (quickSwapOfflineOnly) "No offline-cached groups match" else "No folders or albums indexed yet",
+                                fontSize = 12.sp,
+                                color = Color(0xFF94A3B8)
+                            )
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            itemsIndexed(filteredGroups, key = { _, g -> g.key }) { idx, group ->
+                                val isCurrent = idx == currentIdx
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (isCurrent) accentColor.copy(alpha = 0.16f) else Color(0xFF0A0F1E),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 52.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .border(
+                                            width = if (isCurrent) 1.dp else 0.75.dp,
+                                            color = if (isCurrent) accentColor else borderColor,
+                                            shape = RoundedCornerShape(10.dp)
+                                        )
+                                        .clickable {
+                                            if (viewModel.playSwapGroup(group)) {
+                                                swipeHudText = "${swapGroupMode.label.dropLast(1)} ${idx + 1}/${filteredGroups.size} · ${group.displayName}"
+                                                showQuickSwapDrawer = false
+                                            }
+                                        }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (swapGroupMode == SwapGroupMode.FOLDERS) Icons.Default.Folder else Icons.Default.Album,
+                                            contentDescription = null,
+                                            tint = if (isCurrent) accentColor else Color(0xFF94A3B8),
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = group.displayName,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isCurrent) accentColor else Color.White,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = "${group.subtitle} · ${group.trackCount} trk · ${group.offlineCount}/${group.trackCount} offline",
+                                                fontSize = 10.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = if (group.isFullyOffline) Color(0xFF4ADE80) else Color(0xFF94A3B8),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        if (swapGroupMode == SwapGroupMode.FOLDERS) {
+                                            OutlinedButton(
+                                                onClick = { viewModel.togglePinFolderForWifiCache(group.key) },
+                                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                                modifier = Modifier.height(34.dp),
+                                                shape = RoundedCornerShape(8.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (group.isPinnedForWifiCache) Icons.Default.Wifi else Icons.Default.CloudDownload,
+                                                    contentDescription = "Pin for Wi-Fi Auto-Cache",
+                                                    tint = if (group.isPinnedForWifiCache) accentColor else Color(0xFF94A3B8),
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text(
+                                                    text = if (group.isPinnedForWifiCache) "Pinned" else "Wi-Fi Pin",
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (group.isPinnedForWifiCache) accentColor else Color.White
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showQuickSwapDrawer = false }) {
+                    Text("Close", color = accentColor, fontWeight = FontWeight.Bold)
+                }
+            }
         )
     }
 }
