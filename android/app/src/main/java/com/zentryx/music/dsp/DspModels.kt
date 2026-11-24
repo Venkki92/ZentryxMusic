@@ -105,7 +105,12 @@ enum class SurroundMode(
     val heightBoostMaxDb: Float = 0f,
     val useAllPassPhase: Boolean = false,
     val crosstalkCancelGain: Float = 0f,
-    val isDolbyOrVirtual: Boolean = false
+    val isDolbyOrVirtual: Boolean = false,
+    val midToAmbienceMix: Float = 0f,
+    val diffuserFeedback: Float = 0f,
+    val hallReverbMix: Float = 0f,
+    val hallDecayFeedback: Float = 0f,
+    val cabinWarmthBoostDb: Float = 0f
 ) {
     OFF(
         id = "off",
@@ -130,117 +135,150 @@ enum class SurroundMode(
         label = "Logic 7 Surround",
         shortLabel = "Logic 7",
         badge = "LOGIC 7",
-        desc = "Harman-inspired M/S center vocal coherence + decorrelated cabin wrap",
-        haasLeftMs = 14f,
-        haasRightMs = 21f,
-        sideWeight = 0.55f,
-        centerWeight = 0.45f,
-        heightWeight = 0.32f,
+        desc = "Harman 7.1 cabin matrix: 4-tap decorrelated wrap, Schroeder diffuser & dash vocal lock",
+        haasLeftMs = 11f,
+        haasRightMs = 17f,
+        sideWeight = 0.72f,
+        centerWeight = 0.55f,
+        heightWeight = 0.36f,
         sideBandpassHz = 1600f,
-        sideBandpassQ = 0.55f,
-        sideWetScale = 0.34f,
-        sideWidthTarget = 125,
-        centerBoostMaxDb = 3.0f,
-        heightBoostMaxDb = 1.4f
+        sideBandpassQ = 0.45f,
+        sideWetScale = 0.62f,
+        sideWidthTarget = 162,
+        centerBoostMaxDb = 3.8f,
+        heightBoostMaxDb = 1.8f,
+        useAllPassPhase = true,
+        crosstalkCancelGain = 0.12f,
+        midToAmbienceMix = 0.36f,
+        diffuserFeedback = 0.52f,
+        hallReverbMix = 0.22f,
+        hallDecayFeedback = 0.38f,
+        cabinWarmthBoostDb = 2.2f
     ),
     CONCERT_HALL(
         id = "concert_hall",
         label = "Concert Hall",
         shortLabel = "Concert",
         badge = "HALL 7.1",
-        desc = "Wide acoustic hall reflections with spacious ambient decay",
-        haasLeftMs = 22f,
-        haasRightMs = 31f,
-        sideWeight = 0.72f,
-        centerWeight = 0.30f,
-        heightWeight = 0.52f,
-        sideBandpassHz = 1500f,
-        sideBandpassQ = 0.50f,
-        sideWetScale = 0.44f,
-        sideWidthTarget = 138,
-        centerBoostMaxDb = 1.8f,
-        heightBoostMaxDb = 2.2f,
-        useAllPassPhase = true
+        desc = "Lush damped acoustic hall reflections with wide enveloping stereo tail",
+        haasLeftMs = 16f,
+        haasRightMs = 24f,
+        sideWeight = 0.82f,
+        centerWeight = 0.36f,
+        heightWeight = 0.54f,
+        sideBandpassHz = 1450f,
+        sideBandpassQ = 0.42f,
+        sideWetScale = 0.72f,
+        sideWidthTarget = 172,
+        centerBoostMaxDb = 2.2f,
+        heightBoostMaxDb = 2.6f,
+        useAllPassPhase = true,
+        midToAmbienceMix = 0.48f,
+        diffuserFeedback = 0.60f,
+        hallReverbMix = 0.48f,
+        hallDecayFeedback = 0.62f,
+        cabinWarmthBoostDb = 1.8f
     ),
     STUDIO_FOCUSED(
         id = "studio_focused",
         label = "Studio Focused",
         shortLabel = "Studio",
         badge = "STUDIO",
-        desc = "Tight near-field vocal lock with minimal early side reflections",
-        haasLeftMs = 7f,
-        haasRightMs = 11f,
-        sideWeight = 0.28f,
-        centerWeight = 0.65f,
-        heightWeight = 0.22f,
+        desc = "Tight near-field vocal lock with crisp early cabin cues and zero tail",
+        haasLeftMs = 6f,
+        haasRightMs = 9f,
+        sideWeight = 0.42f,
+        centerWeight = 0.75f,
+        heightWeight = 0.26f,
         sideBandpassHz = 1900f,
-        sideBandpassQ = 0.70f,
-        sideWetScale = 0.18f,
-        sideWidthTarget = 112,
-        centerBoostMaxDb = 3.6f,
-        heightBoostMaxDb = 0.9f
+        sideBandpassQ = 0.60f,
+        sideWetScale = 0.36f,
+        sideWidthTarget = 128,
+        centerBoostMaxDb = 4.4f,
+        heightBoostMaxDb = 1.2f,
+        midToAmbienceMix = 0.16f,
+        diffuserFeedback = 0.32f,
+        hallReverbMix = 0f,
+        hallDecayFeedback = 0f,
+        cabinWarmthBoostDb = 0.6f
     ),
     DOLBY_PRO_LOGIC_II(
         id = "dolby_pro_logic_ii",
         label = "Dolby Pro Logic II",
         shortLabel = "Dolby PLII",
         badge = "DOLBY PLII",
-        desc = "5.1 Music Matrix: 90° phase-shifted rear surround + locked dash center",
-        haasLeftMs = 16f,
+        desc = "5.1 Music Matrix: dual 90° quadrature rear steering + locked dash center",
+        haasLeftMs = 13f,
         haasRightMs = 20f,
-        sideWeight = 0.65f,
-        centerWeight = 0.55f,
-        heightWeight = 0.38f,
-        sideBandpassHz = 1250f,
-        sideBandpassQ = 0.48f,
-        sideWetScale = 0.40f,
-        sideWidthTarget = 128,
-        centerBoostMaxDb = 3.4f,
-        heightBoostMaxDb = 1.6f,
+        sideWeight = 0.76f,
+        centerWeight = 0.62f,
+        heightWeight = 0.42f,
+        sideBandpassHz = 1350f,
+        sideBandpassQ = 0.44f,
+        sideWetScale = 0.66f,
+        sideWidthTarget = 166,
+        centerBoostMaxDb = 4.0f,
+        heightBoostMaxDb = 2.0f,
         useAllPassPhase = true,
-        isDolbyOrVirtual = true
+        crosstalkCancelGain = 0.14f,
+        isDolbyOrVirtual = true,
+        midToAmbienceMix = 0.38f,
+        diffuserFeedback = 0.54f,
+        hallReverbMix = 0.26f,
+        hallDecayFeedback = 0.42f,
+        cabinWarmthBoostDb = 1.4f
     ),
     DOLBY_ATMOS_VIRTUAL(
         id = "dolby_atmos_virtual",
         label = "Dolby Virtual Atmos",
         shortLabel = "Atmos 3D",
         badge = "ATMOS 3D",
-        desc = "3D cabin height dome: overhead pinna air + multi-tap 360° surround field",
-        haasLeftMs = 11f,
-        haasRightMs = 19f,
-        sideWeight = 0.68f,
-        centerWeight = 0.52f,
+        desc = "3D cabin dome: pinna overhead elevation contour + diffused ceiling reflections",
+        haasLeftMs = 9f,
+        haasRightMs = 16f,
+        sideWeight = 0.80f,
+        centerWeight = 0.56f,
         heightWeight = 1.0f,
         sideBandpassHz = 2100f,
-        sideBandpassQ = 0.45f,
-        sideWetScale = 0.42f,
-        sideWidthTarget = 136,
-        centerBoostMaxDb = 3.2f,
-        heightBoostMaxDb = 4.2f,
+        sideBandpassQ = 0.42f,
+        sideWetScale = 0.68f,
+        sideWidthTarget = 174,
+        centerBoostMaxDb = 3.6f,
+        heightBoostMaxDb = 5.4f,
         useAllPassPhase = true,
-        crosstalkCancelGain = 0.08f,
-        isDolbyOrVirtual = true
+        crosstalkCancelGain = 0.22f,
+        isDolbyOrVirtual = true,
+        midToAmbienceMix = 0.42f,
+        diffuserFeedback = 0.56f,
+        hallReverbMix = 0.34f,
+        hallDecayFeedback = 0.48f,
+        cabinWarmthBoostDb = 1.2f
     ),
     VIRTUAL_SURROUND_360(
         id = "virtual_surround_360",
         label = "360° Virtualizer",
         shortLabel = "Virtual 360",
         badge = "VIRTUAL 360",
-        desc = "Cross-talk cancelled 360° binaural/cabin virtual surround + Android HW Virtualizer",
-        haasLeftMs = 18f,
-        haasRightMs = 27f,
-        sideWeight = 0.78f,
-        centerWeight = 0.36f,
-        heightWeight = 0.76f,
+        desc = "Wide A-pillar 360° cabin virtualizer: band-limited ITD cross-talk cancellation & wrap",
+        haasLeftMs = 14f,
+        haasRightMs = 22f,
+        sideWeight = 0.90f,
+        centerWeight = 0.44f,
+        heightWeight = 0.82f,
         sideBandpassHz = 1750f,
-        sideBandpassQ = 0.42f,
-        sideWetScale = 0.48f,
-        sideWidthTarget = 146,
-        centerBoostMaxDb = 2.2f,
-        heightBoostMaxDb = 3.2f,
+        sideBandpassQ = 0.40f,
+        sideWetScale = 0.78f,
+        sideWidthTarget = 192,
+        centerBoostMaxDb = 2.8f,
+        heightBoostMaxDb = 4.2f,
         useAllPassPhase = true,
-        crosstalkCancelGain = 0.16f,
-        isDolbyOrVirtual = true
+        crosstalkCancelGain = 0.34f,
+        isDolbyOrVirtual = true,
+        midToAmbienceMix = 0.46f,
+        diffuserFeedback = 0.58f,
+        hallReverbMix = 0.30f,
+        hallDecayFeedback = 0.44f,
+        cabinWarmthBoostDb = 1.6f
     );
 
     companion object {
@@ -267,6 +305,10 @@ data class DspPreset16(
     val hpfCutoffHz: Int? = null,
     val loudnessContour: Boolean? = null,
     val compressorProfileId: String? = null,
+    val surroundModeId: String? = null,
+    val surroundIntensity: Int? = null,
+    val centerCoherence: Int? = null,
+    val virtualHeight: Int? = null,
     val isCustom: Boolean = false
 )
 
@@ -288,9 +330,9 @@ data class DspSettings(
     val fader: Int = 0,   // -100 Rear .. +100 Front
     val stereoWidthPercent: Int = 100, // 0 .. 150
     val surroundMode: SurroundMode = SurroundMode.OFF,
-    val surroundIntensity: Int = 55, // 0 .. 100
-    val centerCoherence: Int = 45,   // 0 .. 100
-    val virtualHeight: Int = 45,     // 0 .. 100 (Atmos / 360 overhead pinna air)
+    val surroundIntensity: Int = 75, // 0 .. 100
+    val centerCoherence: Int = 55,   // 0 .. 100
+    val virtualHeight: Int = 60,     // 0 .. 100 (Atmos / 360 overhead pinna air)
     val roadNoiseEqEnabled: Boolean = true,
     val compressorProfile: CompressorProfile = CompressorProfile.BALANCED,
     val subPhaseInverted: Boolean = false,
@@ -443,6 +485,12 @@ fun computeCabinRtaCorrections(measuredDb: List<Float>): List<Float> {
 }
 
 fun applyPresetToDsp(current: DspSettings, preset: DspPreset16): DspSettings {
+    val resolvedSurroundMode = preset.surroundModeId?.let { SurroundMode.fromId(it) } ?: current.surroundMode
+    val resolvedMonoFoldDown = if (preset.surroundModeId != null && resolvedSurroundMode != SurroundMode.OFF) {
+        false
+    } else {
+        current.monoFoldDown
+    }
     return current.copy(
         dspEnabled = true,
         selectedPresetId = preset.id,
@@ -452,8 +500,321 @@ fun applyPresetToDsp(current: DspSettings, preset: DspPreset16): DspSettings {
         preampDb = clampStep(preset.preampDb, -12f, 6f, 0.5f),
         hpfCutoffHz = preset.hpfCutoffHz?.let { HpfCutoffHz.fromHz(it) } ?: current.hpfCutoffHz,
         loudnessContour = preset.loudnessContour ?: current.loudnessContour,
-        compressorProfile = preset.compressorProfileId?.let { CompressorProfile.fromId(it) } ?: current.compressorProfile
+        compressorProfile = preset.compressorProfileId?.let { CompressorProfile.fromId(it) } ?: current.compressorProfile,
+        surroundMode = resolvedSurroundMode,
+        surroundIntensity = (preset.surroundIntensity ?: current.surroundIntensity).coerceIn(0, 100),
+        centerCoherence = (preset.centerCoherence ?: current.centerCoherence).coerceIn(0, 100),
+        virtualHeight = (preset.virtualHeight ?: current.virtualHeight).coerceIn(0, 100),
+        monoFoldDown = resolvedMonoFoldDown
     )
+}
+
+data class SurroundMatrixDiagnostics(
+    val trigger: String,
+    val selectedPresetId: String,
+    val dspEnabled: Boolean,
+    val monoFoldDown: Boolean,
+    val surroundActive: Boolean,
+    val mode: SurroundMode,
+    val surroundIntensityPercent: Int,
+    val centerCoherencePercent: Int,
+    val virtualHeightPercent: Int,
+    val baseStereoWidthPercent: Int,
+    val effectiveStereoWidthPercent: Int,
+    val sampleRateHz: Int,
+    val pcmConfigured: Boolean,
+    val haasLeftMs: Float,
+    val haasRightMs: Float,
+    val haasLeftSamples: Int,
+    val haasRightSamples: Int,
+    val sideBandpassHz: Float,
+    val sideBandpassQ: Float,
+    val sideWetGain: Float,
+    val centerBoostDb: Float,
+    val centerInjectGain: Float,
+    val heightBoostDb: Float,
+    val allPassPhase90Active: Boolean,
+    val xtcGain: Float,
+    val xtcDelaySamples: Int,
+    val hardwareVirtualizerActive: Boolean,
+    val hardwareVirtualizerStrengthPermille: Int,
+    val midToAmbienceMix: Float = 0f,
+    val diffuserFeedback: Float = 0f,
+    val hallReverbMix: Float = 0f,
+    val cabinWarmthBoostDb: Float = 0f
+)
+
+fun computeEffectiveSurroundWidthPercent(settings: DspSettings): Int {
+    val baseWidth = when {
+        !settings.dspEnabled -> 100f
+        settings.monoFoldDown -> 0f
+        else -> settings.stereoWidthPercent.coerceIn(0, 150).toFloat()
+    }
+    if (!settings.dspEnabled || settings.monoFoldDown || settings.surroundMode == SurroundMode.OFF) {
+        return baseWidth.roundToInt().coerceIn(0, 200)
+    }
+    val intensityNorm = settings.surroundIntensity.coerceIn(0, 100) / 100f
+    val modeDelta = (settings.surroundMode.sideWidthTarget - 100f) * intensityNorm
+    return (baseWidth + modeDelta).coerceIn(0f, 200f).roundToInt()
+}
+
+fun buildSurroundMatrixDiagnostics(
+    trigger: String,
+    settings: DspSettings,
+    sampleRateHz: Int = 48000,
+    pcmConfigured: Boolean = false,
+    hardwareVirtualizerActive: Boolean = false,
+    hardwareVirtualizerStrengthPermille: Int = 0
+): SurroundMatrixDiagnostics {
+    val sr = sampleRateHz.coerceAtLeast(8000)
+    val mode = settings.surroundMode
+    val intensity = settings.surroundIntensity.coerceIn(0, 100)
+    val coherence = settings.centerCoherence.coerceIn(0, 100)
+    val height = settings.virtualHeight.coerceIn(0, 100)
+    val surroundActive = settings.dspEnabled && !settings.monoFoldDown && mode != SurroundMode.OFF
+    val intensityNorm = intensity / 100f
+    val coherenceNorm = coherence / 100f
+    val heightNorm = height / 100f
+
+    val centerBoostDb = if (surroundActive) coherenceNorm * mode.centerBoostMaxDb else 0f
+    val centerInjectGain = if (surroundActive && centerBoostDb > 0.05f) {
+        (Math.pow(10.0, centerBoostDb.toDouble() / 20.0) - 1.0).toFloat()
+    } else {
+        0f
+    }
+    val sideWetGain = if (surroundActive) intensityNorm * mode.sideWetScale else 0f
+    val heightBoostDb = if (surroundActive) heightNorm * mode.heightBoostMaxDb else 0f
+    val xtcGain = if (surroundActive) intensityNorm * mode.crosstalkCancelGain else 0f
+    val allPassActive = surroundActive && mode.useAllPassPhase && 1100.0 < sr * 0.45
+    val haasLeftSamples = if (surroundActive && mode.haasLeftMs > 0f) {
+        ((mode.haasLeftMs / 1000f) * sr).roundToInt().coerceAtLeast(1)
+    } else 0
+    val haasRightSamples = if (surroundActive && mode.haasRightMs > 0f) {
+        ((mode.haasRightMs / 1000f) * sr).roundToInt().coerceAtLeast(1)
+    } else 0
+    val xtcDelaySamples = if (surroundActive && xtcGain > 0.002f) {
+        (0.00055 * sr).roundToInt().coerceAtLeast(1)
+    } else 0
+
+    return SurroundMatrixDiagnostics(
+        trigger = trigger,
+        selectedPresetId = settings.selectedPresetId,
+        dspEnabled = settings.dspEnabled,
+        monoFoldDown = settings.monoFoldDown,
+        surroundActive = surroundActive,
+        mode = mode,
+        surroundIntensityPercent = intensity,
+        centerCoherencePercent = coherence,
+        virtualHeightPercent = height,
+        baseStereoWidthPercent = settings.stereoWidthPercent.coerceIn(0, 150),
+        effectiveStereoWidthPercent = computeEffectiveSurroundWidthPercent(settings),
+        sampleRateHz = sr,
+        pcmConfigured = pcmConfigured,
+        haasLeftMs = if (surroundActive) mode.haasLeftMs else 0f,
+        haasRightMs = if (surroundActive) mode.haasRightMs else 0f,
+        haasLeftSamples = haasLeftSamples,
+        haasRightSamples = haasRightSamples,
+        sideBandpassHz = mode.sideBandpassHz,
+        sideBandpassQ = mode.sideBandpassQ,
+        sideWetGain = sideWetGain,
+        centerBoostDb = centerBoostDb,
+        centerInjectGain = centerInjectGain,
+        heightBoostDb = heightBoostDb,
+        allPassPhase90Active = allPassActive,
+        xtcGain = xtcGain,
+        xtcDelaySamples = xtcDelaySamples,
+        hardwareVirtualizerActive = hardwareVirtualizerActive,
+        hardwareVirtualizerStrengthPermille = if (hardwareVirtualizerActive) hardwareVirtualizerStrengthPermille else 0,
+        midToAmbienceMix = if (surroundActive) mode.midToAmbienceMix else 0f,
+        diffuserFeedback = if (surroundActive) mode.diffuserFeedback else 0f,
+        hallReverbMix = if (surroundActive) intensityNorm * mode.hallReverbMix else 0f,
+        cabinWarmthBoostDb = if (surroundActive) intensityNorm * mode.cabinWarmthBoostDb else 0f
+    )
+}
+
+fun formatSurroundMatrixDiagnosticLog(diag: SurroundMatrixDiagnostics): String {
+    return buildString {
+        append("[DSP Surround Diagnostics] trigger=").append(diag.trigger)
+        append(" | mode=").append(diag.mode.id).append(" (").append(diag.mode.badge).append(")")
+        append(" | active=").append(diag.surroundActive)
+        append(" | dspEnabled=").append(diag.dspEnabled)
+        append(" | mono=").append(diag.monoFoldDown)
+        append(" | preset=").append(diag.selectedPresetId)
+        append(" | width=").append(diag.baseStereoWidthPercent).append("%->").append(diag.effectiveStereoWidthPercent).append("%")
+        append(" | intensity=").append(diag.surroundIntensityPercent).append("%")
+        append(" | centerLock=").append(diag.centerCoherencePercent).append("% (+")
+            .append(String.format(java.util.Locale.US, "%.2f", diag.centerBoostDb)).append("dB, inj=")
+            .append(String.format(java.util.Locale.US, "%.3f", diag.centerInjectGain)).append(")")
+        append(" | height=").append(diag.virtualHeightPercent).append("% (+")
+            .append(String.format(java.util.Locale.US, "%.2f", diag.heightBoostDb)).append("dB@7.2kHz)")
+        append(" | haasL=").append(String.format(java.util.Locale.US, "%.1f", diag.haasLeftMs))
+            .append("ms(").append(diag.haasLeftSamples).append("smp)")
+        append(" | haasR=").append(String.format(java.util.Locale.US, "%.1f", diag.haasRightMs))
+            .append("ms(").append(diag.haasRightSamples).append("smp)")
+        append(" | sideBP=").append(diag.sideBandpassHz.roundToInt()).append("Hz(Q=")
+            .append(String.format(java.util.Locale.US, "%.2f", diag.sideBandpassQ))
+            .append(",wet=").append(String.format(java.util.Locale.US, "%.3f", diag.sideWetGain))
+            .append(",midMix=").append(String.format(java.util.Locale.US, "%.2f", diag.midToAmbienceMix))
+            .append(",diff=").append(String.format(java.util.Locale.US, "%.2f", diag.diffuserFeedback))
+            .append(",hall=").append(String.format(java.util.Locale.US, "%.2f", diag.hallReverbMix)).append(")")
+        append(" | ap90=").append(diag.allPassPhase90Active)
+        append(" | xtc=").append(String.format(java.util.Locale.US, "%.3f", diag.xtcGain))
+            .append("(").append(diag.xtcDelaySamples).append("smp)")
+        append(" | pcm=").append(if (diag.pcmConfigured) "${diag.sampleRateHz}Hz" else "pending(${diag.sampleRateHz}Hz)")
+        append(" | hwVirt=").append(if (diag.hardwareVirtualizerActive) "${diag.hardwareVirtualizerStrengthPermille}/1000" else "off")
+    }
+}
+
+/**
+ * Live PCM bitstream telemetry captured directly inside CarDspAudioProcessor.queueInput()
+ * so SurroundMatrixDebugger can prove whether a selected profile actually mutates output samples.
+ */
+data class SurroundBitstreamTelemetry(
+    val pcmConfigured: Boolean = false,
+    val inputEncoding: String = "UNCONFIGURED",
+    val sampleRateHz: Int = 44100,
+    val channelCount: Int = 2,
+    val coeffVersionTarget: Int = 0,
+    val coeffVersionApplied: Int = -1,
+    val buffersProcessed: Long = 0L,
+    val framesProcessed: Long = 0L,
+    val fastPathBypassed: Boolean = true,
+    val surroundStageExecuted: Boolean = false,
+    val bitstreamModified: Boolean = false,
+    val inputRms: Float = 0f,
+    val outputRms: Float = 0f,
+    val surroundDeltaRms: Float = 0f,
+    val peakSampleDelta: Float = 0f,
+    val inputChecksum: Int = 0,
+    val outputChecksum: Int = 0,
+    val lastProcessedTimestampMs: Long = 0L
+) {
+    val surroundDeltaPercent: Float
+        get() = if (inputRms > 0.0002f) {
+            ((surroundDeltaRms / inputRms) * 100f).coerceIn(0f, 300f)
+        } else {
+            0f
+        }
+}
+
+/**
+ * Complete snapshot combining HeadunitDspEngine state, calculated Surround Matrix parameters,
+ * and live PCM bitstream telemetry for the SurroundMatrixDebugger view.
+ */
+data class SurroundDebugSnapshot(
+    val diagnostics: SurroundMatrixDiagnostics,
+    val bitstream: SurroundBitstreamTelemetry,
+    val hardwareAttached: Boolean = false,
+    val globalSessionAttached: Boolean = false,
+    val activeOutputRouteId: String = AudioOutputRoute.HEADUNIT_SPEAKERS.id,
+    val snapshotTimestampMs: Long = System.currentTimeMillis()
+) {
+    val isAudioStreamingLive: Boolean
+        get() = bitstream.buffersProcessed > 0L &&
+            bitstream.lastProcessedTimestampMs > 0L &&
+            (snapshotTimestampMs - bitstream.lastProcessedTimestampMs) <= 2000L
+}
+
+private fun jsonEscape(value: String): String {
+    return value.replace("\\", "\\\\").replace("\"", "\\\"")
+}
+
+private fun formatDec(value: Float, decimals: Int = 4): String {
+    return String.format(java.util.Locale.US, "%.${decimals}f", value)
+}
+
+private fun formatHex8(value: Int): String {
+    return "0x" + String.format(java.util.Locale.US, "%08X", value)
+}
+
+/**
+ * Formats the live HeadunitDspEngine surround state and PCM bitstream telemetry as a clean,
+ * deterministic JSON document for inspection in SurroundMatrixDebugger and Logcat.
+ */
+fun formatSurroundDebugJson(snapshot: SurroundDebugSnapshot): String {
+    val d = snapshot.diagnostics
+    val b = snapshot.bitstream
+    val verdict = when {
+        !d.dspEnabled -> "BYPASSED_DSP_OFF"
+        d.monoFoldDown -> "SUPPRESSED_MONO_FOLDDOWN"
+        d.mode == SurroundMode.OFF -> "DRY_DIRECT_STEREO"
+        !b.pcmConfigured -> "PCM_PROCESSOR_NOT_CONFIGURED"
+        b.buffersProcessed == 0L -> "IDLE_NO_AUDIO_BUFFERS"
+        !snapshot.isAudioStreamingLive -> "PAUSED_STALE_BUFFER"
+        b.surroundStageExecuted && b.bitstreamModified && b.surroundDeltaRms > 0.00005f -> "SURROUND_MODIFYING_BITSTREAM"
+        b.surroundStageExecuted && b.inputRms < 0.0001f -> "SURROUND_ACTIVE_SILENT_INPUT"
+        b.fastPathBypassed -> "WARNING_FAST_PATH_BYPASSED"
+        else -> "SURROUND_ENGAGED_CHECK_DELTA"
+    }
+    return buildString {
+        appendLine("{")
+        appendLine("  \"verdict\": \"$verdict\",")
+        appendLine("  \"engine\": {")
+        appendLine("    \"dspEnabled\": ${d.dspEnabled},")
+        appendLine("    \"selectedPresetId\": \"${jsonEscape(d.selectedPresetId)}\",")
+        appendLine("    \"monoFoldDown\": ${d.monoFoldDown},")
+        appendLine("    \"hardwareAttached\": ${snapshot.hardwareAttached},")
+        appendLine("    \"globalSession0\": ${snapshot.globalSessionAttached},")
+        appendLine("    \"outputRoute\": \"${jsonEscape(snapshot.activeOutputRouteId)}\",")
+        appendLine("    \"trigger\": \"${jsonEscape(d.trigger)}\"")
+        appendLine("  },")
+        appendLine("  \"surroundProfile\": {")
+        appendLine("    \"modeId\": \"${d.mode.id}\",")
+        appendLine("    \"label\": \"${jsonEscape(d.mode.label)}\",")
+        appendLine("    \"badge\": \"${jsonEscape(d.mode.badge)}\",")
+        appendLine("    \"surroundActive\": ${d.surroundActive},")
+        appendLine("    \"intensityPercent\": ${d.surroundIntensityPercent},")
+        appendLine("    \"centerCoherencePercent\": ${d.centerCoherencePercent},")
+        appendLine("    \"virtualHeightPercent\": ${d.virtualHeightPercent},")
+        appendLine("    \"baseStereoWidthPercent\": ${d.baseStereoWidthPercent},")
+        appendLine("    \"effectiveStereoWidthPercent\": ${d.effectiveStereoWidthPercent}")
+        appendLine("  },")
+        appendLine("  \"matrixParameters\": {")
+        appendLine("    \"haasLeftMs\": ${formatDec(d.haasLeftMs, 1)},")
+        appendLine("    \"haasRightMs\": ${formatDec(d.haasRightMs, 1)},")
+        appendLine("    \"haasLeftSamples\": ${d.haasLeftSamples},")
+        appendLine("    \"haasRightSamples\": ${d.haasRightSamples},")
+        appendLine("    \"sideBandpassHz\": ${d.sideBandpassHz.roundToInt()},")
+        appendLine("    \"sideBandpassQ\": ${formatDec(d.sideBandpassQ, 2)},")
+        appendLine("    \"sideWetGain\": ${formatDec(d.sideWetGain, 4)},")
+        appendLine("    \"midToAmbienceMix\": ${formatDec(d.midToAmbienceMix, 3)},")
+        appendLine("    \"diffuserFeedback\": ${formatDec(d.diffuserFeedback, 3)},")
+        appendLine("    \"hallReverbMix\": ${formatDec(d.hallReverbMix, 3)},")
+        appendLine("    \"cabinWarmthBoostDb\": ${formatDec(d.cabinWarmthBoostDb, 2)},")
+        appendLine("    \"centerBoostDb\": ${formatDec(d.centerBoostDb, 2)},")
+        appendLine("    \"centerInjectGain\": ${formatDec(d.centerInjectGain, 4)},")
+        appendLine("    \"heightBoostDb_7_2kHz\": ${formatDec(d.heightBoostDb, 2)},")
+        appendLine("    \"allPassPhase90Active\": ${d.allPassPhase90Active},")
+        appendLine("    \"xtcGain\": ${formatDec(d.xtcGain, 4)},")
+        appendLine("    \"xtcDelaySamples\": ${d.xtcDelaySamples}")
+        appendLine("  },")
+        appendLine("  \"hardwareVirtualizer\": {")
+        appendLine("    \"active\": ${d.hardwareVirtualizerActive},")
+        appendLine("    \"strengthPermille\": ${d.hardwareVirtualizerStrengthPermille}")
+        appendLine("  },")
+        appendLine("  \"bitstreamOutput\": {")
+        appendLine("    \"pcmConfigured\": ${b.pcmConfigured},")
+        appendLine("    \"inputEncoding\": \"${jsonEscape(b.inputEncoding)}\",")
+        appendLine("    \"sampleRateHz\": ${b.sampleRateHz},")
+        appendLine("    \"channelCount\": ${b.channelCount},")
+        appendLine("    \"coeffVersionTarget\": ${b.coeffVersionTarget},")
+        appendLine("    \"coeffVersionApplied\": ${b.coeffVersionApplied},")
+        appendLine("    \"buffersProcessed\": ${b.buffersProcessed},")
+        appendLine("    \"framesProcessed\": ${b.framesProcessed},")
+        appendLine("    \"streamingLive\": ${snapshot.isAudioStreamingLive},")
+        appendLine("    \"fastPathBypassed\": ${b.fastPathBypassed},")
+        appendLine("    \"surroundStageExecuted\": ${b.surroundStageExecuted},")
+        appendLine("    \"bitstreamModified\": ${b.bitstreamModified},")
+        appendLine("    \"inputRms\": ${formatDec(b.inputRms, 5)},")
+        appendLine("    \"outputRms\": ${formatDec(b.outputRms, 5)},")
+        appendLine("    \"surroundDeltaRms\": ${formatDec(b.surroundDeltaRms, 5)},")
+        appendLine("    \"surroundDeltaPercent\": ${formatDec(b.surroundDeltaPercent, 1)},")
+        appendLine("    \"peakSampleDelta\": ${formatDec(b.peakSampleDelta, 5)},")
+        appendLine("    \"inputChecksum\": \"${formatHex8(b.inputChecksum)}\",")
+        appendLine("    \"outputChecksum\": \"${formatHex8(b.outputChecksum)}\"")
+        appendLine("  }")
+        append("}")
+    }
 }
 
 /**
@@ -595,6 +956,10 @@ fun serializeCustomPresets(presets: List<DspPreset16>): String {
             preset.hpfCutoffHz?.let { put("hpfCutoffHz", it) }
             preset.loudnessContour?.let { put("loudnessContour", it) }
             preset.compressorProfileId?.let { put("compressorProfileId", it) }
+            preset.surroundModeId?.let { put("surroundModeId", it) }
+            preset.surroundIntensity?.let { put("surroundIntensity", it) }
+            preset.centerCoherence?.let { put("centerCoherence", it) }
+            preset.virtualHeight?.let { put("virtualHeight", it) }
         })
     }
     return arr.toString()
@@ -619,6 +984,10 @@ fun deserializeCustomPresets(json: String?): List<DspPreset16> {
                 hpfCutoffHz = if (obj.has("hpfCutoffHz")) obj.optInt("hpfCutoffHz") else null,
                 loudnessContour = if (obj.has("loudnessContour")) obj.optBoolean("loudnessContour") else null,
                 compressorProfileId = obj.optString("compressorProfileId").ifBlank { null },
+                surroundModeId = obj.optString("surroundModeId").ifBlank { null },
+                surroundIntensity = if (obj.has("surroundIntensity")) obj.optInt("surroundIntensity").coerceIn(0, 100) else null,
+                centerCoherence = if (obj.has("centerCoherence")) obj.optInt("centerCoherence").coerceIn(0, 100) else null,
+                virtualHeight = if (obj.has("virtualHeight")) obj.optInt("virtualHeight").coerceIn(0, 100) else null,
                 isCustom = true
             )
         }

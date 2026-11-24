@@ -198,6 +198,8 @@ import {
   SURROUND_MODES,
   SurroundModeId,
   applyPresetToDsp,
+  buildSurroundMatrixDiagnostics,
+  formatSurroundMatrixDiagnosticLog,
   matchPresetForTrack,
   sanitizeCustomPresets,
   sanitizeDspSettings,
@@ -451,6 +453,7 @@ export default function App() {
   // Offline Storage Records (IndexedDB) & Optional Local Download Folder
   const [offlineTrackIds, setOfflineTrackIds] = useState<Set<string>>(new Set());
   const [offlineStorageBytes, setOfflineStorageBytes] = useState(0);
+  const [offlineArtworkBytes, setOfflineArtworkBytes] = useState(0);
   const [offlineFolderHandle, setOfflineFolderHandle] = useState<any>(null);
   const [offlineFolderName, setOfflineFolderName] = useState<string | null>(null);
   const [offlineFolderPermission, setOfflineFolderPermission] = useState<'granted' | 'prompt' | 'denied'>('prompt');
@@ -811,8 +814,14 @@ export default function App() {
       const records = await getAllOfflineTracks();
       const ids = new Set(records.map((r) => r.id));
       setOfflineTrackIds(ids);
-      const totalBytes = records.reduce((acc, r) => acc + (r.blob ? r.blob.size : 0), 0);
-      setOfflineStorageBytes(totalBytes);
+      let audioBytes = 0;
+      let artBytes = 0;
+      for (const r of records) {
+        if (r.blob) audioBytes += r.blob.size;
+        if (r.coverBlob) artBytes += r.coverBlob.size;
+      }
+      setOfflineArtworkBytes(artBytes);
+      setOfflineStorageBytes(audioBytes + artBytes);
 
       const covers: Record<string, string> = {};
       for (const rec of records) {
@@ -1516,6 +1525,10 @@ export default function App() {
       },
     });
 
+    if (res.status === 429) {
+      throw new Error('RATE_LIMIT_429');
+    }
+
     if (!res.ok) {
       throw new Error(`WebDAV HTTP ${res.status}: ${res.statusText}`);
     }
@@ -1962,12 +1975,19 @@ export default function App() {
         : parseScanFolders(startFolder, extraScanFolders);
     const folderQueue: string[] = [...initialRoots];
 
+    let hitRateLimit = false;
+
     try {
       while (folderQueue.length > 0 && visitedFolders.size < 250) {
         const currentFld = folderQueue.shift()!;
         const normKey = currentFld.toLowerCase();
         if (visitedFolders.has(normKey)) continue;
         visitedFolders.add(normKey);
+
+        // Polite pacing after initial folders so recursive scans do not trip preview proxy rate limits
+        if (visitedFolders.size > 2) {
+          await new Promise((r) => setTimeout(r, 120));
+        }
 
         setScanProgress(`Scanning /${currentFld || 'Root'}...`);
 
@@ -2034,13 +2054,17 @@ export default function App() {
               }
             }
           }
-        } catch {
+        } catch (folderErr: any) {
+          if (folderErr?.message === 'RATE_LIMIT_429') {
+            hitRateLimit = true;
+            break;
+          }
           console.warn(`Folder /${currentFld || 'Root'} could not be read; continuing scan queue.`);
         }
       }
 
       // If full scan across all configured roots yielded 0 files, fall back to Nextcloud Root /
-      if (!additive && collectedTracks.length === 0 && !visitedFolders.has('')) {
+      if (!hitRateLimit && !additive && collectedTracks.length === 0 && !visitedFolders.has('')) {
         setScanProgress('Scanning Root directory for audio files...');
         const fallbackQueue: string[] = [''];
         while (fallbackQueue.length > 0 && visitedFolders.size < 250) {
@@ -2048,6 +2072,9 @@ export default function App() {
           const key = cur.toLowerCase();
           if (visitedFolders.has(key)) continue;
           visitedFolders.add(key);
+          if (visitedFolders.size > 2) {
+            await new Promise((r) => setTimeout(r, 120));
+          }
           try {
             const { files, subfolders } = await fetchWebDAVFolder(cur, user, pass);
             for (const f of files) {
@@ -2079,7 +2106,11 @@ export default function App() {
                 }
               }
             }
-          } catch {
+          } catch (fallbackErr: any) {
+            if (fallbackErr?.message === 'RATE_LIMIT_429') {
+              hitRateLimit = true;
+              break;
+            }
             // root scan fallback handled
           }
         }
@@ -2104,7 +2135,11 @@ export default function App() {
         localStorage.setItem('zentryx_nc_folder', startFolder);
       }
 
-      if (additive) {
+      if (hitRateLimit) {
+        setStatusMessage(
+          `Preview proxy rate limit reached — loaded ${mergeResult.tracks.length} track(s) found so far. Wait ~30s before rescanning.`
+        );
+      } else if (additive) {
         const displayTarget = `/${normalizeFolderPath(startFolder) || 'Root'}`;
         if (uniqueDiscovered.length > 0) {
           setStatusMessage(
@@ -5078,6 +5113,13 @@ export default function App() {
           triggerHaptic('toggle');
           const label = SURROUND_MODES[next.surroundMode ?? 'off']?.label || 'Direct Stereo';
           showCockpitHud('surround', 'Surround Mode', label);
+          if (!dspEngineRef.current) {
+            console.info(
+              formatSurroundMatrixDiagnosticLog(
+                buildSurroundMatrixDiagnostics(`selectSurroundMode(${next.surroundMode ?? 'off'})`, next)
+              )
+            );
+          }
         }
         if (activeCompareSlot === 'B') {
           setSlotBDspSnapshot(next);
@@ -7528,7 +7570,7 @@ export default function App() {
                     const originalIndex = trackIndexMap.get(track.id) ?? -1;
                     const isCurrent = currentTrackIndex === originalIndex;
                     const isFav = favorites.has(track.id);
-                    const isOffline = offlineTrackIds.has(track.id);
+                    const isOffline = offlineTrackIds.has(track.id) || downloadedTracks.has(track.id);
 
                     return (
                       <div
@@ -7557,12 +7599,23 @@ export default function App() {
                             isCurrent={isCurrent}
                             variant="row"
                           />
-                          <div className="truncate flex-1">
-                            <div
-                              className="font-semibold text-sm truncate leading-snug"
-                              style={{ color: isCurrent ? activeAccent.hex : '#ffffff' }}
-                            >
-                              {track.title}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <div
+                                className="font-semibold text-sm truncate leading-snug"
+                                style={{ color: isCurrent ? activeAccent.hex : '#ffffff' }}
+                              >
+                                {track.title}
+                              </div>
+                              {isOffline && (
+                                <span
+                                  className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-emerald-500/20 border border-emerald-500/50 text-emerald-400 shrink-0"
+                                  title="Cached in offline storage"
+                                  aria-label="Cached in offline storage"
+                                >
+                                  <Check className="w-2.5 h-2.5 stroke-[3]" />
+                                </span>
+                              )}
                             </div>
                             <div className="text-[11px] text-slate-400 truncate mt-0.5 flex items-center gap-1.5">
                               <span>
@@ -7649,8 +7702,7 @@ export default function App() {
                               triggerHaptic();
                               downloadTrackForOffline(track);
                             }}
-                            className="p-2 text-slate-500 hover:text-white transition-colors"
-                            style={{ color: isOffline ? activeAccent.hex : undefined }}
+                            className={`p-2 transition-colors ${isOffline ? 'text-emerald-400 hover:text-emerald-300' : 'text-slate-500 hover:text-white'}`}
                             title={isOffline ? 'Offline Cached (Ready for roadtrips)' : 'Download for Offline Roadtrips'}
                           >
                             {downloadingId === track.id ? (
@@ -7743,7 +7795,7 @@ export default function App() {
                   return results.map((track) => {
                     const isCurrent = currentTrack?.id === track.id;
                     const isFav = favorites.has(track.id);
-                    const isOffline = offlineTrackIds.has(track.id);
+                    const isOffline = offlineTrackIds.has(track.id) || downloadedTracks.has(track.id);
 
                     return (
                       <div
@@ -7773,22 +7825,28 @@ export default function App() {
                             variant="row"
                             className="w-11 h-11"
                           />
-                          <div className="truncate">
-                            <div
-                              className="font-bold text-sm truncate"
-                              style={{ color: isCurrent ? activeAccent.hex : '#ffffff' }}
-                            >
-                              {track.title}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <div
+                                className="font-bold text-sm truncate"
+                                style={{ color: isCurrent ? activeAccent.hex : '#ffffff' }}
+                              >
+                                {track.title}
+                              </div>
+                              {isOffline && (
+                                <span
+                                  className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-emerald-500/20 border border-emerald-500/50 text-emerald-400 shrink-0"
+                                  title="Cached in offline storage"
+                                  aria-label="Cached in offline storage"
+                                >
+                                  <Check className="w-2.5 h-2.5 stroke-[3]" />
+                                </span>
+                              )}
                             </div>
                             <div className="text-xs text-slate-400 truncate flex items-center gap-1.5 mt-0.5">
                               <span>{track.artist}</span>
                               <span className="text-slate-600">•</span>
                               <span>{track.album}</span>
-                              {isOffline && (
-                                <span className="text-[10px] bg-emerald-500/20 text-emerald-400 font-bold px-1.5 py-0.5 rounded border border-emerald-500/30">
-                                  OFFLINE
-                                </span>
-                              )}
                             </div>
                           </div>
                         </div>
@@ -7834,8 +7892,9 @@ export default function App() {
                               triggerHaptic();
                               downloadTrackForOffline(track);
                             }}
-                            className="p-2 text-slate-400 hover:text-white rounded-lg border border-slate-800/80 hover:border-slate-700 transition-colors active:scale-95"
-                            style={{ color: isOffline ? activeAccent.hex : undefined }}
+                            className={`p-2 rounded-lg border border-slate-800/80 hover:border-slate-700 transition-colors active:scale-95 ${
+                              isOffline ? 'text-emerald-400 hover:text-emerald-300' : 'text-slate-400 hover:text-white'
+                            }`}
                             title={isOffline ? 'Offline Cached' : 'Download for Offline Roadtrips'}
                           >
                             {downloadingId === track.id ? (
@@ -7900,7 +7959,15 @@ export default function App() {
                 description: 'Saved Headunit DSP Tune',
                 bands16: [...dspSettings.bands16],
                 bassBoostDb: dspSettings.bassBoostDb,
+                bassBoostFreqHz: dspSettings.bassBoostFreqHz,
                 preampDb: dspSettings.preampDb,
+                hpfCutoffHz: dspSettings.hpfCutoffHz,
+                loudnessContour: dspSettings.loudnessContour,
+                compressorProfile: dspSettings.compressorProfile,
+                surroundMode: dspSettings.surroundMode,
+                surroundIntensity: dspSettings.surroundIntensity,
+                centerCoherence: dspSettings.centerCoherence,
+                virtualHeight: dspSettings.virtualHeight,
                 isCustom: true,
               };
               setCustomDspPresets((prev) => [...prev, preset]);
@@ -7963,7 +8030,9 @@ export default function App() {
             serverUrl={serverUrl}
 
             offlineStorageBytes={offlineStorageBytes}
+            offlineArtworkBytes={offlineArtworkBytes}
             offlineTrackCount={offlineTrackIds.size}
+            totalLibraryTrackCount={tracks.length}
             onBatchSyncCurrentFolder={handleBatchSyncCurrentFolder}
             isBatchSyncing={isBatchSyncing}
             batchSyncProgress={batchSyncProgress}

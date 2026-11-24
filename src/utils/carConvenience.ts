@@ -482,6 +482,92 @@ export function selectOfflineCacheEvictions(
   return toEvict;
 }
 
+export type OfflineStorageBadgeStatus = 'empty' | 'healthy' | 'warning' | 'near_cap';
+
+export interface OfflineStorageBadgeInput {
+  downloadedCount: number;
+  totalLibraryCount?: number;
+  offlineStorageBytes: number;
+  offlineArtworkBytes?: number;
+  cacheCapMb: number;
+  storageQuota?: { usageBytes: number; quotaBytes: number; persisted: boolean } | null;
+}
+
+export interface OfflineStorageBadgeStats {
+  downloadedCount: number;
+  totalLibraryCount: number;
+  libraryCoveragePercent: number;
+  audioBytes: number;
+  artworkBytes: number;
+  totalOfflineBytes: number;
+  averageTrackBytes: number;
+  capBytes: number;
+  capUsagePercent: number;
+  remainingCapBytes: number;
+  quotaUsagePercent: number | null;
+  isPersistentStorage: boolean;
+  status: OfflineStorageBadgeStatus;
+  compactLabel: string;
+}
+
+export function formatStorageBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const k = 1024;
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const idx = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(k)));
+  const scaled = bytes / Math.pow(k, idx);
+  const formatted = idx === 0 ? Math.round(scaled).toString() : parseFloat(scaled.toFixed(1)).toString();
+  return `${formatted} ${units[idx]}`;
+}
+
+export function computeOfflineStorageBadgeStats(input: OfflineStorageBadgeInput): OfflineStorageBadgeStats {
+  const downloadedCount = Math.max(0, Math.floor(input.downloadedCount || 0));
+  const totalLibraryCount = Math.max(downloadedCount, Math.floor(input.totalLibraryCount || 0));
+  const totalOfflineBytes = Math.max(0, Math.floor(input.offlineStorageBytes || 0));
+  const artworkBytes = Math.min(totalOfflineBytes, Math.max(0, Math.floor(input.offlineArtworkBytes || 0)));
+  const audioBytes = Math.max(0, totalOfflineBytes - artworkBytes);
+  const capBytes = Math.max(1, Math.floor((input.cacheCapMb || 500) * 1024 * 1024));
+  const capUsagePercent = Math.min(100, Math.round((totalOfflineBytes / capBytes) * 100));
+  const remainingCapBytes = Math.max(0, capBytes - totalOfflineBytes);
+  const averageTrackBytes = downloadedCount > 0 ? Math.round(totalOfflineBytes / downloadedCount) : 0;
+  const libraryCoveragePercent =
+    totalLibraryCount > 0 ? Math.min(100, Math.round((downloadedCount / totalLibraryCount) * 100)) : 0;
+
+  const quotaUsagePercent =
+    input.storageQuota && input.storageQuota.quotaBytes > 0
+      ? Math.min(100, Math.round((input.storageQuota.usageBytes / input.storageQuota.quotaBytes) * 100))
+      : null;
+
+  let status: OfflineStorageBadgeStatus = 'empty';
+  if (downloadedCount > 0 || totalOfflineBytes > 0) {
+    if (capUsagePercent >= 90) status = 'near_cap';
+    else if (capUsagePercent >= 75) status = 'warning';
+    else status = 'healthy';
+  }
+
+  const compactLabel =
+    downloadedCount > 0
+      ? `${downloadedCount} ${downloadedCount === 1 ? 'track' : 'tracks'} · ${formatStorageBytes(totalOfflineBytes)}`
+      : '0 cached';
+
+  return {
+    downloadedCount,
+    totalLibraryCount,
+    libraryCoveragePercent,
+    audioBytes,
+    artworkBytes,
+    totalOfflineBytes,
+    averageTrackBytes,
+    capBytes,
+    capUsagePercent,
+    remainingCapBytes,
+    quotaUsagePercent,
+    isPersistentStorage: Boolean(input.storageQuota?.persisted),
+    status,
+    compactLabel,
+  };
+}
+
 export interface TrackPlayStat {
   playCount: number;
   lastPlayedAt: number;

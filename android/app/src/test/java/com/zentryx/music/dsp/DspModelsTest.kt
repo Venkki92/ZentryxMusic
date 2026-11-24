@@ -224,4 +224,97 @@ class DspModelsTest {
         val heightGain = effectiveBandGainDb(10, flatAtmos)
         assertTrue("Expected Atmos 7kHz pinna height lift > 2.0 dB (got $heightGain)", heightGain > 2.0f)
     }
+
+    @Test
+    fun `applyPresetToDsp preserves active surround mode for factory EQ presets and applies surround fields when preset defines them`() {
+        val activeLogic7 = DspSettings(
+            dspEnabled = false,
+            surroundMode = SurroundMode.LOGIC7_SURROUND,
+            surroundIntensity = 75,
+            centerCoherence = 65,
+            virtualHeight = 50,
+            monoFoldDown = false
+        )
+        val pioneer = FACTORY_DSP_PRESETS.first { it.id == "pioneer_ts_e170ci" }
+        val afterFactory = applyPresetToDsp(activeLogic7, pioneer)
+        assertTrue("applyPresetToDsp must enable DSP", afterFactory.dspEnabled)
+        assertEquals(SurroundMode.LOGIC7_SURROUND, afterFactory.surroundMode)
+        assertEquals(75, afterFactory.surroundIntensity)
+        assertEquals(65, afterFactory.centerCoherence)
+        assertEquals(50, afterFactory.virtualHeight)
+
+        // Custom preset carrying explicit Dolby Atmos surround profile must update surround state and clear mono fold-down
+        val customSurroundPreset = DspPreset16(
+            id = "custom_atmos_cabin",
+            name = "Atmos Cabin",
+            description = "Saved surround preset",
+            bands16 = List(16) { 1f },
+            surroundModeId = SurroundMode.DOLBY_ATMOS_VIRTUAL.id,
+            surroundIntensity = 85,
+            centerCoherence = 70,
+            virtualHeight = 90,
+            isCustom = true
+        )
+        val monoBase = DspSettings(
+            dspEnabled = false,
+            surroundMode = SurroundMode.OFF,
+            monoFoldDown = true
+        )
+        val afterCustom = applyPresetToDsp(monoBase, customSurroundPreset)
+        assertTrue(afterCustom.dspEnabled)
+        assertEquals(SurroundMode.DOLBY_ATMOS_VIRTUAL, afterCustom.surroundMode)
+        assertEquals(85, afterCustom.surroundIntensity)
+        assertEquals(70, afterCustom.centerCoherence)
+        assertEquals(90, afterCustom.virtualHeight)
+        assertEquals(false, afterCustom.monoFoldDown)
+
+        // Custom preset JSON round-trip preserves surround parameters
+        val roundTripped = deserializeCustomPresets(serializeCustomPresets(listOf(customSurroundPreset))).first()
+        assertEquals(SurroundMode.DOLBY_ATMOS_VIRTUAL.id, roundTripped.surroundModeId)
+        assertEquals(85, roundTripped.surroundIntensity)
+        assertEquals(70, roundTripped.centerCoherence)
+        assertEquals(90, roundTripped.virtualHeight)
+    }
+
+    @Test
+    fun `buildSurroundMatrixDiagnostics outputs accurate parameters for every surround profile`() {
+        for (mode in SurroundMode.entries) {
+            val settings = DspSettings(
+                dspEnabled = true,
+                selectedPresetId = "w203_bose",
+                surroundMode = mode,
+                surroundIntensity = 80,
+                centerCoherence = 60,
+                virtualHeight = 75,
+                stereoWidthPercent = 100,
+                monoFoldDown = false
+            )
+            val diag = buildSurroundMatrixDiagnostics(
+                trigger = "selectSurroundMode(${mode.id})",
+                settings = settings,
+                sampleRateHz = 48000,
+                pcmConfigured = true,
+                hardwareVirtualizerActive = mode != SurroundMode.OFF,
+                hardwareVirtualizerStrengthPermille = if (mode != SurroundMode.OFF) 650 else 0
+            )
+            val formatted = formatSurroundMatrixDiagnosticLog(diag)
+
+            assertTrue(formatted.contains("mode=${mode.id}"))
+            assertTrue(formatted.contains("trigger=selectSurroundMode(${mode.id})"))
+            if (mode == SurroundMode.OFF) {
+                assertEquals(false, diag.surroundActive)
+                assertEquals(100, diag.effectiveStereoWidthPercent)
+                assertEquals(0f, diag.sideWetGain, 0.0001f)
+            } else {
+                assertTrue("Expected surroundActive=true for $mode", diag.surroundActive)
+                assertTrue("Expected widened stereo width for $mode", diag.effectiveStereoWidthPercent > 100)
+                assertTrue("Expected non-zero Haas delay for $mode", diag.haasLeftSamples > 0 && diag.haasRightSamples > 0)
+                assertTrue("Expected positive sideWetGain for $mode", diag.sideWetGain > 0f)
+                assertEquals(mode.useAllPassPhase, diag.allPassPhase90Active)
+                if (mode.crosstalkCancelGain > 0f) {
+                    assertTrue("Expected positive XTC gain for $mode", diag.xtcGain > 0f && diag.xtcDelaySamples > 0)
+                }
+            }
+        }
+    }
 }

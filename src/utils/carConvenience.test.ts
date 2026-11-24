@@ -11,6 +11,8 @@ import {
   replayGainDbToMultiplier,
   calculateCrossfadeGains,
   selectOfflineCacheEvictions,
+  formatStorageBytes,
+  computeOfflineStorageBadgeStats,
   recordTrackPlayStat,
   buildSmartMixTracks,
   resolveTrackGenre,
@@ -209,6 +211,59 @@ test('carConvenience: Offline Roadtrip Budget Planner sizes tracks to trip hours
   const favOnly = buildRoadtripOfflinePlan(tracks, 2, 'favorites', favs, {}, offline);
   assert.equal(favOnly.tracks.length, 3);
   assert.equal(favOnly.toDownloadCount, 1);
+});
+
+test('carConvenience: Offline storage badge stats compute counts, sizes, cap usage, and warning thresholds', () => {
+  assert.equal(formatStorageBytes(0), '0 B');
+  assert.equal(formatStorageBytes(1536), '1.5 KB');
+  assert.equal(formatStorageBytes(12.5 * 1024 * 1024), '12.5 MB');
+  assert.equal(formatStorageBytes(2 * 1024 * 1024 * 1024), '2 GB');
+
+  const empty = computeOfflineStorageBadgeStats({
+    downloadedCount: 0,
+    totalLibraryCount: 120,
+    offlineStorageBytes: 0,
+    cacheCapMb: 500,
+    storageQuota: null,
+  });
+  assert.equal(empty.status, 'empty');
+  assert.equal(empty.compactLabel, '0 cached');
+  assert.equal(empty.capUsagePercent, 0);
+
+  const healthy = computeOfflineStorageBadgeStats({
+    downloadedCount: 10,
+    totalLibraryCount: 100,
+    offlineStorageBytes: 100 * 1024 * 1024,
+    offlineArtworkBytes: 5 * 1024 * 1024,
+    cacheCapMb: 500,
+    storageQuota: { usageBytes: 120 * 1024 * 1024, quotaBytes: 2 * 1024 * 1024 * 1024, persisted: true },
+  });
+  assert.equal(healthy.status, 'healthy');
+  assert.equal(healthy.libraryCoveragePercent, 10);
+  assert.equal(healthy.audioBytes, 95 * 1024 * 1024);
+  assert.equal(healthy.artworkBytes, 5 * 1024 * 1024);
+  assert.equal(healthy.capUsagePercent, 20);
+  assert.equal(healthy.averageTrackBytes, 10 * 1024 * 1024);
+  assert.equal(healthy.isPersistentStorage, true);
+  assert.equal(healthy.compactLabel, '10 tracks · 100 MB');
+
+  const warning = computeOfflineStorageBadgeStats({
+    downloadedCount: 40,
+    totalLibraryCount: 50,
+    offlineStorageBytes: 400 * 1024 * 1024,
+    cacheCapMb: 500,
+  });
+  assert.equal(warning.status, 'warning');
+  assert.equal(warning.capUsagePercent, 80);
+
+  const nearCap = computeOfflineStorageBadgeStats({
+    downloadedCount: 50,
+    totalLibraryCount: 50,
+    offlineStorageBytes: 480 * 1024 * 1024,
+    cacheCapMb: 500,
+  });
+  assert.equal(nearCap.status, 'near_cap');
+  assert.equal(nearCap.capUsagePercent, 96);
 });
 
 test('carConvenience: SWC Long-Press bindings resolve cruising_mix and cycle_surround actions', () => {

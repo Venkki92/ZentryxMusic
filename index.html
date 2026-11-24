@@ -17,18 +17,27 @@
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   </head>
   <body style="margin:0;background-color:#020617;color:#f1f5f9;">
-    <div id="root"></div>
+    <div id="root">
+      <div data-boot-placeholder="true" style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:#020617;color:#94a3b8;font-family:system-ui,sans-serif;">
+        <div style="font-size:18px;font-weight:700;letter-spacing:0.04em;color:#f8fafc;">ZENTRYX MUSIC</div>
+        <div style="font-size:12px;color:#64748b;">Starting automotive DSP cockpit...</div>
+      </div>
+    </div>
     <script>
       (function () {
         var shown = false;
+        function isAppMounted() {
+          var root = document.getElementById('root');
+          if (!root) return false;
+          return root.childElementCount > 0 && !root.querySelector('[data-boot-placeholder]');
+        }
         function isIgnorableNoise(msg) {
           var text = String(msg || '');
-          return /WebSocket|vite|HMR|ResizeObserver|ServiceWorker|dev-sw|AbortError/i.test(text);
+          return /WebSocket|HMR|@vite\/client|ResizeObserver|ServiceWorker|dev-sw|AbortError/i.test(text);
         }
         function showBootError(msg) {
-          if (shown || isIgnorableNoise(msg)) return;
+          if (shown || isIgnorableNoise(msg) || isAppMounted()) return;
           var root = document.getElementById('root');
-          if (root && root.childElementCount > 0) return;
           shown = true;
           if (!root) return;
           root.innerHTML =
@@ -43,12 +52,23 @@
             '</div></div>';
         }
         window.addEventListener('error', function (e) {
+          var target = e && e.target;
+          if (target && (target.tagName === 'SCRIPT' || target.tagName === 'LINK')) {
+            var src = target.src || target.href || 'module asset';
+            showBootError('Failed to load ' + src + ' (network/rate-limit error). Click Reload Player.');
+            return;
+          }
           showBootError(e && (e.message || (e.error && e.error.message)));
-        });
+        }, true);
         window.addEventListener('unhandledrejection', function (e) {
           var reason = e && e.reason;
           showBootError(reason && (reason.message || String(reason)));
         });
+        window.setTimeout(function () {
+          if (!shown && !isAppMounted()) {
+            showBootError('Preview connection timed out while booting modules (dev server may have restarted). Click Reload Player to reconnect.');
+          }
+        }, 15000);
       })();
     </script>
     <script type="module" src="/src/main.tsx"></script>

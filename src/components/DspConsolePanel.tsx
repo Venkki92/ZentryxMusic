@@ -46,6 +46,7 @@ import {
   calculateLoudnessContourGains,
   calculateRoadNoiseContourDb,
   buildDspResponseCurvePoints,
+  applyPresetToDsp,
 } from '../utils/dspConsole';
 import { CabinRtaController, CabinRtaSweepResult, startCabinRtaSweep } from '../utils/cabinRta';
 import {
@@ -207,18 +208,7 @@ export const DspConsolePanel: React.FC<DspConsolePanelProps> = ({
   );
 
   const handleSelectPreset = (preset: DspPreset16) => {
-    onChangeDspSettings((prev) => ({
-      ...prev,
-      dspEnabled: true,
-      selectedPresetId: preset.id,
-      bands16: [...preset.bands16] as DspBandGains16,
-      bassBoostDb: preset.bassBoostDb ?? prev.bassBoostDb,
-      bassBoostFreqHz: preset.bassBoostFreqHz ?? prev.bassBoostFreqHz,
-      preampDb: preset.preampDb ?? prev.preampDb,
-      hpfCutoffHz: preset.hpfCutoffHz ?? prev.hpfCutoffHz,
-      loudnessContour: preset.loudnessContour ?? prev.loudnessContour,
-      compressorProfile: preset.compressorProfile ?? prev.compressorProfile,
-    }));
+    onChangeDspSettings((prev) => applyPresetToDsp(prev, preset));
   };
 
   const handleChangeBand16 = (index: number, gain: number) => {
@@ -1012,6 +1002,7 @@ export const DspConsolePanel: React.FC<DspConsolePanelProps> = ({
                       onClick={() =>
                         onChangeDspSettings((prev) => ({
                           ...prev,
+                          dspEnabled: true,
                           surroundMode: modeId,
                           monoFoldDown: modeId !== 'off' ? false : prev.monoFoldDown,
                         }))
@@ -1061,6 +1052,7 @@ export const DspConsolePanel: React.FC<DspConsolePanelProps> = ({
                       onClick={() =>
                         onChangeDspSettings((prev) => ({
                           ...prev,
+                          dspEnabled: true,
                           surroundMode: modeId,
                           monoFoldDown: false,
                         }))

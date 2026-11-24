@@ -444,4 +444,253 @@ class CarDspAudioProcessorTest {
             )
         }
     }
+
+    @Test
+    fun `applyPresetToDsp updates CarDspAudioProcessor live width and surround diagnostics immediately`() {
+        val processor = CarDspAudioProcessor()
+        processor.configure(AudioFormat(48000, 2, C.ENCODING_PCM_16BIT))
+        val w203Preset = FACTORY_DSP_PRESETS.first { it.id == "w203_bose" }
+
+        for (mode in SurroundMode.entries) {
+            val base = DspSettings(
+                dspEnabled = false,
+                surroundMode = mode,
+                surroundIntensity = 80,
+                centerCoherence = 65,
+                virtualHeight = 70,
+                stereoWidthPercent = 100
+            )
+            val updated = applyPresetToDsp(base, w203Preset)
+            processor.updateSettings(updated)
+
+            val diag = processor.buildLiveSurroundDiagnostics("applyPresetToDsp(${w203Preset.id})", updated)
+            assertEquals(updated.surroundMode, diag.mode)
+            assertEquals(processor.activeEffectiveWidthPercent, diag.effectiveStereoWidthPercent)
+            assertTrue("PCM processor should remain configured", diag.pcmConfigured)
+            if (mode == SurroundMode.OFF) {
+                assertEquals(100, processor.activeEffectiveWidthPercent)
+            } else {
+                assertTrue(
+                    "Expected effective width > 100% immediately on updateSettings for $mode (was ${processor.activeEffectiveWidthPercent}%)",
+                    processor.activeEffectiveWidthPercent > 100
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `surround bitstream telemetry proves OFF passes dry PCM while every surround profile mutates bitstream`() {
+        val sampleRate = 48000
+        val frames = 1920
+        val processor = CarDspAudioProcessor()
+        processor.configure(AudioFormat(sampleRate, 2, C.ENCODING_PCM_16BIT))
+
+        // 1. Direct / OFF with flat DSP -> fast-path dry bitstream
+        val drySettings = DspSettings(
+            dspEnabled = true,
+            hpfCutoffHz = HpfCutoffHz.OFF,
+            roadNoiseEqEnabled = false,
+            surroundMode = SurroundMode.OFF,
+            stereoWidthPercent = 100,
+            peakLimiterCeilingDb = 0.0f
+        )
+        processor.updateSettings(drySettings)
+        processor.flush()
+        processor.queueInput(buildStereoPcmBuffer(frames, sampleRate, 1300.0, 10000, 3000))
+        processor.getOutput()
+
+        val dryTelemetry = processor.snapshotBitstreamTelemetry()
+        assertTrue("Dry stereo with 0dB ceiling should hit fast-path bypass", dryTelemetry.fastPathBypassed)
+        assertEquals(false, dryTelemetry.surroundStageExecuted)
+        assertEquals(false, dryTelemetry.bitstreamModified)
+        assertEquals(dryTelemetry.inputChecksum, dryTelemetry.outputChecksum)
+        assertEquals(0f, dryTelemetry.surroundDeltaRms, 0.00001f)
+
+        val dryJson = formatSurroundDebugJson(
+            SurroundDebugSnapshot(
+                diagnostics = processor.buildLiveSurroundDiagnostics("test_off", drySettings),
+                bitstream = dryTelemetry
+            )
+        )
+        assertTrue(dryJson.contains("\"verdict\": \"DRY_DIRECT_STEREO\""))
+        assertTrue(dryJson.contains("\"bitstreamModified\": false"))
+
+        // 2. Every active SurroundMode must execute surround stage & visibly mutate PCM samples
+        for (mode in SurroundMode.entries.filter { it != SurroundMode.OFF }) {
+            val activeSettings = drySettings.copy(
+                surroundMode = mode,
+                surroundIntensity = 80,
+                centerCoherence = 60,
+                virtualHeight = 70
+            )
+            processor.updateSettings(activeSettings)
+            processor.flush()
+            processor.queueInput(buildStereoPcmBuffer(frames, sampleRate, 1300.0, 10000, 3000))
+            processor.getOutput()
+
+            val tel = processor.snapshotBitstreamTelemetry()
+            assertEquals("Mode $mode must not hit dry fast-path bypass", false, tel.fastPathBypassed)
+            assertEquals("Mode $mode must execute surround PCM stage", true, tel.surroundStageExecuted)
+            assertEquals("Mode $mode must mutate output bitstream", true, tel.bitstreamModified)
+            assertTrue(
+                "Mode $mode surroundDeltaRms should be > 0.001 (was ${tel.surroundDeltaRms})",
+                tel.surroundDeltaRms > 0.001f
+            )
+            assertTrue(
+                "Mode $mode output checksum should differ from input checksum",
+                tel.inputChecksum != tel.outputChecksum
+            )
+
+            val json = formatSurroundDebugJson(
+                SurroundDebugSnapshot(
+                    diagnostics = processor.buildLiveSurroundDiagnostics("test_${mode.id}", activeSettings),
+                    bitstream = tel
+                )
+            )
+            assertTrue("JSON for $mode should report SURROUND_MODIFYING_BITSTREAM", json.contains("\"verdict\": \"SURROUND_MODIFYING_BITSTREAM\""))
+            assertTrue("JSON for $mode should include modeId", json.contains("\"modeId\": \"${mode.id}\""))
+            assertTrue("JSON for $mode should report bitstreamModified: true", json.contains("\"bitstreamModified\": true"))
+        }
+    }
+
+    @Test
+    fun `centered mono-like signal gets genuine stereo decorrelation and audible surround delta`() {
+        val sampleRate = 48000
+        val frames = 9600 // 200 ms so early reflections + Schroeder diffuser + hall comb tank fully engage
+
+        // Build multi-harmonic centered track (L == R) simulating pop/rock vocal & synth center mix
+        fun buildCenteredComplexMix(): ByteBuffer {
+            val buf = ByteBuffer.allocateDirect(frames * 4).order(ByteOrder.LITTLE_ENDIAN)
+            for (i in 0 until frames) {
+                val t = i.toDouble() / sampleRate
+                val s = 0.45 * sin(2.0 * PI * 440.0 * t) +
+                    0.35 * sin(2.0 * PI * 1180.0 * t) +
+                    0.20 * sin(2.0 * PI * 2750.0 * t)
+                val sample = (s * 12000.0).roundToInt().toShort()
+                buf.putShort(sample)
+                buf.putShort(sample)
+            }
+            buf.flip()
+            return buf
+        }
+
+        val testedModes = listOf(
+            SurroundMode.LOGIC7_SURROUND,
+            SurroundMode.CONCERT_HALL,
+            SurroundMode.DOLBY_PRO_LOGIC_II,
+            SurroundMode.DOLBY_ATMOS_VIRTUAL,
+            SurroundMode.VIRTUAL_SURROUND_360
+        )
+
+        for (mode in testedModes) {
+            val processor = CarDspAudioProcessor()
+            processor.configure(AudioFormat(sampleRate, 2, C.ENCODING_PCM_16BIT))
+            processor.updateSettings(
+                DspSettings(
+                    dspEnabled = true,
+                    hpfCutoffHz = HpfCutoffHz.OFF,
+                    roadNoiseEqEnabled = false,
+                    surroundMode = mode,
+                    surroundIntensity = 75,
+                    centerCoherence = 55,
+                    virtualHeight = 60,
+                    stereoWidthPercent = 100,
+                    peakLimiterCeilingDb = -0.5f
+                )
+            )
+            processor.flush()
+            processor.queueInput(buildCenteredComplexMix())
+            val out = processor.getOutput().order(ByteOrder.LITTLE_ENDIAN)
+
+            var lrDiffSum = 0L
+            for (i in 0 until frames) {
+                val l = out.getShort().toInt()
+                val r = out.getShort().toInt()
+                if (i >= frames / 2) {
+                    lrDiffSum += abs(l - r)
+                }
+            }
+
+            val tel = processor.snapshotBitstreamTelemetry()
+            assertTrue(
+                "$mode must synthesize audible L/R stereo decorrelation from pure centered L==R mix (lrDiffSum=$lrDiffSum)",
+                lrDiffSum > 500_000L
+            )
+            assertTrue(
+                "$mode must produce unmistakable surroundDeltaPercent >= 12% on centered mix (was ${tel.surroundDeltaPercent}%)",
+                tel.surroundDeltaPercent >= 12f
+            )
+        }
+    }
+
+    @Test
+    fun `concert hall exhibits longer reverb tail than studio focused and soft limiter stays clean on hot signals`() {
+        val sampleRate = 48000
+        val burstFrames = 2400 // 50 ms impulse burst
+        val tailFrames = 4800  // 100 ms silence tail to measure reverb decay
+
+        fun measureTailEnergy(mode: SurroundMode): Long {
+            val processor = CarDspAudioProcessor()
+            processor.configure(AudioFormat(sampleRate, 2, C.ENCODING_PCM_16BIT))
+            processor.updateSettings(
+                DspSettings(
+                    dspEnabled = true,
+                    hpfCutoffHz = HpfCutoffHz.OFF,
+                    roadNoiseEqEnabled = false,
+                    surroundMode = mode,
+                    surroundIntensity = 80,
+                    centerCoherence = 55,
+                    virtualHeight = 60,
+                    peakLimiterCeilingDb = -0.5f
+                )
+            )
+            processor.flush()
+
+            // Feed hot multi-tone burst (near full scale) to also verify soft-knee limiter safety
+            val burst = ByteBuffer.allocateDirect(burstFrames * 4).order(ByteOrder.LITTLE_ENDIAN)
+            for (i in 0 until burstFrames) {
+                val t = i.toDouble() / sampleRate
+                val sL = (0.65 * sin(2.0 * PI * 680.0 * t) + 0.35 * sin(2.0 * PI * 1950.0 * t)) * 29000.0
+                val sR = (0.45 * sin(2.0 * PI * 680.0 * t) - 0.35 * sin(2.0 * PI * 1950.0 * t)) * 29000.0
+                burst.putShort(sL.roundToInt().coerceIn(-32767, 32767).toShort())
+                burst.putShort(sR.roundToInt().coerceIn(-32767, 32767).toShort())
+            }
+            burst.flip()
+            processor.queueInput(burst)
+            val burstOut = processor.getOutput().order(ByteOrder.LITTLE_ENDIAN)
+            val ceilingLimit = (32767.0 * 10.0.pow(-0.5 / 20.0)).roundToInt() + 2
+            while (burstOut.remaining() >= 4) {
+                val l = abs(burstOut.getShort().toInt())
+                val r = abs(burstOut.getShort().toInt())
+                assertTrue("$mode burst left $l must obey soft limiter ceiling $ceilingLimit", l <= ceilingLimit)
+                assertTrue("$mode burst right $r must obey soft limiter ceiling $ceilingLimit", r <= ceilingLimit)
+            }
+
+            // Now feed pure silence and measure tail decay energy
+            val silence = ByteBuffer.allocateDirect(tailFrames * 4).order(ByteOrder.LITTLE_ENDIAN)
+            for (i in 0 until tailFrames) {
+                silence.putShort(0)
+                silence.putShort(0)
+            }
+            silence.flip()
+            processor.queueInput(silence)
+            val tailOut = processor.getOutput().order(ByteOrder.LITTLE_ENDIAN)
+            var tailEnergy = 0L
+            for (i in 0 until tailFrames) {
+                val l = abs(tailOut.getShort().toInt())
+                val r = abs(tailOut.getShort().toInt())
+                if (i >= 1200) { // After initial 25ms Haas taps, measure true hall reverb tail
+                    tailEnergy += l + r
+                }
+            }
+            return tailEnergy
+        }
+
+        val studioTail = measureTailEnergy(SurroundMode.STUDIO_FOCUSED)
+        val hallTail = measureTailEnergy(SurroundMode.CONCERT_HALL)
+        assertTrue(
+            "Concert Hall reverb tail ($hallTail) must significantly exceed Studio Focused ($studioTail)",
+            hallTail > studioTail * 2L && hallTail > 200_000L
+        )
+    }
 }

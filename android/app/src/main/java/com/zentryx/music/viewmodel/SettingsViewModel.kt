@@ -25,7 +25,50 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.util.Locale
 import javax.inject.Inject
+
+data class OfflineStorageStats(
+    val downloadedCount: Int = 0,
+    val totalLibraryCount: Int = 0,
+    val offlineFilesBytes: Long = 0L,
+    val streamCacheBytes: Long = 0L
+) {
+    val totalLocalBytes: Long
+        get() = offlineFilesBytes + streamCacheBytes
+
+    val libraryCoveragePercent: Int
+        get() = if (totalLibraryCount > 0) {
+            ((downloadedCount * 100f) / totalLibraryCount).toInt().coerceIn(0, 100)
+        } else 0
+
+    val averageTrackBytes: Long
+        get() = if (downloadedCount > 0) offlineFilesBytes / downloadedCount else 0L
+
+    val compactBadgeLabel: String
+        get() = if (downloadedCount > 0) {
+            val noun = if (downloadedCount == 1) "track" else "tracks"
+            "$downloadedCount $noun · ${formatOfflineBytes(offlineFilesBytes)}"
+        } else {
+            "0 cached"
+        }
+
+    companion object {
+        fun formatOfflineBytes(bytes: Long): String {
+            if (bytes <= 0L) return "0 B"
+            val kb = 1024.0
+            val mb = kb * 1024.0
+            val gb = mb * 1024.0
+            return when {
+                bytes >= gb -> String.format(Locale.US, "%.2f GB", bytes / gb)
+                bytes >= mb -> String.format(Locale.US, "%.1f MB", bytes / mb)
+                bytes >= kb -> String.format(Locale.US, "%.0f KB", bytes / kb)
+                else -> "$bytes B"
+            }
+        }
+    }
+}
 
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
@@ -227,6 +270,32 @@ class SettingsViewModel @Inject constructor(
 
     private val _cacheSizeBytes = MutableStateFlow(0L)
     val cacheSizeBytes: StateFlow<Long> = _cacheSizeBytes.asStateFlow()
+
+    val offlineStorageStats: StateFlow<OfflineStorageStats> = combine(
+        musicRepository.getAllSongs(),
+        _cacheSizeBytes
+    ) { songs: List<Song>, streamBytes: Long ->
+        val downloaded = songs.filter { it.isDownloaded }
+        var offlineBytes = 0L
+        for (song in downloaded) {
+            val path = song.localFilePath
+            val diskBytes = if (!path.isNullOrBlank() && !path.startsWith("content://")) {
+                runCatching {
+                    val f = File(path)
+                    if (f.exists() && f.isFile) f.length() else 0L
+                }.getOrDefault(0L)
+            } else 0L
+            offlineBytes += if (diskBytes > 0L) diskBytes else song.fileSize.coerceAtLeast(0L)
+        }
+        OfflineStorageStats(
+            downloadedCount = downloaded.size,
+            totalLibraryCount = songs.size,
+            offlineFilesBytes = offlineBytes,
+            streamCacheBytes = streamBytes.coerceAtLeast(0L)
+        )
+    }
+        .flowOn(ioDispatcher)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), OfflineStorageStats())
 
     private val _isPurgingCache = MutableStateFlow(false)
     val isPurgingCache: StateFlow<Boolean> = _isPurgingCache.asStateFlow()
@@ -484,12 +553,18 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun selectSurroundMode(mode: SurroundMode) = dspAudioEngine.selectSurroundMode(mode)
+    fun getSurroundDebugSnapshot(trigger: String = "debugger_live_poll"): SurroundDebugSnapshot =
+        dspAudioEngine.getSurroundDebugSnapshot(trigger)
+    fun dumpSurroundDiagnosticsToLogcat(): SurroundMatrixDiagnostics =
+        dspAudioEngine.logSurroundMatrixDiagnostics("debugger_manual_dump")
     fun cycleRoutePreset(route: AudioOutputRoute) = dspAudioEngine.cycleRoutePreset(route)
     fun saveCustomDspPreset(name: String) = dspAudioEngine.saveCustomPreset(name)
     fun deleteCustomDspPreset(presetId: String) = dspAudioEngine.deleteCustomPreset(presetId)
     fun toggleCompareSlot() = dspAudioEngine.toggleCompareSlot()
     fun snapshotCurrentToSlotB() = dspAudioEngine.snapshotCurrentToSlotB()
     fun setHoldBypass(bypassed: Boolean) = dspAudioEngine.setHoldBypass(bypassed)
+    fun setHoldSurroundBypass(bypassed: Boolean) = dspAudioEngine.setHoldSurroundBypass(bypassed)
+    val isHoldSurroundDirect: StateFlow<Boolean> = dspAudioEngine.isHoldSurroundDirect
     fun selectOutputRouteManually(route: AudioOutputRoute) = dspAudioEngine.selectOutputRouteManually(route)
     fun updateAdaptiveCabinConfig(config: AdaptiveCabinConfig) = dspAudioEngine.updateAdaptiveCabinConfig(config)
     fun onRecordAudioPermissionGranted() = dspAudioEngine.restartCabinMicMonitorIfEnabled()

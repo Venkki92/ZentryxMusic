@@ -37,6 +37,11 @@ import kotlin.math.abs
  * - Monitors active AudioOutputRoute (Cabin Speakers, Bluetooth A2DP, USB DAC / AUX) for auto-profiles.
  * - Provides instant A/B DSP profile comparison and temporary Hold-to-Bypass comparison.
  */
+/**
+ * Alias matching the cross-platform HeadunitDspEngine name for native Android diagnostics & debuggers.
+ */
+typealias HeadunitDspEngine = AndroidDspAudioEngine
+
 @Singleton
 class AndroidDspAudioEngine @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -67,6 +72,11 @@ class AndroidDspAudioEngine @Inject constructor(
     private val _isHardwareVirtualizerActive = MutableStateFlow(false)
     val isHardwareVirtualizerActive: StateFlow<Boolean> = _isHardwareVirtualizerActive.asStateFlow()
 
+    private val _lastSurroundDiagnostics = MutableStateFlow<SurroundMatrixDiagnostics?>(null)
+    val lastSurroundDiagnostics: StateFlow<SurroundMatrixDiagnostics?> = _lastSurroundDiagnostics.asStateFlow()
+
+    @Volatile private var lastHardwareVirtualizerStrengthPermille: Int = 0
+
     private val _activeOutputRoute = MutableStateFlow(detectCurrentOutputRoute())
     val activeOutputRoute: StateFlow<AudioOutputRoute> = _activeOutputRoute.asStateFlow()
 
@@ -80,6 +90,10 @@ class AndroidDspAudioEngine @Inject constructor(
 
     private var isHoldBypassed: Boolean = false
     private var preHoldDspEnabled: Boolean = true
+    private var isHoldSurroundBypassed: Boolean = false
+    private var preHoldSurroundMode: SurroundMode = SurroundMode.OFF
+    private val _isHoldSurroundDirect = MutableStateFlow(false)
+    val isHoldSurroundDirect: StateFlow<Boolean> = _isHoldSurroundDirect.asStateFlow()
 
     private val _adaptiveCabinConfig = MutableStateFlow(AdaptiveCabinConfig())
     val adaptiveCabinConfig: StateFlow<AdaptiveCabinConfig> = _adaptiveCabinConfig.asStateFlow()
@@ -314,10 +328,36 @@ class AndroidDspAudioEngine @Inject constructor(
         }
     }
 
+    /**
+     * Momentarily bypasses only the Surround Matrix (forcing SurroundMode.OFF) while keeping
+     * EQ/crossover intact so the listener can instantaneously A/B audition Surround vs Direct Stereo
+     * without mutating persisted DataStore preferences.
+     */
+    fun setHoldSurroundBypass(bypassed: Boolean) {
+        if (bypassed && !isHoldSurroundBypassed) {
+            val current = _dspSettings.value
+            if (current.surroundMode == SurroundMode.OFF) return
+            isHoldSurroundBypassed = true
+            preHoldSurroundMode = current.surroundMode
+            _isHoldSurroundDirect.value = true
+            val temp = current.copy(surroundMode = SurroundMode.OFF)
+            applyEffectiveDsp(temp)
+        } else if (!bypassed && isHoldSurroundBypassed) {
+            isHoldSurroundBypassed = false
+            _isHoldSurroundDirect.value = false
+            val restored = _dspSettings.value.copy(surroundMode = preHoldSurroundMode)
+            _dspSettings.value = restored
+            applyEffectiveDsp(restored)
+        }
+    }
+
     fun applyPresetById(presetId: String) {
         val preset = (FACTORY_DSP_PRESETS + _customPresets.value).firstOrNull { it.id == presetId } ?: return
-        if (_dspSettings.value.selectedPresetId == preset.id) return
-        updateSettings(applyPresetToDsp(_dspSettings.value, preset))
+        val current = _dspSettings.value
+        if (current.selectedPresetId == preset.id && current.dspEnabled) return
+        val updated = applyPresetToDsp(current, preset)
+        updateSettings(updated)
+        logSurroundMatrixDiagnostics("applyPresetById(${preset.id})", updated)
     }
 
     val isPcmProcessorConfigured: Boolean
@@ -329,15 +369,79 @@ class AndroidDspAudioEngine @Inject constructor(
     val activeEffectiveWidthPercent: Int
         get() = carDspAudioProcessor.activeEffectiveWidthPercent
 
-    fun selectSurroundMode(mode: SurroundMode) {
-        val current = _dspSettings.value
-        updateSettings(
-            current.copy(
-                dspEnabled = true,
-                surroundMode = mode,
-                monoFoldDown = if (mode != SurroundMode.OFF) false else current.monoFoldDown
-            )
+    fun logSurroundMatrixDiagnostics(
+        trigger: String,
+        settings: DspSettings = _dspSettings.value
+    ): SurroundMatrixDiagnostics {
+        val effective = applyAdaptiveCabinOverlay(settings, _adaptiveDspDelta.value)
+        val diag = carDspAudioProcessor.buildLiveSurroundDiagnostics(
+            trigger = trigger,
+            settings = effective,
+            hardwareVirtualizerActive = _isHardwareVirtualizerActive.value,
+            hardwareVirtualizerStrengthPermille = lastHardwareVirtualizerStrengthPermille
         )
+        _lastSurroundDiagnostics.value = diag
+        val line = formatSurroundMatrixDiagnosticLog(diag)
+        try {
+            Log.i(TAG, line)
+        } catch (_: Throwable) {
+            // Safe when running under local JVM unit tests without android.util.Log mock
+        }
+        return diag
+    }
+
+    fun getSurroundDebugSnapshot(trigger: String = "debugger_live_poll"): SurroundDebugSnapshot {
+        val effective = applyAdaptiveCabinOverlay(_dspSettings.value, _adaptiveDspDelta.value)
+        val diag = carDspAudioProcessor.buildLiveSurroundDiagnostics(
+            trigger = trigger,
+            settings = effective,
+            hardwareVirtualizerActive = _isHardwareVirtualizerActive.value,
+            hardwareVirtualizerStrengthPermille = lastHardwareVirtualizerStrengthPermille
+        )
+        return SurroundDebugSnapshot(
+            diagnostics = diag,
+            bitstream = carDspAudioProcessor.snapshotBitstreamTelemetry(),
+            hardwareAttached = _isAttached.value,
+            globalSessionAttached = _isGlobalEqAttached.value,
+            activeOutputRouteId = _activeOutputRoute.value.id,
+            snapshotTimestampMs = System.currentTimeMillis()
+        )
+    }
+
+    fun selectSurroundMode(mode: SurroundMode) {
+        if (isHoldSurroundBypassed) {
+            isHoldSurroundBypassed = false
+            _isHoldSurroundDirect.value = false
+        }
+        val current = _dspSettings.value
+        val liftedIntensity = if (mode != SurroundMode.OFF && current.surroundIntensity < 35) {
+            75
+        } else {
+            current.surroundIntensity
+        }
+        val liftedCenter = if (mode != SurroundMode.OFF && current.centerCoherence == 0) {
+            55
+        } else {
+            current.centerCoherence
+        }
+        val liftedHeight = if (
+            (mode == SurroundMode.DOLBY_ATMOS_VIRTUAL || mode == SurroundMode.VIRTUAL_SURROUND_360) &&
+            current.virtualHeight == 0
+        ) {
+            65
+        } else {
+            current.virtualHeight
+        }
+        val updated = current.copy(
+            dspEnabled = true,
+            surroundMode = mode,
+            monoFoldDown = if (mode != SurroundMode.OFF) false else current.monoFoldDown,
+            surroundIntensity = liftedIntensity,
+            centerCoherence = liftedCenter,
+            virtualHeight = liftedHeight
+        )
+        updateSettings(updated)
+        logSurroundMatrixDiagnostics("selectSurroundMode(${mode.id})", updated)
     }
 
     fun cycleRoutePreset(route: AudioOutputRoute) {
@@ -363,7 +467,9 @@ class AndroidDspAudioEngine @Inject constructor(
         val all = FACTORY_DSP_PRESETS + _customPresets.value
         val curIdx = all.indexOfFirst { it.id == _dspSettings.value.selectedPresetId }
         val next = all[(curIdx + 1) % all.size]
-        updateSettings(applyPresetToDsp(_dspSettings.value, next))
+        val updated = applyPresetToDsp(_dspSettings.value, next)
+        updateSettings(updated)
+        logSurroundMatrixDiagnostics("cycleEqPreset(${next.id})", updated)
         return next
     }
 
@@ -505,6 +611,10 @@ class AndroidDspAudioEngine @Inject constructor(
             hpfCutoffHz = s.hpfCutoffHz.hz,
             loudnessContour = s.loudnessContour,
             compressorProfileId = s.compressorProfile.id,
+            surroundModeId = s.surroundMode.id,
+            surroundIntensity = s.surroundIntensity,
+            centerCoherence = s.centerCoherence,
+            virtualHeight = s.virtualHeight,
             isCustom = true
         )
         val updated = listOf(preset) + _customPresets.value
@@ -526,6 +636,7 @@ class AndroidDspAudioEngine @Inject constructor(
     private fun applyHardwareVirtualizer(settings: DspSettings) {
         val virt = hardwareVirtualizer
         if (virt == null) {
+            lastHardwareVirtualizerStrengthPermille = 0
             _isHardwareVirtualizerActive.value = false
             return
         }
@@ -535,6 +646,7 @@ class AndroidDspAudioEngine @Inject constructor(
                 settings.surroundMode != SurroundMode.OFF &&
                 settings.surroundIntensity > 0
             virt.enabled = shouldEnable
+            var permille = 0
             if (shouldEnable && virt.strengthSupported) {
                 val scale = when (settings.surroundMode) {
                     SurroundMode.VIRTUAL_SURROUND_360 -> 1.0f
@@ -545,12 +657,14 @@ class AndroidDspAudioEngine @Inject constructor(
                     SurroundMode.STUDIO_FOCUSED -> 0.35f
                     SurroundMode.OFF -> 0f
                 }
-                val permille = (settings.surroundIntensity * 10f * scale).toInt().coerceIn(0, 1000)
+                permille = (settings.surroundIntensity * 10f * scale).toInt().coerceIn(0, 1000)
                 virt.setStrength(permille.toShort())
             }
+            lastHardwareVirtualizerStrengthPermille = permille
             _isHardwareVirtualizerActive.value = shouldEnable
         } catch (t: Throwable) {
             Log.w(TAG, "Hardware Virtualizer apply warning: ${t.message}")
+            lastHardwareVirtualizerStrengthPermille = 0
             _isHardwareVirtualizerActive.value = false
         }
     }

@@ -41,7 +41,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zentryx.music.dsp.*
+import com.zentryx.music.ui.components.SurroundMatrixDebugger
 import com.zentryx.music.viewmodel.SettingsViewModel
+import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -72,6 +74,7 @@ fun DspConsoleScreen(
     val isAttached by viewModel.isDspAttached.collectAsStateWithLifecycle()
     val isGlobalEqAttached by viewModel.isGlobalEqAttached.collectAsStateWithLifecycle()
     val isHwVirtualizerActive by viewModel.isHardwareVirtualizerActive.collectAsStateWithLifecycle()
+    val isHoldSurroundDirect by viewModel.isHoldSurroundDirect.collectAsStateWithLifecycle()
     val globalEqRequested by viewModel.globalAudioSessionAttach.collectAsStateWithLifecycle()
     val activeOutputRoute by viewModel.activeOutputRoute.collectAsStateWithLifecycle()
     val activeCompareSlot by viewModel.activeCompareSlot.collectAsStateWithLifecycle()
@@ -107,6 +110,16 @@ fun DspConsoleScreen(
     var activeTab by remember { mutableStateOf(DspConsoleTab.EQ_PRESETS) }
     var newPresetName by remember { mutableStateOf("") }
     var isHoldBypassActive by remember { mutableStateOf(false) }
+    var liveSurroundSnapshot by remember { mutableStateOf<SurroundDebugSnapshot?>(null) }
+
+    LaunchedEffect(activeTab, dsp.surroundMode, dsp.dspEnabled, dsp.surroundIntensity, isHoldSurroundDirect) {
+        if (activeTab == DspConsoleTab.LOGIC7_SURROUND) {
+            while (true) {
+                liveSurroundSnapshot = viewModel.getSurroundDebugSnapshot("surround_header_poll")
+                delay(650L)
+            }
+        }
+    }
 
     val (roadLowDb, roadMidDb) = calculateRoadNoiseContourDb(currentSpeedKmH, dsp.roadNoiseEqEnabled)
 
@@ -579,23 +592,87 @@ fun DspConsoleScreen(
                                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text("SURROUND MATRIX — HARMAN LOGIC 7 • DOLBY • VIRTUAL 3D", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black, letterSpacing = 1.sp, color = accentColor))
-                                        Text("M/S center vocal lock, 90° Dolby Pro Logic II rear matrix, Atmos pinna height & 360° XTC", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                                        Text("Hybrid Mid+Side cabin extraction, 4-tap hall tank, 90° AP diffuser & band-limited 360° XTC", fontSize = 11.sp, color = Color(0xFF94A3B8))
                                     }
                                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        val bitstream = liveSurroundSnapshot?.bitstream
+                                        val framesProcessed = bitstream?.framesProcessed ?: 0L
+                                        val srHz = liveSurroundSnapshot?.diagnostics?.sampleRateHz ?: 0
+                                        val srLabel = if (srHz > 0) {
+                                            if (srHz % 1000 == 0) "${srHz / 1000}kHz" else String.format(Locale.US, "%.1fkHz", srHz / 1000f)
+                                        } else {
+                                            "PCM"
+                                        }
+                                        val deltaPct = bitstream?.surroundDeltaPercent ?: 0f
+                                        val widthLabel = computeEffectiveSurroundWidthPercent(dsp)
+                                        val statusColor = when {
+                                            isHoldSurroundDirect -> Color(0xFFF59E0B)
+                                            framesProcessed > 0L && bitstream?.surroundStageExecuted == true -> Color(0xFF22C55E)
+                                            framesProcessed > 0L -> Color(0xFF94A3B8)
+                                            else -> Color(0xFFF59E0B)
+                                        }
+                                        val statusText = when {
+                                            isHoldSurroundDirect -> "HOLD: DIRECT STEREO"
+                                            framesProcessed > 0L && bitstream?.surroundStageExecuted == true ->
+                                                "PCM LIVE · $srLabel · Δ ${String.format(Locale.US, "%.0f", deltaPct)}% · W $widthLabel%"
+                                            framesProcessed > 0L && dsp.surroundMode == SurroundMode.OFF ->
+                                                "PCM DIRECT · $srLabel · 100% W"
+                                            else ->
+                                                "PCM IDLE · PLAY AUDIO · W $widthLabel%"
+                                        }
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = statusColor.copy(alpha = 0.14f),
+                                            modifier = Modifier.border(0.5.dp, statusColor.copy(alpha = 0.65f), RoundedCornerShape(6.dp))
+                                        ) {
+                                            Text(
+                                                text = statusText,
+                                                fontSize = 9.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                fontWeight = FontWeight.Bold,
+                                                color = statusColor,
+                                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp)
+                                            )
+                                        }
+
                                         if (dsp.surroundMode != SurroundMode.OFF && !dsp.monoFoldDown) {
-                                            val widthLabel = (dsp.stereoWidthPercent + ((dsp.surroundMode.sideWidthTarget - 100f) * (dsp.surroundIntensity / 100f)).roundToInt()).coerceIn(0, 160)
-                                            Surface(shape = RoundedCornerShape(6.dp), color = Color(0xFF0A0F1E), modifier = Modifier.border(0.5.dp, borderColor, RoundedCornerShape(6.dp))) {
+                                            Surface(
+                                                shape = RoundedCornerShape(6.dp),
+                                                color = if (isHoldSurroundDirect) Color(0xFFF59E0B).copy(alpha = 0.25f) else Color(0xFF0F172A),
+                                                modifier = Modifier
+                                                    .border(
+                                                        1.dp,
+                                                        if (isHoldSurroundDirect) Color(0xFFF59E0B) else accentColor.copy(alpha = 0.7f),
+                                                        RoundedCornerShape(6.dp)
+                                                    )
+                                                    .pointerInput(dsp.surroundMode) {
+                                                        detectTapGestures(
+                                                            onPress = {
+                                                                viewModel.setHoldSurroundBypass(true)
+                                                                tryAwaitRelease()
+                                                                viewModel.setHoldSurroundBypass(false)
+                                                            }
+                                                        )
+                                                    }
+                                            ) {
                                                 Text(
-                                                    text = (if (isHwVirtualizerActive) "PCM + HW VIRT" else "PCM 3D ACTIVE") + " · W $widthLabel%",
+                                                    text = if (isHoldSurroundDirect) "DIRECT A/B" else "HOLD: DIRECT A/B",
                                                     fontSize = 9.sp,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    color = Color(0xFFCBD5E1),
-                                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp)
+                                                    fontWeight = FontWeight.Black,
+                                                    color = if (isHoldSurroundDirect) Color(0xFFF59E0B) else Color.White,
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                                                 )
                                             }
                                         }
+
                                         Surface(shape = RoundedCornerShape(6.dp), color = accentColor.copy(alpha = 0.16f)) {
-                                            Text(dsp.surroundMode.badge, fontSize = 10.sp, fontWeight = FontWeight.Black, color = accentColor, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
+                                            Text(
+                                                text = if (isHoldSurroundDirect) "DIRECT" else dsp.surroundMode.badge,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Black,
+                                                color = if (isHoldSurroundDirect) Color(0xFFF59E0B) else accentColor,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                            )
                                         }
                                     }
                                 }
@@ -764,6 +841,20 @@ fun DspConsoleScreen(
                                 }
                             }
                         }
+
+                        // Live Surround Matrix & PCM Bitstream Output Debugger
+                        SurroundMatrixDebugger(
+                            dspSettings = dsp,
+                            accentColor = accentColor,
+                            surfaceColor = surfaceColor,
+                            borderColor = borderColor,
+                            onSelectSurroundMode = { mode -> viewModel.selectSurroundMode(mode) },
+                            onToggleDspEnabled = { enabled -> viewModel.updateDspSettings(dsp.copy(dspEnabled = enabled)) },
+                            onToggleMonoFoldDown = { mono -> viewModel.updateDspSettings(dsp.copy(monoFoldDown = mono)) },
+                            snapshotProvider = { trigger -> viewModel.getSurroundDebugSnapshot(trigger) },
+                            onDumpToLogcat = { viewModel.dumpSurroundDiagnosticsToLogcat() },
+                            initiallyExpanded = true
+                        )
                     }
 
                     DspConsoleTab.STAGE_XOVER -> {

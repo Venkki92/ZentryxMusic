@@ -68,12 +68,79 @@ const diagnosticsApiPlugin = {
   },
 };
 
+const NOOP_VITE_CLIENT_STUB = `
+const sheetsMap = new Map();
+export function updateStyle(id, content) {
+  let style = sheetsMap.get(id);
+  if (!style) {
+    style = document.createElement('style');
+    style.setAttribute('type', 'text/css');
+    style.setAttribute('data-vite-dev-id', id);
+    style.textContent = content;
+    document.head.appendChild(style);
+    sheetsMap.set(id, style);
+  } else {
+    style.textContent = content;
+  }
+}
+export function removeStyle(id) {
+  const style = sheetsMap.get(id);
+  if (style) {
+    document.head.removeChild(style);
+    sheetsMap.delete(id);
+  }
+}
+export function createHotContext() {
+  return {
+    data: {},
+    accept() {},
+    acceptExports() {},
+    dispose() {},
+    prune() {},
+    invalidate() {},
+    on() {},
+    off() {},
+    send() {},
+  };
+}
+export function injectQuery(url) {
+  return url;
+}
+export class ErrorOverlay extends HTMLElement {}
+`;
+
+const disableHmrClientPlugin = {
+  name: 'disable-hmr-client-stub',
+  configureServer(server: any) {
+    if (process.env.DISABLE_HMR !== 'true') return;
+    server.middlewares.use((req: any, res: any, next: () => void) => {
+      const reqUrl = (req.url || '').split('?')[0];
+      if (reqUrl === '/@vite/client') {
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+        res.setHeader('Cache-Control', 'public, max-age=300');
+        res.end(NOOP_VITE_CLIENT_STUB);
+        return;
+      }
+      next();
+    });
+  },
+  transformIndexHtml: {
+    order: 'post' as const,
+    handler(html: string) {
+      if (process.env.DISABLE_HMR !== 'true') return html;
+      return html.replace(/<script\s+type="module"\s+src="\/@vite\/client"><\/script>\s*/gi, '');
+    },
+  },
+};
+
 export default defineConfig(() => {
   return {
     plugins: [
       react(),
       tailwindcss(),
       diagnosticsApiPlugin,
+      disableHmrClientPlugin,
       VitePWA({
         registerType: 'autoUpdate',
         includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
@@ -117,6 +184,9 @@ export default defineConfig(() => {
         },
       }),
     ],
+    optimizeDeps: {
+      include: ['react', 'react-dom', 'react-dom/client', 'lucide-react', 'motion', 'motion/react'],
+    },
     resolve: {
       alias: {
         '@': path.resolve(import.meta.dirname, '.'),

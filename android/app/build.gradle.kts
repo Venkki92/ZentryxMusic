@@ -58,6 +58,20 @@ android {
         }
     }
 
+    signingConfigs {
+        create("headunitRelease") {
+            val persistentKeystore = rootProject.file("keystore/zentryx-headunit.keystore")
+            if (persistentKeystore.exists()) {
+                storeFile = persistentKeystore
+                storePassword = System.getenv("ZENTRYX_KEYSTORE_PASSWORD") ?: "android"
+                keyAlias = System.getenv("ZENTRYX_KEY_ALIAS") ?: "androiddebugkey"
+                keyPassword = System.getenv("ZENTRYX_KEY_PASSWORD") ?: "android"
+            }
+            enableV1Signing = true
+            enableV2Signing = true
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -66,11 +80,20 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug") // Allows direct installation onto userdebug headunits
+            val persistentKeystore = rootProject.file("keystore/zentryx-headunit.keystore")
+            signingConfig = if (persistentKeystore.exists()) {
+                signingConfigs.getByName("headunitRelease")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
         debug {
             applicationIdSuffix = ".debug"
             isDebuggable = true
+            val persistentKeystore = rootProject.file("keystore/zentryx-headunit.keystore")
+            if (persistentKeystore.exists()) {
+                signingConfig = signingConfigs.getByName("headunitRelease")
+            }
         }
     }
 

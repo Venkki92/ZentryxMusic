@@ -78,7 +78,12 @@ class KeystoreCryptoManager @Inject constructor(
         } catch (_: Throwable) {
             "zentryx-headunit"
         }
-        val material = "$androidId:${context.packageName}:zentryx_aes_v1".toByteArray(Charsets.UTF_8)
+        val pkg = try {
+            context.packageName
+        } catch (_: Throwable) {
+            "com.zentryx.music"
+        }
+        val material = "$androidId:$pkg:zentryx_aes_v1".toByteArray(Charsets.UTF_8)
         val digest = MessageDigest.getInstance("SHA-256").digest(material)
         return SecretKeySpec(digest, ALGORITHM)
     }

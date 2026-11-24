@@ -58,14 +58,6 @@ class CacheDataSourceFactory @Inject constructor(
         }
 
         fun isRemoteHttpUri(uri: Uri?): Boolean = isRemoteHttpScheme(uri?.scheme)
-
-        fun isOfflineBlobOrSongPath(uriString: String?): Boolean {
-            return SongMediaItemConverter.isOfflineBlobOrSongPath(uriString)
-        }
-
-        fun isOfflineBlobOrSongUri(uri: Uri?): Boolean {
-            return isOfflineBlobOrSongPath(uri?.toString())
-        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -204,18 +196,15 @@ class CacheDataSourceFactory @Inject constructor(
     /**
      * Creates the primary scheme-routing DataSource.Factory used by ExoPlayer:
      * - http:// and https:// -> CacheDataSource (SimpleCache + authenticated TOFU OkHttp)
-     * - .song/.audio files, idb://, zentryx-idb://, data: -> OfflineBlobDataSource
-     * - standard file://, content://, asset:// -> DefaultDataSource
+     * - file://, content://, asset://, and local paths -> DefaultDataSource (native local audio playback)
      */
     fun createDataSourceFactory(): DataSource.Factory {
         val remoteCacheFactory = buildCacheDataSourceFactory()
-        val offlineBlobFactory = OfflineBlobDataSource.Factory(context)
         val localFactory = DefaultDataSource.Factory(context)
 
         return DataSource.Factory {
             SchemeRoutingDataSource(
                 remoteDataSource = remoteCacheFactory.createDataSource(),
-                offlineBlobDataSource = offlineBlobFactory.createDataSource(),
                 localDataSource = localFactory.createDataSource()
             )
         }
@@ -223,24 +212,17 @@ class CacheDataSourceFactory @Inject constructor(
 
     private class SchemeRoutingDataSource(
         private val remoteDataSource: DataSource,
-        private val offlineBlobDataSource: DataSource,
         private val localDataSource: DataSource
     ) : DataSource {
         private var activeDataSource: DataSource? = null
 
         override fun addTransferListener(transferListener: TransferListener) {
             remoteDataSource.addTransferListener(transferListener)
-            offlineBlobDataSource.addTransferListener(transferListener)
             localDataSource.addTransferListener(transferListener)
         }
 
         override fun open(dataSpec: DataSpec): Long {
-            val uri = dataSpec.uri
-            val target = when {
-                isRemoteHttpUri(uri) -> remoteDataSource
-                isOfflineBlobOrSongUri(uri) -> offlineBlobDataSource
-                else -> localDataSource
-            }
+            val target = if (isRemoteHttpUri(dataSpec.uri)) remoteDataSource else localDataSource
             activeDataSource = target
             return target.open(dataSpec)
         }

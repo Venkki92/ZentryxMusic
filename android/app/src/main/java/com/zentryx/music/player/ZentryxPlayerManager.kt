@@ -8,8 +8,10 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.cache.CacheWriter
@@ -26,6 +28,7 @@ import com.zentryx.music.dsp.AndroidDspAudioEngine
 import com.zentryx.music.dsp.AudioOutputRoute
 import com.zentryx.music.dsp.CarDspAudioProcessor
 import com.zentryx.music.dsp.matchPresetForTrack
+import com.zentryx.music.models.AudioFormat
 import com.zentryx.music.models.PlaybackState
 import com.zentryx.music.models.RepeatMode
 import com.zentryx.music.models.Song
@@ -48,6 +51,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
+import java.net.URI
+import java.net.URLDecoder
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -74,10 +79,84 @@ class ZentryxPlayerManager @Inject constructor(
     private val carDspAudioProcessor: CarDspAudioProcessor,
     private val fftCapturer: AudioFftCapturer,
     private val musicRepositoryLazy: Lazy<MusicRepository>,
-    private val downloadManagerLazy: Lazy<DownloadManager>,
-    private val songMediaItemConverter: SongMediaItemConverter
+    private val downloadManagerLazy: Lazy<DownloadManager>
 ) {
     companion object {
+        private val EXT_TO_MIME: Map<String, String> = mapOf(
+            "mp3" to MimeTypes.AUDIO_MPEG,
+            "flac" to MimeTypes.AUDIO_FLAC,
+            "m4a" to MimeTypes.AUDIO_MP4,
+            "mp4" to MimeTypes.AUDIO_MP4,
+            "aac" to MimeTypes.AUDIO_AAC,
+            "ogg" to MimeTypes.AUDIO_OGG,
+            "oga" to MimeTypes.AUDIO_OGG,
+            "opus" to MimeTypes.AUDIO_OPUS,
+            "wav" to MimeTypes.AUDIO_WAV,
+            "webm" to MimeTypes.AUDIO_WEBM,
+            "wma" to "audio/x-ms-wma"
+        )
+
+        /**
+         * Safely resolves a local filesystem path or percent-encoded `file://` URI
+         * (handling spaces, parentheses, and non-ASCII characters).
+         */
+        fun resolveLocalFile(pathOrUri: String): File {
+            val trimmed = pathOrUri.trim()
+            if (!trimmed.startsWith("file://", ignoreCase = true)) {
+                return File(trimmed)
+            }
+            val fromJavaUri = runCatching { File(URI(trimmed)) }.getOrNull()
+            if (fromJavaUri != null && fromJavaUri.exists()) {
+                return fromJavaUri
+            }
+            val stripped = trimmed.removePrefix("file://").removePrefix("FILE://")
+            val rawCandidate = File(stripped)
+            if (rawCandidate.exists()) {
+                return rawCandidate
+            }
+            val decodedCandidate = runCatching {
+                File(URLDecoder.decode(stripped, "UTF-8"))
+            }.getOrNull()
+            return decodedCandidate ?: fromJavaUri ?: rawCandidate
+        }
+
+        /**
+         * Resolves a concrete audio MIME type for Media3 ExoPlayer (never returns wildcard MIME types).
+         */
+        fun resolveConcreteMimeType(song: Song): String {
+            for (candidate in listOf(song.localFilePath.orEmpty(), song.relativePath, song.fileUrl)) {
+                if (candidate.isBlank()) continue
+                val clean = candidate.substringBefore('?').substringBefore('#')
+                val dot = clean.lastIndexOf('.')
+                val slash = clean.lastIndexOf('/')
+                if (dot > slash && dot in 0 until clean.lastIndex) {
+                    val ext = clean.substring(dot + 1).lowercase(Locale.US)
+                    EXT_TO_MIME[ext]?.let { return it }
+                }
+            }
+
+            val cleanMime = song.mimeType.substringBefore(';').trim().lowercase(Locale.US)
+            if (cleanMime.isNotEmpty() && cleanMime != "audio/*" && cleanMime != "*/*" && cleanMime != "application/octet-stream") {
+                return when (cleanMime) {
+                    "audio/mp3" -> MimeTypes.AUDIO_MPEG
+                    "audio/x-flac" -> MimeTypes.AUDIO_FLAC
+                    "audio/x-m4a", "audio/m4a" -> MimeTypes.AUDIO_MP4
+                    "audio/x-wav" -> MimeTypes.AUDIO_WAV
+                    else -> if (cleanMime.startsWith("audio/") || cleanMime == "application/ogg") cleanMime else MimeTypes.AUDIO_MPEG
+                }
+            }
+
+            return when (song.format) {
+                AudioFormat.MP3 -> MimeTypes.AUDIO_MPEG
+                AudioFormat.FLAC -> MimeTypes.AUDIO_FLAC
+                AudioFormat.AAC -> MimeTypes.AUDIO_AAC
+                AudioFormat.M4A -> MimeTypes.AUDIO_MP4
+                AudioFormat.OGG -> MimeTypes.AUDIO_OGG
+                AudioFormat.OPUS -> MimeTypes.AUDIO_OPUS
+                AudioFormat.WAV -> MimeTypes.AUDIO_WAV
+            }
+        }
+
         fun replayGainDbToLinear(db: Float?): Float {
             if (db == null || !db.isFinite()) return 1.0f
             val clamped = db.coerceIn(-15f, 6f)
@@ -190,6 +269,15 @@ class ZentryxPlayerManager @Inject constructor(
             .setLoadControl(loadControl)
             .setHandleAudioBecomingNoisy(true)
             .build().apply {
+                // Guarantee Media3 always decodes to PCM through CarDspAudioProcessor
+                // instead of offloading compressed streams directly to OEM audio DSPs.
+                trackSelectionParameters = trackSelectionParameters.buildUpon()
+                    .setAudioOffloadPreferences(
+                        TrackSelectionParameters.AudioOffloadPreferences.Builder()
+                            .setAudioOffloadMode(TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED)
+                            .build()
+                    )
+                    .build()
                 addListener(PlayerEventListener())
                 if (audioSessionId != C.AUDIO_SESSION_ID_UNSET && audioSessionId > 0) {
                     dspAudioEngine.attachAudioSession(audioSessionId)
@@ -352,21 +440,15 @@ class ZentryxPlayerManager @Inject constructor(
     private fun isLocallyAvailable(song: Song): Boolean {
         if (!song.isDownloaded || song.localFilePath.isNullOrBlank()) return false
         val path = song.localFilePath
-        return when {
-            path.startsWith("content://", ignoreCase = true) -> {
-                try {
-                    context.contentResolver.openAssetFileDescriptor(Uri.parse(path), "r")?.use { true } ?: false
-                } catch (_: Throwable) {
-                    false
-                }
+        return if (path.startsWith("content://", ignoreCase = true)) {
+            try {
+                context.contentResolver.openAssetFileDescriptor(Uri.parse(path), "r")?.use { true } ?: false
+            } catch (_: Throwable) {
+                false
             }
-            path.startsWith("${SongMediaItemConverter.SCHEME_DATA}:", ignoreCase = true) -> true
-            path.startsWith("${SongMediaItemConverter.SCHEME_IDB}://", ignoreCase = true) ||
-                path.startsWith("${SongMediaItemConverter.SCHEME_ZENTRYX_IDB}://", ignoreCase = true) -> {
-                val trackId = SongMediaItemConverter.parseIndexedDbTrackId(path) ?: return false
-                AndroidIndexedDbBlobResolver(context).resolve(trackId) != null
-            }
-            else -> File(path.removePrefix("file://")).exists()
+        } else {
+            val resolvedFile = resolveLocalFile(path)
+            resolvedFile.exists() && resolvedFile.isFile && resolvedFile.canRead()
         }
     }
 
@@ -961,7 +1043,33 @@ class ZentryxPlayerManager @Inject constructor(
     }
 
     fun buildMediaItem(song: Song): MediaItem {
-        return songMediaItemConverter.toMediaItem(song, isLocalAvailable = isLocallyAvailable(song))
+        val localPath = song.localFilePath?.takeIf { isLocallyAvailable(song) && it.isNotBlank() }
+        val uri: Uri = when {
+            localPath == null -> Uri.parse(song.fileUrl)
+            localPath.startsWith("content://", ignoreCase = true) -> Uri.parse(localPath)
+            localPath.startsWith("file://", ignoreCase = true) -> Uri.fromFile(resolveLocalFile(localPath))
+            else -> Uri.fromFile(File(localPath))
+        }
+
+        val metadataBuilder = MediaMetadata.Builder()
+            .setTitle(song.title)
+            .setArtist(song.artist)
+            .setAlbumTitle(song.album)
+            .setIsBrowsable(false)
+            .setIsPlayable(true)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+
+        if (!song.artworkPath.isNullOrBlank()) {
+            metadataBuilder.setArtworkUri(Uri.parse(song.artworkPath))
+        }
+
+        return MediaItem.Builder()
+            .setMediaId(song.id)
+            .setUri(uri)
+            .setMimeType(resolveConcreteMimeType(song))
+            .setCustomCacheKey(song.id)
+            .setMediaMetadata(metadataBuilder.build())
+            .build()
     }
 
     private fun saveCurrentPosition() {

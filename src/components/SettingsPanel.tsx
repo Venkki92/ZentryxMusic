@@ -57,6 +57,8 @@ import {
   SteeringLongPressBindings,
   STEERING_ACTION_LABELS,
   formatSteeringKeyLabel,
+  computeOfflineStorageBadgeStats,
+  formatStorageBytes,
 } from '../utils/carConvenience';
 import { PWAInstallButton, AndroidApkDownloadButton } from './PWAComponents';
 import { DiagnosticLogEntry } from '../App';
@@ -158,7 +160,9 @@ export interface SettingsPanelProps {
 
   // Offline Storage
   offlineStorageBytes: number;
+  offlineArtworkBytes?: number;
   offlineTrackCount: number;
+  totalLibraryTrackCount?: number;
   onBatchSyncCurrentFolder: () => void;
   isBatchSyncing: boolean;
   batchSyncProgress: { current: number; total: number; trackTitle: string } | null;
@@ -326,7 +330,9 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   serverUrl,
 
   offlineStorageBytes,
+  offlineArtworkBytes = 0,
   offlineTrackCount,
+  totalLibraryTrackCount = 0,
   onBatchSyncCurrentFolder,
   isBatchSyncing,
   batchSyncProgress,
@@ -469,13 +475,36 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     };
   }, [listeningAction, swcEditMode, onUpdateSwcBinding, onUpdateSwcLongPressBinding, onListeningSwcChange]);
 
-  const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-  };
+  const formatBytes = formatStorageBytes;
+
+  const offlineBadgeStats = React.useMemo(
+    () =>
+      computeOfflineStorageBadgeStats({
+        downloadedCount: offlineTrackCount,
+        totalLibraryCount: totalLibraryTrackCount,
+        offlineStorageBytes,
+        offlineArtworkBytes,
+        cacheCapMb: offlineCacheCapMb,
+        storageQuota,
+      }),
+    [
+      offlineTrackCount,
+      totalLibraryTrackCount,
+      offlineStorageBytes,
+      offlineArtworkBytes,
+      offlineCacheCapMb,
+      storageQuota,
+    ]
+  );
+
+  const offlineStatusAccent =
+    offlineBadgeStats.status === 'near_cap'
+      ? '#ef4444'
+      : offlineBadgeStats.status === 'warning'
+        ? '#f59e0b'
+        : offlineBadgeStats.status === 'healthy'
+          ? '#22c55e'
+          : '#64748b';
 
   const formatTimerSec = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -508,6 +537,15 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             >
               <Icon className="w-4 h-4 shrink-0" />
               <span className="truncate">{cat.label}</span>
+              {cat.id === 'offline' && offlineBadgeStats.downloadedCount > 0 && (
+                <span
+                  className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-md tabular-nums ${
+                    isActive ? 'bg-black/20 text-black' : 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                  }`}
+                >
+                  {offlineBadgeStats.downloadedCount}
+                </span>
+              )}
             </button>
           );
         })}
@@ -521,6 +559,30 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <span>Driver Cockpit Profiles</span>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {/* Compact Offline Storage Badge (Download Count + Storage Usage) */}
+            <button
+              type="button"
+              onClick={() => setActiveCategory('offline')}
+              title={`Offline storage cache: ${offlineBadgeStats.downloadedCount} downloaded tracks using ${formatBytes(
+                offlineBadgeStats.totalOfflineBytes
+              )} (${offlineBadgeStats.capUsagePercent}% of ${offlineCacheCapMb >= 1024 ? `${(offlineCacheCapMb / 1024).toFixed(0)} GB` : `${offlineCacheCapMb} MB`} cap). Click to manage offline cache.`}
+              className="min-h-[34px] px-2.5 py-1 rounded-lg bg-black/60 border border-slate-800 hover:border-slate-700 flex items-center gap-1.5 text-[11px] font-mono tabular-nums transition-colors"
+            >
+              {offlineBadgeStats.downloadedCount > 0 ? (
+                <CheckCircle className="w-3.5 h-3.5 shrink-0" style={{ color: offlineStatusAccent }} />
+              ) : (
+                <HardDrive className="w-3.5 h-3.5 shrink-0 text-slate-500" />
+              )}
+              <span className="text-slate-400">Offline</span>
+              <span className="font-bold" style={{ color: offlineBadgeStats.downloadedCount > 0 ? offlineStatusAccent : '#cbd5e1' }}>
+                {offlineBadgeStats.compactLabel}
+              </span>
+              {offlineBadgeStats.downloadedCount > 0 && (
+                <span className="hidden md:inline text-[10px] text-slate-500">
+                  · {offlineBadgeStats.capUsagePercent}% cap
+                </span>
+              )}
+            </button>
             {/* Compact Real-Time Cabin Noise ↔ DSP Gain Calibration Delta Readout */}
             <button
               type="button"
@@ -1837,15 +1899,32 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
           <div className="bg-[#0b1120] border border-slate-800/80 rounded-2xl p-5 sm:p-6 shadow-xl space-y-5">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800/60">
-              <div>
-                <h3 className="text-base font-bold text-white flex items-center gap-2">
-                  <span>Vehicle IndexedDB Flash Storage</span>
-                  <span className="text-xs font-mono font-normal text-slate-400">
-                    ({offlineTrackCount} tracks • {formatBytes(offlineStorageBytes)})
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-base font-bold text-white">Vehicle IndexedDB Flash Storage</h3>
+                  <span
+                    className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg text-[11px] font-mono font-bold tabular-nums border"
+                    style={{
+                      backgroundColor:
+                        offlineBadgeStats.downloadedCount > 0 ? `${offlineStatusAccent}18` : 'rgba(15, 23, 42, 0.8)',
+                      borderColor:
+                        offlineBadgeStats.downloadedCount > 0 ? `${offlineStatusAccent}55` : 'rgba(51, 65, 85, 0.8)',
+                      color: offlineBadgeStats.downloadedCount > 0 ? offlineStatusAccent : '#94a3b8',
+                    }}
+                  >
+                    {offlineBadgeStats.downloadedCount > 0 ? (
+                      <CheckCircle className="w-3.5 h-3.5 shrink-0" />
+                    ) : (
+                      <HardDrive className="w-3.5 h-3.5 shrink-0" />
+                    )}
+                    <span>{offlineBadgeStats.compactLabel}</span>
+                    {offlineBadgeStats.downloadedCount > 0 && (
+                      <span className="opacity-80">({offlineBadgeStats.capUsagePercent}%)</span>
+                    )}
                   </span>
-                </h3>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Raw binary blobs stored locally on vehicle storage for 100% offline highway drives.
+                </div>
+                <p className="text-xs text-slate-400">
+                  Original audio files &amp; embedded artwork stored locally on vehicle flash for 100% offline highway drives.
                 </p>
               </div>
 
@@ -1895,8 +1974,97 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               </div>
             )}
 
+            {/* Offline Cache Transparency Statistics & Cap Meter */}
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <div className="rounded-xl bg-black/50 border border-slate-800/90 p-3">
+                  <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500">Downloaded</div>
+                  <div className="text-sm font-bold font-mono text-white mt-0.5 tabular-nums flex items-center gap-1.5">
+                    {offlineBadgeStats.downloadedCount > 0 && (
+                      <CheckCircle className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    )}
+                    <span>
+                      {offlineBadgeStats.downloadedCount}
+                      {offlineBadgeStats.totalLibraryCount > 0 ? ` / ${offlineBadgeStats.totalLibraryCount}` : ''}
+                    </span>
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-400 mt-0.5">
+                    {offlineBadgeStats.totalLibraryCount > 0
+                      ? `${offlineBadgeStats.libraryCoveragePercent}% of library cached`
+                      : 'Tracks saved offline'}
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-black/50 border border-slate-800/90 p-3">
+                  <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500">Cache Used</div>
+                  <div className="text-sm font-bold font-mono text-white mt-0.5 tabular-nums">
+                    {formatBytes(offlineBadgeStats.totalOfflineBytes)}
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-400 mt-0.5">
+                    {offlineBadgeStats.downloadedCount > 0
+                      ? `~${formatBytes(offlineBadgeStats.averageTrackBytes)} / track`
+                      : 'Audio + cover art'}
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-black/50 border border-slate-800/90 p-3">
+                  <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500">Rolling Cap</div>
+                  <div
+                    className="text-sm font-bold font-mono mt-0.5 tabular-nums"
+                    style={{ color: offlineBadgeStats.downloadedCount > 0 ? offlineStatusAccent : '#e2e8f0' }}
+                  >
+                    {offlineBadgeStats.capUsagePercent}% of {formatBytes(offlineBadgeStats.capBytes)}
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-400 mt-0.5">
+                    {formatBytes(offlineBadgeStats.remainingCapBytes)} remaining
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-black/50 border border-slate-800/90 p-3">
+                  <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500">Flash Quota</div>
+                  <div className="text-sm font-bold font-mono text-white mt-0.5 tabular-nums">
+                    {storageQuota ? formatBytes(storageQuota.usageBytes) : '—'}
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-400 mt-0.5">
+                    {storageQuota
+                      ? `${offlineBadgeStats.quotaUsagePercent ?? 0}% of ${formatBytes(storageQuota.quotaBytes)} · ${
+                          storageQuota.persisted ? 'Pinned' : 'Best-Effort'
+                        }`
+                      : 'Checking quota…'}
+                  </div>
+                </div>
+              </div>
+
+              {/* Visual Cap Utilization Meter */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[11px] font-mono text-slate-400 tabular-nums">
+                  <span>
+                    Audio: <strong className="text-slate-200">{formatBytes(offlineBadgeStats.audioBytes)}</strong>
+                    {offlineBadgeStats.artworkBytes > 0 && (
+                      <>
+                        {' '}
+                        · Art: <strong className="text-slate-200">{formatBytes(offlineBadgeStats.artworkBytes)}</strong>
+                      </>
+                    )}
+                  </span>
+                  <span>
+                    {formatBytes(offlineBadgeStats.totalOfflineBytes)} / {formatBytes(offlineBadgeStats.capBytes)}
+                  </span>
+                </div>
+                <div className="w-full h-2 bg-slate-900 border border-slate-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full transition-all duration-300 rounded-full"
+                    style={{
+                      width: `${Math.max(offlineBadgeStats.totalOfflineBytes > 0 ? 2 : 0, offlineBadgeStats.capUsagePercent)}%`,
+                      backgroundColor: offlineBadgeStats.downloadedCount > 0 ? offlineStatusAccent : accentHex,
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+
             {/* Real Origin Storage Quota & Persistence */}
-            <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
               <div>
                 <div className="text-sm font-semibold text-white">Headunit IndexedDB Flash Quota</div>
                 <div className="text-xs text-slate-400 font-mono">

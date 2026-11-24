@@ -56,18 +56,14 @@ if (import.meta.env.DEV && typeof navigator !== 'undefined' && 'serviceWorker' i
   navigator.serviceWorker
     .getRegistrations()
     .then((registrations) => {
-      let unregistered = false;
+      if (registrations.length === 0) return;
       registrations.forEach((reg) => {
-        const scriptUrl = reg.active?.scriptURL || reg.installing?.scriptURL || reg.waiting?.scriptURL || '';
-        if (scriptUrl.includes('dev-sw')) {
-          unregistered = true;
-          reg.unregister().catch(() => {});
-        }
+        reg.unregister().catch(() => {});
       });
-      if (unregistered && typeof caches !== 'undefined') {
+      if (typeof caches !== 'undefined') {
         caches.keys().then((keys) => {
           keys.forEach((key) => {
-            if (key.includes('workbox-precache')) {
+            if (key.includes('workbox')) {
               caches.delete(key).catch(() => {});
             }
           });

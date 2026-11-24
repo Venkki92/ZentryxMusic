@@ -287,29 +287,60 @@ async function downloadVerifiedApk(
   window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
 }
 
+const APK_STATUS_CACHE_TTL_MS = 30_000;
+const APK_STATUS_RATE_LIMIT_COOLDOWN_MS = 60_000;
+let sharedApkStatusCache: { data: AndroidApkStatusResponse; fetchedAt: number } | null = null;
+let sharedApkStatusInFlight: Promise<AndroidApkStatusResponse | null> | null = null;
+let apkStatusRateLimitedUntil = 0;
+
+async function fetchSharedApkStatus(forceRefresh = false): Promise<AndroidApkStatusResponse | null> {
+  const now = Date.now();
+  if (now < apkStatusRateLimitedUntil) {
+    return sharedApkStatusCache?.data ?? null;
+  }
+  if (!forceRefresh && sharedApkStatusCache && now - sharedApkStatusCache.fetchedAt < APK_STATUS_CACHE_TTL_MS) {
+    return sharedApkStatusCache.data;
+  }
+  if (sharedApkStatusInFlight) {
+    return sharedApkStatusInFlight;
+  }
+
+  sharedApkStatusInFlight = (async () => {
+    try {
+      const r = await fetch('/api/android-apk/status', { credentials: 'include' });
+      if (r.status === 429) {
+        apkStatusRateLimitedUntil = Date.now() + APK_STATUS_RATE_LIMIT_COOLDOWN_MS;
+        return sharedApkStatusCache?.data ?? null;
+      }
+      if (!r.ok) return sharedApkStatusCache?.data ?? null;
+      const data = (await r.json()) as AndroidApkStatusResponse;
+      sharedApkStatusCache = { data, fetchedAt: Date.now() };
+      return data;
+    } catch {
+      return sharedApkStatusCache?.data ?? null;
+    } finally {
+      sharedApkStatusInFlight = null;
+    }
+  })();
+
+  return sharedApkStatusInFlight;
+}
+
 export const AndroidApkDownloadButton: React.FC<{
   accentHex: string;
   compact?: boolean;
 }> = ({ accentHex, compact = false }) => {
-  const [status, setStatus] = useState<AndroidApkStatusResponse | null>(null);
+  const [status, setStatus] = useState<AndroidApkStatusResponse | null>(() => sharedApkStatusCache?.data ?? null);
   const [downloadingVariant, setDownloadingVariant] = useState<'release' | 'debug' | null>(null);
   const [progressPct, setProgressPct] = useState<number | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [rebuildRequested, setRebuildRequested] = useState(false);
 
-  const fetchStatus = async (): Promise<AndroidApkStatusResponse | null> => {
-    try {
-      const r = await fetch('/api/android-apk/status', { credentials: 'include', cache: 'no-store' });
-      if (!r.ok) return null;
-      return (await r.json()) as AndroidApkStatusResponse;
-    } catch {
-      return null;
-    }
-  };
+  const fetchStatus = (forceRefresh = false) => fetchSharedApkStatus(forceRefresh);
 
   useEffect(() => {
     let active = true;
-    void fetchStatus().then((data) => {
+    void fetchStatus(false).then((data) => {
       if (active && data) setStatus(data);
     });
     return () => {
@@ -321,14 +352,16 @@ export const AndroidApkDownloadButton: React.FC<{
     if (!status?.building && !rebuildRequested) return;
     let active = true;
     const timer = window.setInterval(() => {
-      void fetchStatus().then((data) => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (Date.now() < apkStatusRateLimitedUntil) return;
+      void fetchStatus(true).then((data) => {
         if (!active || !data) return;
         setStatus(data);
         if (!data.building) {
           setRebuildRequested(false);
         }
       });
-    }, 3000);
+    }, 10_000);
     return () => {
       active = false;
       window.clearInterval(timer);
@@ -369,7 +402,7 @@ export const AndroidApkDownloadButton: React.FC<{
       if (!res.ok) {
         throw new Error(`Rebuild failed (${res.status})`);
       }
-      const next = await fetchStatus();
+      const next = await fetchStatus(true);
       if (next) setStatus(next);
     } catch (err: any) {
       setRebuildRequested(false);

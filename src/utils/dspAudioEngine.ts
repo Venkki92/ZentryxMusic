@@ -3,11 +3,15 @@ import {
   COMPRESSOR_PROFILES,
   SURROUND_MODES,
   DspSettings,
+  SurroundMatrixDiagnostics,
+  SurroundModeId,
+  buildSurroundMatrixDiagnostics,
   calculateLoudnessContourGains,
   calculateRoadNoiseContourDb,
   calculateCabinStageGains,
   calculateStereoWidthMatrix,
   dbToLinearGain,
+  formatSurroundMatrixDiagnosticLog,
 } from './dspConsole';
 
 function smoothSet(param: AudioParam, value: number, ctx: AudioContext): void {
@@ -92,6 +96,8 @@ export class HeadunitDspEngine {
   private readonly compressorNode: DynamicsCompressorNode;
   private readonly peakLimiterShaper: WaveShaperNode;
   private lastCeilingDb: number = -999;
+  private lastLoggedSurroundMode: SurroundModeId | null = null;
+  public lastSurroundDiagnostics: SurroundMatrixDiagnostics | null = null;
 
   constructor(ctx: AudioContext) {
     this.ctx = ctx;
@@ -486,5 +492,18 @@ export class HeadunitDspEngine {
       this.peakLimiterShaper.curve =
         targetCeilingDb < -0.05 ? createCeilingCurve(dbToLinearGain(targetCeilingDb)) : null;
     }
+
+    const nextMode: SurroundModeId = settings.surroundMode ?? 'off';
+    if (this.lastLoggedSurroundMode !== null && this.lastLoggedSurroundMode !== nextMode) {
+      this.logSurroundMatrixDiagnostics(`HeadunitDspEngine.applySettings(${nextMode})`, settings);
+    }
+    this.lastLoggedSurroundMode = nextMode;
+  }
+
+  logSurroundMatrixDiagnostics(trigger: string, settings: DspSettings): SurroundMatrixDiagnostics {
+    const diag = buildSurroundMatrixDiagnostics(trigger, settings, this.ctx.sampleRate || 48000);
+    this.lastSurroundDiagnostics = diag;
+    console.info(formatSurroundMatrixDiagnosticLog(diag));
+    return diag;
   }
 }

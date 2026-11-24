@@ -112,16 +112,33 @@ function main() {
     return;
   }
 
-  const prev = readVersionProps();
+  const prevProps = readVersionProps();
+  let highestBuiltCode = prevProps.versionCode;
+  const metaPath = path.join(ANDROID_DIR, 'app/build/outputs/apk/release/output-metadata.json');
+  if (fs.existsSync(metaPath)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      const metaCode = Number(meta?.elements?.[0]?.versionCode);
+      if (Number.isFinite(metaCode) && metaCode > highestBuiltCode) {
+        highestBuiltCode = metaCode;
+      }
+    } catch {
+      // Ignore malformed metadata
+    }
+  }
+  const prev = { versionCode: highestBuiltCode, versionName: prevProps.versionName };
+
   if (setArg) {
     const nextName = setArg.slice('--set='.length).trim();
     writeVersionProps(prev.versionCode, nextName);
   } else if (bumpPatch) {
     const nextName = incrementPatchVersion(prev.versionName);
     writeVersionProps(prev.versionCode, nextName);
+  } else if (prev.versionCode !== prevProps.versionCode) {
+    writeVersionProps(prev.versionCode, prev.versionName);
   }
   console.log(
-    `[APK] Starting Gradle build (current v${prev.versionName} #${prev.versionCode}; Gradle will auto-increment VERSION_CODE)...`
+    `[APK] Starting Gradle build (current v${prev.versionName} #${prev.versionCode}; Gradle will auto-increment VERSION_CODE to #${prev.versionCode + 1})...`
   );
 
   const javaHome = fs.existsSync('/usr/lib/jvm/java-17-openjdk-amd64')

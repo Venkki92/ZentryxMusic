@@ -2221,16 +2221,39 @@ private fun SongListItem(
             Spacer(modifier = Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = song.title,
-                    style = MaterialTheme.typography.bodyMedium.copy(
-                        fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.SemiBold,
-                        color = if (isCurrent) accent else Color.White,
-                        fontSize = 14.sp
-                    ),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = song.title,
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.SemiBold,
+                            color = if (isCurrent) accent else Color.White,
+                            fontSize = 14.sp
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (song.isDownloaded && song.sourceType != "LOCAL") {
+                        Box(
+                            modifier = Modifier
+                                .size(16.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF10B981).copy(alpha = 0.20f))
+                                .border(0.75.dp, Color(0xFF10B981).copy(alpha = 0.55f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Cached in offline storage",
+                                tint = Color(0xFF34D399),
+                                modifier = Modifier.size(10.dp)
+                            )
+                        }
+                    }
+                }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
                         text = if (song.sourceType == "LOCAL") "[USB] ${song.artist} • ${song.album}" else "${song.artist} • ${song.album}",
@@ -2329,8 +2352,8 @@ private fun SongListItem(
                         } else {
                             Icon(
                                 imageVector = if (song.isDownloaded) Icons.Default.CheckCircle else Icons.Default.Download,
-                                contentDescription = "Download Offline",
-                                tint = if (song.isDownloaded) accent else Color(0xFF64748B),
+                                contentDescription = if (song.isDownloaded) "Cached in offline storage" else "Download Offline",
+                                tint = if (song.isDownloaded) Color(0xFF34D399) else Color(0xFF64748B),
                                 modifier = Modifier.size(17.dp)
                             )
                         }

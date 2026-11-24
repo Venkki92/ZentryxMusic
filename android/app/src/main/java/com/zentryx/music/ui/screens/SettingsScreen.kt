@@ -70,6 +70,7 @@ fun SettingsScreen(
     val replayGainEnabled by viewModel.replayGainEnabled.collectAsStateWithLifecycle()
     val crossfadeSeconds by viewModel.crossfadeSeconds.collectAsStateWithLifecycle()
     val cacheSizeBytes by viewModel.cacheSizeBytes.collectAsStateWithLifecycle()
+    val offlineStats by viewModel.offlineStorageStats.collectAsStateWithLifecycle()
     val isPurging by viewModel.isPurgingCache.collectAsStateWithLifecycle()
     val scanProgress by viewModel.scanProgress.collectAsStateWithLifecycle()
     val isLocalScanning by viewModel.isLocalScanning.collectAsStateWithLifecycle()
@@ -227,6 +228,38 @@ fun SettingsScreen(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowForward,
                                 contentDescription = "Forward",
                                 tint = if (canGoForward) Color.White else Color(0xFF475569)
+                            )
+                        }
+                    }
+                },
+                actions = {
+                    val hasOffline = offlineStats.downloadedCount > 0
+                    val badgeTint = if (hasOffline) Color(0xFF22C55E) else Color(0xFF94A3B8)
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (hasOffline) Color(0xFF22C55E).copy(alpha = 0.14f) else Color(0xFF0A0F1E),
+                        modifier = Modifier
+                            .padding(end = 12.dp)
+                            .border(0.75.dp, badgeTint.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (hasOffline) Icons.Default.CheckCircle else Icons.Default.DownloadForOffline,
+                                contentDescription = null,
+                                tint = badgeTint,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Text(
+                                text = "Offline: ${offlineStats.compactBadgeLabel}",
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                color = if (hasOffline) Color(0xFF86EFAC) else Color(0xFF94A3B8),
+                                maxLines = 1
                             )
                         }
                     }
@@ -596,10 +629,38 @@ fun SettingsScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Icon(imageVector = Icons.Default.DownloadForOffline, contentDescription = null, tint = accentColor, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(8.dp))
                                 Text("OFFLINE STORAGE TARGET", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black, letterSpacing = 1.sp, color = Color.White))
+                                val hasCached = offlineStats.downloadedCount > 0
+                                val badgeColor = if (hasCached) Color(0xFF22C55E) else Color(0xFF64748B)
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = badgeColor.copy(alpha = 0.16f),
+                                    modifier = Modifier.border(0.5.dp, badgeColor.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        if (hasCached) {
+                                            Icon(
+                                                imageVector = Icons.Default.CheckCircle,
+                                                contentDescription = null,
+                                                tint = badgeColor,
+                                                modifier = Modifier.size(11.dp)
+                                            )
+                                        }
+                                        Text(
+                                            text = offlineStats.compactBadgeLabel,
+                                            fontSize = 9.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (hasCached) Color(0xFF86EFAC) else Color(0xFF94A3B8)
+                                        )
+                                    }
+                                }
                             }
                             OutlinedButton(
                                 onClick = {
@@ -613,6 +674,88 @@ fun SettingsScreen(
                                 Icon(imageVector = Icons.Default.FolderOpen, contentDescription = null, tint = accentColor, modifier = Modifier.size(14.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text("Select Folder", fontSize = 10.sp, color = accentColor, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                        // Cache Transparency Statistics Strip
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = Color(0xFF0A0F1E),
+                                modifier = Modifier.weight(1f).border(0.5.dp, borderColor, RoundedCornerShape(8.dp))
+                            ) {
+                                Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                                    Text("DOWNLOADED", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF64748B))
+                                    Text(
+                                        text = if (offlineStats.totalLibraryCount > 0) {
+                                            "${offlineStats.downloadedCount} / ${offlineStats.totalLibraryCount}"
+                                        } else {
+                                            "${offlineStats.downloadedCount} tracks"
+                                        },
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Black,
+                                        color = if (offlineStats.downloadedCount > 0) Color(0xFF4ADE80) else Color.White
+                                    )
+                                    Text(
+                                        text = "${offlineStats.libraryCoveragePercent}% of library",
+                                        fontSize = 9.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                }
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = Color(0xFF0A0F1E),
+                                modifier = Modifier.weight(1f).border(0.5.dp, borderColor, RoundedCornerShape(8.dp))
+                            ) {
+                                Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                                    Text("OFFLINE FILES", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF64748B))
+                                    Text(
+                                        text = com.zentryx.music.viewmodel.OfflineStorageStats.formatOfflineBytes(offlineStats.offlineFilesBytes),
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Black,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        text = if (offlineStats.downloadedCount > 0) {
+                                            "~${com.zentryx.music.viewmodel.OfflineStorageStats.formatOfflineBytes(offlineStats.averageTrackBytes)}/trk"
+                                        } else {
+                                            "Original audio"
+                                        },
+                                        fontSize = 9.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                }
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = Color(0xFF0A0F1E),
+                                modifier = Modifier.weight(1f).border(0.5.dp, borderColor, RoundedCornerShape(8.dp))
+                            ) {
+                                Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                                    Text("STREAM CACHE", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF64748B))
+                                    Text(
+                                        text = "${com.zentryx.music.viewmodel.OfflineStorageStats.formatOfflineBytes(offlineStats.streamCacheBytes)} / 250 MB",
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Black,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "Total ${com.zentryx.music.viewmodel.OfflineStorageStats.formatOfflineBytes(offlineStats.totalLocalBytes)}",
+                                        fontSize = 9.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = accentColor
+                                    )
+                                }
                             }
                         }
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {

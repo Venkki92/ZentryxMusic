@@ -117,6 +117,8 @@ export interface RangeMetadataRequest {
   maxTagBytes?: number;
 }
 
+let metadataRateLimitedUntil = 0;
+
 /**
  * Two-stage HTTP Range header metadata extractor:
  * 1) Peeks initial 64 KiB header chunk.
@@ -133,6 +135,10 @@ export async function extractTrackMetadataFromUrl({
   initialBytes = INITIAL_HEADER_BYTES,
   maxTagBytes = MAX_TAG_FETCH_BYTES,
 }: RangeMetadataRequest): Promise<ParsedAudioMetadata | null> {
+  if (Date.now() < metadataRateLimitedUntil) {
+    return null;
+  }
+
   const existing = inFlightRequests.get(trackId);
   if (existing) {
     return existing;
@@ -153,6 +159,10 @@ export async function extractTrackMetadataFromUrl({
       cache: 'no-store',
     });
 
+    if (res.status === 429) {
+      metadataRateLimitedUntil = Date.now() + 60_000;
+      return null;
+    }
     if (!res.ok && res.status !== 206) {
       return null;
     }
@@ -165,7 +175,7 @@ export async function extractTrackMetadataFromUrl({
     const declaredTagBytes = getID3v2TagTotalSize(firstChunk);
     let workingBuffer = firstChunk;
 
-    if (declaredTagBytes > firstChunk.length && declaredTagBytes <= maxTagBytes) {
+    if (declaredTagBytes > firstChunk.length && declaredTagBytes <= maxTagBytes && Date.now() >= metadataRateLimitedUntil) {
       const targetEnd = Math.min(declaredTagBytes, maxTagBytes) - 1;
       const expandedHeaders: Record<string, string> = {
         Range: `bytes=0-${targetEnd}`,
@@ -179,7 +189,9 @@ export async function extractTrackMetadataFromUrl({
         signal,
         cache: 'no-store',
       });
-      if (expandedRes.ok || expandedRes.status === 206) {
+      if (expandedRes.status === 429) {
+        metadataRateLimitedUntil = Date.now() + 60_000;
+      } else if (expandedRes.ok || expandedRes.status === 206) {
         const expandedBytes = new Uint8Array(await expandedRes.arrayBuffer());
         if (expandedBytes.length >= firstChunk.length) {
           workingBuffer = expandedBytes;
@@ -193,6 +205,7 @@ export async function extractTrackMetadataFromUrl({
     const missingTextTags = !parsed?.title && !parsed?.artist && !parsed?.album;
     if (
       missingTextTags &&
+      Date.now() >= metadataRateLimitedUntil &&
       totalSize &&
       totalSize > 256 &&
       (!fileName || /\.mp3$/i.test(fileName))
@@ -211,7 +224,9 @@ export async function extractTrackMetadataFromUrl({
           signal,
           cache: 'no-store',
         });
-        if (tailRes.ok || tailRes.status === 206) {
+        if (tailRes.status === 429) {
+          metadataRateLimitedUntil = Date.now() + 60_000;
+        } else if (tailRes.ok || tailRes.status === 206) {
           const tailBuf = new Uint8Array(await tailRes.arrayBuffer());
           const v1 = parseID3v1(tailBuf);
           if (v1) {

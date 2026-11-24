@@ -236,6 +236,10 @@ export interface DspPreset16 {
   hpfCutoffHz?: HpfCutoffHz;
   loudnessContour?: boolean;
   compressorProfile?: CompressorProfileId;
+  surroundMode?: SurroundModeId;
+  surroundIntensity?: number;
+  centerCoherence?: number;
+  virtualHeight?: number;
   isCustom?: boolean;
 }
 
@@ -646,6 +650,11 @@ export function matchPresetForTrack(
 }
 
 export function applyPresetToDsp(current: DspSettings, preset: DspPreset16): DspSettings {
+  const resolvedSurroundMode = preset.surroundMode ?? current.surroundMode;
+  const resolvedMonoFoldDown =
+    preset.surroundMode !== undefined && resolvedSurroundMode !== 'off'
+      ? false
+      : current.monoFoldDown;
   return {
     ...current,
     dspEnabled: true,
@@ -657,7 +666,124 @@ export function applyPresetToDsp(current: DspSettings, preset: DspPreset16): Dsp
     hpfCutoffHz: preset.hpfCutoffHz ?? current.hpfCutoffHz,
     loudnessContour: preset.loudnessContour ?? current.loudnessContour,
     compressorProfile: preset.compressorProfile ?? current.compressorProfile,
+    surroundMode: resolvedSurroundMode,
+    surroundIntensity:
+      preset.surroundIntensity !== undefined
+        ? clampNumber(preset.surroundIntensity, 0, 100, 5)
+        : current.surroundIntensity,
+    centerCoherence:
+      preset.centerCoherence !== undefined
+        ? clampNumber(preset.centerCoherence, 0, 100, 5)
+        : current.centerCoherence,
+    virtualHeight:
+      preset.virtualHeight !== undefined
+        ? clampNumber(preset.virtualHeight, 0, 100, 5)
+        : current.virtualHeight,
+    monoFoldDown: resolvedMonoFoldDown,
   };
+}
+
+export interface SurroundMatrixDiagnostics {
+  trigger: string;
+  selectedPresetId: string;
+  dspEnabled: boolean;
+  monoFoldDown: boolean;
+  surroundActive: boolean;
+  modeId: SurroundModeId;
+  modeBadge: string;
+  surroundIntensityPercent: number;
+  centerCoherencePercent: number;
+  virtualHeightPercent: number;
+  baseStereoWidthPercent: number;
+  effectiveStereoWidthPercent: number;
+  sampleRateHz: number;
+  haasLeftMs: number;
+  haasRightMs: number;
+  sideBandpassHz: number;
+  sideBandpassQ: number;
+  sideWetGain: number;
+  centerBoostDb: number;
+  centerInjectGain: number;
+  heightBoostDb: number;
+  allPassPhase90Active: boolean;
+  xtcGain: number;
+}
+
+export function buildSurroundMatrixDiagnostics(
+  trigger: string,
+  settings: DspSettings,
+  sampleRateHz = 48000
+): SurroundMatrixDiagnostics {
+  const modeId: SurroundModeId = settings.surroundMode ?? 'off';
+  const spec = SURROUND_MODES[modeId] ?? SURROUND_MODES.off;
+  const surroundActive = Boolean(settings.dspEnabled && !settings.monoFoldDown && modeId !== 'off');
+  const intensity = clampNumber(settings.surroundIntensity ?? 65, 0, 100, 1);
+  const coherence = clampNumber(settings.centerCoherence ?? 55, 0, 100, 1);
+  const height = clampNumber(settings.virtualHeight ?? 45, 0, 100, 1);
+  const baseWidth = settings.monoFoldDown ? 0 : clampNumber(settings.stereoWidthPercent ?? 100, 0, 150, 1);
+  const intensityNorm = intensity / 100;
+  const coherenceNorm = coherence / 100;
+  const heightNorm = height / 100;
+
+  const effectiveWidth = settings.monoFoldDown
+    ? 0
+    : surroundActive
+      ? Math.min(150, Math.round(baseWidth + (spec.sideWidthTarget - 100) * intensityNorm))
+      : baseWidth;
+
+  const centerBoostDb = surroundActive ? spec.centerBoostMaxDb * coherenceNorm : 0;
+  const centerInjectGain = surroundActive
+    ? Math.max(0, Math.min(0.45, (dbToLinearGain(centerBoostDb) - 1) * 0.7))
+    : 0;
+  const sideWetGain = surroundActive ? spec.sideWetScale * intensityNorm : 0;
+  const heightBoostDb = surroundActive ? spec.heightBoostMaxDb * heightNorm : 0;
+  const xtcGain = surroundActive ? spec.crosstalkCancelGain * intensityNorm : 0;
+
+  return {
+    trigger,
+    selectedPresetId: settings.selectedPresetId,
+    dspEnabled: settings.dspEnabled,
+    monoFoldDown: settings.monoFoldDown,
+    surroundActive,
+    modeId,
+    modeBadge: spec.badge,
+    surroundIntensityPercent: intensity,
+    centerCoherencePercent: coherence,
+    virtualHeightPercent: height,
+    baseStereoWidthPercent: baseWidth,
+    effectiveStereoWidthPercent: effectiveWidth,
+    sampleRateHz,
+    haasLeftMs: surroundActive ? spec.haasLeftMs : 0,
+    haasRightMs: surroundActive ? spec.haasRightMs : 0,
+    sideBandpassHz: spec.sideBandpassHz,
+    sideBandpassQ: spec.sideBandpassQ,
+    sideWetGain,
+    centerBoostDb,
+    centerInjectGain,
+    heightBoostDb,
+    allPassPhase90Active: surroundActive && spec.useAllPassPhase,
+    xtcGain,
+  };
+}
+
+export function formatSurroundMatrixDiagnosticLog(diag: SurroundMatrixDiagnostics): string {
+  return (
+    `[DSP Surround Diagnostics] trigger=${diag.trigger}` +
+    ` | mode=${diag.modeId} (${diag.modeBadge})` +
+    ` | active=${diag.surroundActive}` +
+    ` | dspEnabled=${diag.dspEnabled}` +
+    ` | mono=${diag.monoFoldDown}` +
+    ` | preset=${diag.selectedPresetId}` +
+    ` | width=${diag.baseStereoWidthPercent}%->${diag.effectiveStereoWidthPercent}%` +
+    ` | intensity=${diag.surroundIntensityPercent}%` +
+    ` | centerLock=${diag.centerCoherencePercent}% (+${diag.centerBoostDb.toFixed(2)}dB, inj=${diag.centerInjectGain.toFixed(3)})` +
+    ` | height=${diag.virtualHeightPercent}% (+${diag.heightBoostDb.toFixed(2)}dB@7.2kHz)` +
+    ` | haas=${diag.haasLeftMs.toFixed(1)}/${diag.haasRightMs.toFixed(1)}ms` +
+    ` | sideBP=${diag.sideBandpassHz}Hz(Q=${diag.sideBandpassQ.toFixed(2)},wet=${diag.sideWetGain.toFixed(3)})` +
+    ` | ap90=${diag.allPassPhase90Active}` +
+    ` | xtc=${diag.xtcGain.toFixed(3)}` +
+    ` | sr=${diag.sampleRateHz}Hz`
+  );
 }
 
 /**
@@ -897,6 +1023,16 @@ export function sanitizeCustomPresets(raw: unknown): DspPreset16[] {
       bands16: sanitizeBands16(obj.bands16),
       bassBoostDb: clampNumber(Number(obj.bassBoostDb ?? 0), 0, 12, 0.5),
       preampDb: clampNumber(Number(obj.preampDb ?? 0), -12, 6, 0.5),
+      surroundMode:
+        typeof obj.surroundMode === 'string' && SURROUND_MODE_ORDER.includes(obj.surroundMode as SurroundModeId)
+          ? (obj.surroundMode as SurroundModeId)
+          : undefined,
+      surroundIntensity:
+        obj.surroundIntensity !== undefined ? clampNumber(Number(obj.surroundIntensity), 0, 100, 5) : undefined,
+      centerCoherence:
+        obj.centerCoherence !== undefined ? clampNumber(Number(obj.centerCoherence), 0, 100, 5) : undefined,
+      virtualHeight:
+        obj.virtualHeight !== undefined ? clampNumber(Number(obj.virtualHeight), 0, 100, 5) : undefined,
       isCustom: true,
     });
   }

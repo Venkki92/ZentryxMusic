@@ -17,10 +17,13 @@ import {
   buildDspResponseCurvePoints,
   matchPresetForTrack,
   applyPresetToDsp,
+  buildSurroundMatrixDiagnostics,
+  formatSurroundMatrixDiagnosticLog,
   sanitizeDspSettings,
   sanitizeCustomPresets,
   dbToLinearGain,
   DspBandGains16,
+  SurroundModeId,
 } from './dspConsole';
 
 describe('DSP Console Engine Math & Validation', () => {
@@ -290,12 +293,105 @@ describe('DSP Console Engine Math & Validation', () => {
     const presets = sanitizeCustomPresets([
       null,
       { id: 'bad' },
-      { id: 'ok', name: '  W203 Custom  ', bands16: [2, 3], preampDb: -3, bassBoostDb: 4 },
+      {
+        id: 'ok',
+        name: '  W203 Custom  ',
+        bands16: [2, 3],
+        preampDb: -3,
+        bassBoostDb: 4,
+        surroundMode: 'logic7_surround',
+        surroundIntensity: 85,
+        centerCoherence: 65,
+        virtualHeight: 55,
+      },
     ]);
     assert.equal(presets.length, 1);
     assert.equal(presets[0].name, 'W203 Custom');
     assert.equal(presets[0].isCustom, true);
     assert.equal(presets[0].preampDb, -3);
+    assert.equal(presets[0].surroundMode, 'logic7_surround');
+    assert.equal(presets[0].surroundIntensity, 85);
+  });
+
+  it('verifies applyPresetToDsp preserves Logic 7 for EQ presets and applies explicit surround presets', () => {
+    const withLogic7 = {
+      ...DEFAULT_DSP_SETTINGS,
+      dspEnabled: false,
+      surroundMode: 'logic7_surround' as SurroundModeId,
+      surroundIntensity: 80,
+      centerCoherence: 65,
+      virtualHeight: 45,
+    };
+
+    const afterFactoryEq = applyPresetToDsp(withLogic7, FACTORY_DSP_PRESETS[1]);
+    assert.equal(afterFactoryEq.dspEnabled, true);
+    assert.equal(afterFactoryEq.selectedPresetId, FACTORY_DSP_PRESETS[1].id);
+    assert.equal(afterFactoryEq.surroundMode, 'logic7_surround');
+    assert.equal(afterFactoryEq.surroundIntensity, 80);
+
+    const customSurroundPreset = {
+      ...FACTORY_DSP_PRESETS[0],
+      id: 'custom_atmos',
+      name: 'Atmos Stage',
+      isCustom: true,
+      surroundMode: 'dolby_atmos_virtual' as SurroundModeId,
+      surroundIntensity: 90,
+      centerCoherence: 70,
+      virtualHeight: 85,
+    };
+    const afterSurroundPreset = applyPresetToDsp(
+      { ...withLogic7, monoFoldDown: true },
+      customSurroundPreset
+    );
+    assert.equal(afterSurroundPreset.dspEnabled, true);
+    assert.equal(afterSurroundPreset.monoFoldDown, false);
+    assert.equal(afterSurroundPreset.surroundMode, 'dolby_atmos_virtual');
+    assert.equal(afterSurroundPreset.surroundIntensity, 90);
+    assert.equal(afterSurroundPreset.centerCoherence, 70);
+    assert.equal(afterSurroundPreset.virtualHeight, 85);
+  });
+
+  it('builds and formats Surround Matrix diagnostic logs across all 7 surround modes', () => {
+    const allModes = Object.keys(SURROUND_MODES) as SurroundModeId[];
+    assert.equal(allModes.length, 7);
+
+    for (const mode of allModes) {
+      const settings = {
+        ...DEFAULT_DSP_SETTINGS,
+        dspEnabled: true,
+        surroundMode: mode,
+        surroundIntensity: 75,
+        centerCoherence: 60,
+        virtualHeight: 70,
+      };
+      const diag = buildSurroundMatrixDiagnostics('unit_test', settings, 48000);
+      const formatted = formatSurroundMatrixDiagnosticLog(diag);
+
+      assert.equal(diag.modeId, mode);
+      assert.equal(diag.surroundActive, mode !== 'off');
+      assert.ok(formatted.includes('[DSP Surround Diagnostics]'));
+      assert.ok(formatted.includes(`mode=${mode}`));
+      assert.ok(formatted.includes('width='));
+      assert.ok(formatted.includes('haas='));
+
+      if (mode === 'off') {
+        assert.equal(diag.effectiveStereoWidthPercent, settings.stereoWidthPercent);
+        assert.equal(diag.sideWetGain, 0);
+      } else {
+        assert.ok(diag.effectiveStereoWidthPercent >= settings.stereoWidthPercent);
+        assert.ok(diag.sideWetGain > 0);
+      }
+      if (mode === 'dolby_pro_logic_ii') {
+        assert.equal(diag.allPassPhase90Active, true);
+      }
+      if (mode === 'dolby_atmos_virtual') {
+        assert.ok(diag.heightBoostDb > 2.0);
+      }
+      if (mode === 'virtual_surround_360') {
+        assert.ok(diag.xtcGain > 0.08);
+      }
+    }
   });
 });
+
 

@@ -798,6 +798,19 @@ function resolveApkInfo(variant: 'release' | 'debug'): ApkVariantInfo {
   };
 }
 
+let staleCheckCache: { value: boolean; checkedAt: number } | null = null;
+const STALE_CHECK_CACHE_TTL_MS = 15_000;
+
+function isAndroidApkStaleCached(cwd: string): boolean {
+  const now = Date.now();
+  if (staleCheckCache && now - staleCheckCache.checkedAt < STALE_CHECK_CACHE_TTL_MS) {
+    return staleCheckCache.value;
+  }
+  const value = isAndroidApkStale(cwd);
+  staleCheckCache = { value, checkedAt: now };
+  return value;
+}
+
 export function handleAndroidApkStatusRequest(_req: IncomingMessage, res: ServerResponse): void {
   const cwd = process.cwd();
   const release = resolveApkInfo('release');
@@ -807,7 +820,7 @@ export function handleAndroidApkStatusRequest(_req: IncomingMessage, res: Server
 
   res.statusCode = 200;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Cache-Control', activeApkBuild.running ? 'no-store' : 'private, max-age=10');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.end(
     JSON.stringify({
@@ -815,7 +828,7 @@ export function handleAndroidApkStatusRequest(_req: IncomingMessage, res: Server
       version: activeVersion,
       versionCode: activeVersionCode,
       applicationId: 'com.zentryx.music',
-      stale: isAndroidApkStale(cwd),
+      stale: isAndroidApkStaleCached(cwd),
       building: activeApkBuild.running,
       buildStartedAt: activeApkBuild.startedAt,
       buildError: activeApkBuild.lastError,
@@ -873,6 +886,7 @@ export function handleAndroidApkRebuildRequest(req: IncomingMessage, res: Server
     return;
   }
 
+  staleCheckCache = null;
   activeApkBuild = {
     running: true,
     startedAt: new Date().toISOString(),
@@ -890,6 +904,7 @@ export function handleAndroidApkRebuildRequest(req: IncomingMessage, res: Server
   });
 
   child.on('close', (code) => {
+    staleCheckCache = null;
     activeApkBuild = {
       running: false,
       startedAt: activeApkBuild.startedAt,
@@ -898,6 +913,7 @@ export function handleAndroidApkRebuildRequest(req: IncomingMessage, res: Server
   });
 
   child.on('error', (err) => {
+    staleCheckCache = null;
     activeApkBuild = {
       running: false,
       startedAt: activeApkBuild.startedAt,
